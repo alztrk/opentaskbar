@@ -2,22 +2,23 @@
 
 ## §C3 locale contract — delivered
 
-- 14 Rust catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` now have **1129 keys each, identical key sets** (verified by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`).
-- The five C#-surplus Antigravity keys are present in all 14 languages with the real C# translations: `WidgetAiUsageAntigravity`, `WidgetAiUsageAntigravityDescription`, `AiUsageGroupGemini`, `AiUsageGroupClaudeGpt`, `AiUsageAntigravityGroupsLabel`.
+- 14 Rust catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` now have **1361 keys each, identical key sets** (verified by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`).
+- The final key-contract sweep removed five retired AI-grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; `WidgetDensityCompact`, `WidgetDensityFull` and `AiUsageRingLabel` already shipped) with real translations in all 14 languages.
 - 32 additional feature keys cover the C3 prefixes: `SpeedTestDownload/Upload/Jitter/Result/Running`, `FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioWifi/Bluetooth/On/Off`, `FullBackupInspect/Contents`, `ThemeEditorTitle/Save/Reset/Token/Advanced/Autosave`, `SeekTo/Label/Duration/Unavailable`, `HardwareUnavailable`, `StartMenuOpen/Close/Toggle`, `ProfileHiddenApps`.
 
 ## For WS-C: replace English literals with `loc::t("...")`
 
 WS-C owns the widget code, so I did not touch it. The keys above are ready to consume; the exact spellings are the authoritative names. Priorities:
 
-1. Antigravity provider chip/flyout → `WidgetAiUsageAntigravity`, `WidgetAiUsageAntigravityDescription`, `AiUsageGroupGemini`, `AiUsageGroupClaudeGpt`, `AiUsageAntigravityGroupsLabel`. The previous "C# build only" README wording is now outdated — `Rust-Port/README.md` says Antigravity is included.
-2. Speed-test flyout phases/results → `SpeedTestTestingPing`, `SpeedTestTestingDownload`, `SpeedTestTestingUpload` (pre-existing) plus `SpeedTestDownload`, `SpeedTestUpload`, `SpeedTestJitter`, `SpeedTestResult`, `SpeedTestRunning`.
-3. Focus break phase/session → `FocusBreakTitle`, `FocusBreakStart`, `FocusBreakSkip`, `FocusBreakCountdown` (`{0}` seconds), `FocusBreakComplete`, `FocusSession` (`{0}` number).
-4. Media seek/cover → `SeekTo` (`{0}`), `SeekLabel`, `SeekDuration`, `SeekUnavailable`.
-5. Quick-settings radios → `RadioWifi`, `RadioBluetooth`, `RadioOn`, `RadioOff` alongside the pre-existing `RadioToggle`, `RadioConfirmToggle`, `RadioSettings`.
-6. Full backup / theme editor / hardware gating / Start menu / profile hidden apps → the corresponding keys listed above.
+1. Window picker / magnification / Fjord → `WindowPickerTitle`, `WindowPickerPrevious`, `WindowPickerNext`, `WindowPickerPage`, `MagnificationExpandsDock`, `MagnificationExpandsDockDescription`, `FjordFiles`, `FjordFilesOpen`, `FjordBarShow`, `FjordBarHide`.
+2. Wi-Fi flyout → `WifiScan`, `WifiConnect`, `WifiDisconnect`, `WifiPassword`, `WifiNoNetworks`, `WifiConnectFailed`.
+3. Speed-test flyout phases/results → `SpeedTestTestingPing`, `SpeedTestTestingDownload`, `SpeedTestTestingUpload` (pre-existing) plus `SpeedTestDownload`, `SpeedTestUpload`, `SpeedTestJitter`, `SpeedTestResult`, `SpeedTestRunning`.
+4. Focus break phase/session → `FocusBreakTitle`, `FocusBreakStart`, `FocusBreakSkip`, `FocusBreakCountdown` (`{0}` seconds), `FocusBreakComplete`, `FocusSession` (`{0}` number).
+5. Media seek/cover → `SeekTo` (`{0}`), `SeekLabel`, `SeekDuration`, `SeekUnavailable`.
+6. Quick-settings radios → `RadioWifi`, `RadioBluetooth`, `RadioOn`, `RadioOff` alongside the pre-existing `RadioToggle`, `RadioConfirmToggle`, `RadioSettings`.
+7. Full backup / theme editor / hardware gating / Start menu / profile hidden apps → the corresponding keys listed above.
 
-Translation values for the 32 new keys are English in every catalog; that is acceptable for the key-set contract, but translators should localize them before release. A missing key resolves to the key name and never fails the build.
+All new keys are translated in every catalog. A missing key resolves to the key name and never fails the build.
 
 ## Merge / union requests
 

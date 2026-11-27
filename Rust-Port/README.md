@@ -1,6 +1,6 @@
 # OpenTaskbar — Rust port
 
-A clean-sheet Rust + GPUI implementation of the OpenTaskbar floating dock and widget shell for Windows 10/11. It targets the same `settings.json` schema, locale catalogs, theme packs and recovery journal as the C# build, so switching between builds never loses user data.
+A clean-sheet Rust + GPUI implementation of the OpenTaskbar floating dock and widget shell for Windows 10/11. It targets the same `settings.json` schema, locale catalogs, theme packs and recovery journal as the C# build. Each build keeps its own settings folder, so switching between builds needs a manual copy of `settings.json` (or a full-backup import) — there is no automatic migration.
 
 > Status: in active parity work. Features marked **flag** are controlled by `DockSettings.extra`; each row below states the real default and its fallback. `native_flyout_reposition` is **on by default** now that Start anchoring is verified and journal-backed. The C# build remains the reference implementation.
 
@@ -53,7 +53,7 @@ Uses `packaging/msix/AppxManifest.Rust.xml` and the shared visual assets in `pac
 
 ## Settings
 
-Settings live at `%LOCALAPPDATA%\OpenTaskBar-Rust\settings.json` and use PascalCase keys identical to C#. Unknown keys are preserved through `#[serde(flatten)] extra`, and invalid JSON is backed up to `settings.json.invalid-<timestamp>` before defaults are restored. Per-profile data (hidden apps, widget order, dock order, widths, theme and hotkeys) is likewise preserved on round-trip.
+Settings live at `%LOCALAPPDATA%\OpenTaskBar-Rust\settings.json` and use PascalCase keys identical to C#. Unknown keys are preserved through `#[serde(flatten)] extra`, and invalid JSON is backed up to `settings.json.invalid-<timestamp>` before defaults are restored. Per-profile data (hidden apps, widget order, dock order, widths, theme and hotkeys) is likewise preserved on round-trip. The C# build writes to `%LOCALAPPDATA%\OpenTaskbar\settings.json`; the Rust port does not read or migrate that folder, so copy the file into the Rust folder (or use full-backup import) to carry preferences over.
 
 Common groups: **General** (language, startup, updates), **Appearance** (theme packs, surfaces, radius, fonts), **Dock layout** (edge, width/height/gap units, magnification, auto-hide), **Behavior** (hotkeys, focus mode, desktop integration), **Widgets** (catalog, density, per-widget settings), **Background apps** (tray pins and live icon strip), **Profiles**.
 
@@ -62,7 +62,7 @@ The C# `IsValid()` rules are mirrored in the Rust validation path: hotkeys must 
 ## Feature list (parity notes)
 
 - **Dock:** horizontal and vertical edges, mirrored dock, secondary light strip, fisheye magnification with a critically damped spring and overlap guard, auto-hide with shell-overlay filtering, live drag/drop, folder stacks, app groups, Aero Peek, tray strip, Start/search/task view buttons.
-- **Widgets:** AI usage (8 providers **including Antigravity** — no longer C#-only), weather with forecast and °F, media with seek/cover/per-app volume and LibreWolf timeline recovery, network speed test, focus sessions with break phase, audio mixer, Bluetooth/wireless battery, storage, keyboard layout, system stats with GPU meters, countdown/stopwatch with centiseconds, quick settings with real Wi-Fi/Bluetooth toggles.
+- **Widgets:** AI usage (per-provider quota widgets), weather with forecast and °F, media with seek/cover/per-app volume and LibreWolf timeline recovery, network speed test, focus sessions with break phase, audio mixer, Bluetooth/wireless battery, storage, keyboard layout, system stats with GPU meters, countdown/stopwatch with centiseconds, quick settings with real Wi-Fi/Bluetooth toggles.
 - **Flyouts:** settings window with searchable rows, theme editor, full backup (`.otbackup`), hotkey recording, country/city picker, AI account sign-in, dynamic island with expanded details.
 - **Reliability:** taskbar replacement session with retry/verify, flyout position journal with generation counter, watchdog heartbeat, overlay-aware auto-hide, per-app audio session matching, Trusted release pipeline (checksums, SLSA attestation, optional VirusTotal scan).
 
@@ -91,7 +91,7 @@ The final integration wires these production entry points; integration test file
 
 ## Localization
 
-14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1342 keys** — the 999 C# keys plus Rust-port additions (DI/calendar/font, new widget features, the 5 Antigravity keys, 207 new UI localization keys for island details, Settings/theme and widgets, 3 keys covering the last English-literal fallbacks, and 3 keys for the searchable location pickers / geolocation status). `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](../docs/localization.md).
+14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1361 keys** — Rust-port additions on top of the 999 C# keys: DI/calendar/font, C3 widget features, 207 UI localization keys for island details, Settings/theme and widgets, 27 window-picker/magnification/Fjord/Wi-Fi/settings labels (24 newly added; three already shipped), 3 keys covering the last English-literal fallbacks, and 3 keys for the searchable location pickers / geolocation status. `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](../docs/localization.md).
 
 ## Tests and CI
 
@@ -104,7 +104,7 @@ cargo test --workspace
 
 `crates/opentaskbar-core/tests/` ports the deterministic parts of the C# checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Where the production API is a private function in another crate, a bridge test asserts the production source contract instead of duplicating it; cases that need a not-yet-landed cross-WS API are `#[ignore]`d with the owning workstream named in the message. Core-owned behaviour (settings enums/validation, i18n, the single-instance mutex) is tested against the real production functions.
 
-`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 999 C# keys against 14 × 1342 Rust keys.
+`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 999 C# keys and 14 × 1361 Rust keys.
 
 ## Privacy
 

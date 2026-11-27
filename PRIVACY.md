@@ -14,7 +14,7 @@ OpenTaskbar is an open-source desktop dock and taskbar customization utility for
 OpenTaskbar only makes outbound network connections when you enable or trigger specific features:
 
 - **Weather widget:** Queries the public Open-Meteo API with your configured city name (or optional Windows location lookup) to display current weather and forecast data.
-- **AI usage widgets (optional):** Only when explicitly enabled by you, reads local provider credentials or queries the corresponding provider's API directly from your machine to display your own quota. Credentials are never sent to the developer. This includes the Antigravity quota widget (8 providers in both the C# and Rust builds) and model-group filtering; group labels are local UI strings only.
+- **AI usage widgets (optional):** Only when explicitly enabled by you, reads local provider credentials or queries the corresponding provider's API directly from your machine to display your own quota. Credentials are never sent to the developer. Only the providers you configure are queried, and all provider labels are local UI strings.
 - **Portable update checks (GitHub builds only):** Non-Store portable builds may query the public GitHub Releases API to check for newer releases. Microsoft Store builds rely exclusively on the Microsoft Store for updates.
 
 ## Permissions

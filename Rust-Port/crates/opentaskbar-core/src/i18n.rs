@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn all_catalogs_share_one_identical_key_set() {
         let reference = keys(DEFAULT_LANGUAGE);
-        assert_eq!(reference.len(), 1342);
+        assert_eq!(reference.len(), 1361);
         for (tag, _) in LANGUAGES {
             assert_eq!(key_count(tag), reference.len(), "{tag} key count differs");
             assert_eq!(keys(tag), reference, "{tag} key set differs");
@@ -321,14 +321,38 @@ mod tests {
     }
 
     #[test]
-    fn c3_new_keys_resolve_in_every_catalog() {
+    fn contract_keys_resolve_in_every_catalog() {
         const NEW_KEYS: &[&str] = &[
-            // C#-surplus Antigravity keys.
-            "WidgetAiUsageAntigravity",
-            "WidgetAiUsageAntigravityDescription",
-            "AiUsageGroupGemini",
-            "AiUsageGroupClaudeGpt",
-            "AiUsageAntigravityGroupsLabel",
+            // Window picker, magnification and Fjord labels.
+            "WindowPickerTitle",
+            "WindowPickerPrevious",
+            "WindowPickerNext",
+            "WindowPickerPage",
+            "MagnificationExpandsDock",
+            "MagnificationExpandsDockDescription",
+            "FjordFiles",
+            "FjordFilesOpen",
+            "FjordBarShow",
+            "FjordBarHide",
+            // Wi-Fi flyout labels.
+            "WifiScan",
+            "WifiConnect",
+            "WifiDisconnect",
+            "WifiPassword",
+            "WifiNoNetworks",
+            "WifiConnectFailed",
+            // Settings, focus and widget labels.
+            "SearchNoResults",
+            "ContentAlignStart",
+            "ContentAlignCenter",
+            "ContentAlignEnd",
+            "PreviewDisabledHint",
+            "FocusMinutesLabel",
+            "FocusBreakMinutesLabel",
+            "FocusSessionsLabel",
+            "WidgetDensityCompact",
+            "WidgetDensityFull",
+            "AiUsageRingLabel",
             // Rust-port feature keys (C3 prefixes).
             "SpeedTestDownload",
             "SpeedTestUpload",

@@ -54,7 +54,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Live DWM Thumbnails:** Interactive live window thumbnail previews with window titles and close buttons.
 - **Native Jump Lists:** Right-click any application to open its native Windows Jump List with pinned tasks and recent files.
 - **Foreground Highlighting:** Active foreground windows are clearly distinguished with illuminated accent capsules, independent of keyboard focus.
-- **Packaged App Icons:** Running Store and packaged apps without executable icon resources show their Start menu icon. Apps hosted by ApplicationFrameHost share one dock cell, which shows the icon of the topmost hosted app.
+- **Packaged App Icons:** Running Store and packaged apps without executable icon resources show their Start menu icon. Windows groups these apps by their AppUserModelId (AUMID); apps hosted by ApplicationFrameHost share one dock cell that shows the icon of the topmost hosted app.
 - **Multi-Monitor Docks:** Optional secondary docks for multi-monitor setups.
 
 ### Smart Auto-Hide (IntelliHide)
@@ -63,12 +63,12 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Fullscreen Detection:** Automatically yields and hides when full-screen applications, borderless games, or browser videos are playing.
 
 ### Modular Widget System
-- **AI Usage Providers:** Dedicated per-provider widgets for Claude, Codex, Antigravity (C# build only), OpenCode, GitHub Copilot, DeepSeek, and OpenRouter with session/weekly quota bars or rings and reset countdowns. Credentials are discovered locally without logging or exporting them; the Rust port can additionally store DeepSeek/OpenRouter/OpenCode keys encrypted with Windows DPAPI.
+- **AI Usage Providers:** Dedicated per-provider widgets for Claude, Codex, OpenCode, GitHub Copilot, DeepSeek, and OpenRouter with session/weekly quota bars or rings and reset countdowns. Credentials are discovered locally without logging or exporting them; the Rust port can additionally store DeepSeek/OpenRouter/OpenCode keys encrypted with Windows DPAPI.
 - **Bluetooth Battery:** Live Windows PnP battery levels for connected Bluetooth headsets, mice, keyboards, controllers, watches, and phones with automatic device-type icons and active-node filtering.
 - **Real-Time Hardware Meters:** CPU usage, RAM usage, GPU usage, and GPU temperature rings with customizable thresholds. Temperature uses vendor-neutral WDDM adapter data first (AMD/Intel/NVIDIA, WDDM 2.4+), then optional NVIDIA NVML and AMD ADL libraries. Intel GPUs need driver-published WDDM data; there is no non-admin Intel API.
 - **Media Controls:** Now Playing track information, artist metadata, track seek bar, and volume slider.
 - **Clock, Calendar and Weather:** Unified date and time capsule with detailed optical glass weather and multi-day forecast flyout.
-- **Quick Settings and Connectivity:** Wi-Fi, Bluetooth and Night Light controls sit beside shortcuts to native Windows quick actions and settings, including networks, casting, airplane mode, mobile hotspot, accessibility, captions and focus. Direct controls show while Windows applies a change. Audio offers output/input selection and a per-app volume mixer.
+- **Quick Settings and Connectivity:** Wi-Fi, Bluetooth and Night Light controls sit beside shortcuts to native Windows quick actions and settings, including available networks, casting, airplane mode, mobile hotspot, accessibility and Live captions. Direct controls show while Windows applies a change. Audio offers output/input selection and a per-app volume mixer.
 - **Productivity Widgets:** Focus Pomodoro timer, Stopwatch, Countdown timer, Storage drive usage, Network Speed, and Day Progress bar.
 - **System Tray Management:** Background tray apps manager with native tray context menus, window restore, and confirmed process termination.
 - **Interactive Catalog:** Built-in widget catalog grouped under inline category headings with live widget previews and expandable configuration drawers with instant auto-save.
@@ -83,7 +83,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 ### Foolproof Taskbar Recovery
 - **Zero Risk:** State journaling records every taskbar replacement action. On exit, system shutdown, or unexpected termination, OpenTaskbar automatically restores the native Windows taskbar.
 - **Verified Restore:** Recovery re-asserts the original taskbar state and visibility several times and keeps the journal until the taskbar is actually visible, so an Explorer restart cannot silently lose the recovery state.
-- **Self-Healing Startup:** A pending journal is repaired after the singleton check and before the dock starts, including for `--inspect` sessions.
+- **Self-Healing Startup:** A pending journal is repaired after the singleton check and before the dock starts.
 - **Crash Watchdog:** A detached lightweight native C Win32 helper (`tools/watchdog/watchdog.c`) handles cases no in-process handler can (End Task, `taskkill /F`, FailFast, or unexpected exit), restores the Windows taskbar, and exits immediately.
 - **Manual Escape Hatch:** `OpenTaskbar.exe --restore` forces the native taskbar back at any time, even when OpenTaskbar is not running.
 
@@ -180,6 +180,8 @@ User preferences, pinned item order, and widget configurations are stored locall
 - `log.txt` : Diagnostic and operational log.
 - `Themes\` : Theme packs (icon and widget packs). See [docs/themes.md](docs/themes.md).
 
+The Rust port stores its settings in a separate folder, `%LOCALAPPDATA%\OpenTaskBar-Rust\`, using the same PascalCase schema. It does **not** migrate the C# folder automatically: copy `settings.json` there manually (or import a full backup) when switching builds.
+
 ---
 
 ## Design System
@@ -190,7 +192,7 @@ For in-depth documentation on OpenTaskbar's design tokens, materials, typography
 
 ## Rust port
 
-A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It targets the same `settings.json`, 14-language locale catalogs (1129 keys per language), theme packs and recovery journal as the C# build, including the Antigravity AI usage provider. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` and verify with `.\scripts\check-rust-portable.ps1`; `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest, SLSA attestation and optional VirusTotal scan.
+A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It targets the same `settings.json` schema, 14-language locale catalogs (1361 keys per language), theme packs and recovery journal as the C# build; each build keeps its own settings folder and there is no automatic migration between them. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` and verify with `.\scripts\check-rust-portable.ps1`; `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest, SLSA attestation and optional VirusTotal scan.
 
 ---
 

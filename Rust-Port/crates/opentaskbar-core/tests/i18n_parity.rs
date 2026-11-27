@@ -1,6 +1,6 @@
 //! §C3 locale-contract tests: all 14 embedded catalogs must expose exactly the
-//! same key set, including the C#-surplus Antigravity keys and the new feature
-//! keys consumed by the Rust port. This is the CI-visible half of the key-parity
+//! same key set, including the new feature keys consumed by the Rust port.
+//! This is the CI-visible half of the key-parity
 //! check; `scripts/check-locale-parity.ps1` performs the same check over source
 //! JSON (C# vs Rust) without compiling.
 
@@ -11,15 +11,39 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1342;
+const EXPECTED_KEY_COUNT: usize = 1361;
 
 const C3_NEW_KEYS: &[&str] = &[
-    // The five keys C# has and the pre-port Rust catalogs lacked.
-    "WidgetAiUsageAntigravity",
-    "WidgetAiUsageAntigravityDescription",
-    "AiUsageGroupGemini",
-    "AiUsageGroupClaudeGpt",
-    "AiUsageAntigravityGroupsLabel",
+    // Window picker, magnification and Fjord labels.
+    "WindowPickerTitle",
+    "WindowPickerPrevious",
+    "WindowPickerNext",
+    "WindowPickerPage",
+    "MagnificationExpandsDock",
+    "MagnificationExpandsDockDescription",
+    "FjordFiles",
+    "FjordFilesOpen",
+    "FjordBarShow",
+    "FjordBarHide",
+    // Wi-Fi flyout labels.
+    "WifiScan",
+    "WifiConnect",
+    "WifiDisconnect",
+    "WifiPassword",
+    "WifiNoNetworks",
+    "WifiConnectFailed",
+    // Search, alignment, preview, focus and widget labels.
+    "SearchNoResults",
+    "ContentAlignStart",
+    "ContentAlignCenter",
+    "ContentAlignEnd",
+    "PreviewDisabledHint",
+    "FocusMinutesLabel",
+    "FocusBreakMinutesLabel",
+    "FocusSessionsLabel",
+    "WidgetDensityCompact",
+    "WidgetDensityFull",
+    "AiUsageRingLabel",
     // New feature keys (C3 prefixes).
     "SpeedTestDownload",
     "SpeedTestUpload",
@@ -104,23 +128,6 @@ fn c3_new_keys_resolve_in_all_languages() {
             assert_ne!(i18n::tr(tag, key), *key, "{tag} is missing C3 key {key}");
         }
     }
-}
-
-#[test]
-fn antigravity_values_are_real_translations_not_key_echoes() {
-    assert_eq!(
-        i18n::tr("en-US", "WidgetAiUsageAntigravity"),
-        "Antigravity usage"
-    );
-    assert_eq!(
-        i18n::tr("en-US", "AiUsageAntigravityGroupsLabel"),
-        "Visible model groups"
-    );
-    // The Turkish value comes straight from the C# tr-TR catalog; we only assert
-    // that it is a genuine translation rather than a key echo.
-    let tr_value = i18n::tr("tr-TR", "WidgetAiUsageAntigravity");
-    assert_ne!(tr_value, "WidgetAiUsageAntigravity");
-    assert!(!tr_value.is_empty());
 }
 
 #[test]
