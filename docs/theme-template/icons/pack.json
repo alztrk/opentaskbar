@@ -1,8 +1,8 @@
 {
-  // Add images to this folder and map them below. An image named after the executable (firefox.png) needs no mapping.
+  // Add images to this folder and map them below. An image named after the executable (example.png) needs no mapping.
   // See docs/themes.md for every option.
   "icons": {
-    // "firefox.exe": "icons/firefox.png",
+    // "example.exe": "icons/example.png",
     // "Microsoft.WindowsTerminal": "icons/terminal.png",
     // "@start": "icons/start.png",
     // "@recyclebin": "icons/trash.png",

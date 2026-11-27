@@ -640,6 +640,21 @@ const MAX_PINNED_TRAY_KEY_LEN: usize = 512;
 const MAX_ICON_PADDING: i32 = 12;
 
 pub fn is_supported_widget_id(id: &str) -> bool {
+    let id = id.trim();
+    // User-created widgets live in the `custom:<slug>` namespace. The slug is
+    // validated here so a settings file can never smuggle a path or a shell token.
+    const PREFIX: &str = "custom:";
+    if let Some(slug) = id
+        .get(..PREFIX.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+        .map(|_| &id[PREFIX.len()..])
+    {
+        return !slug.is_empty()
+            && slug.len() <= 128
+            && slug
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    }
     // Retired provider IDs are deliberately absent from the catalog, so old files that still
     // mention one are rejected here instead of being silently accepted by an alias lookup.
     SUPPORTED_WIDGET_IDS

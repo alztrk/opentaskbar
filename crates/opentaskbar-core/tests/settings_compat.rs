@@ -8,10 +8,10 @@ use opentaskbar_core::paths;
 use opentaskbar_core::settings::{
     AppTheme, AutoHideMode, DockGapUnit, DockHeightMode, DockPosition, DockProfile, DockSettings,
     DockSize, DockWidthMode, SurfaceBackground, WidgetDensityMode, apply_full_profile,
-    dock_metrics, effective_bottom_gap, effective_bottom_gap_for, effective_height_for,
-    effective_top_gap, effective_top_gap_for, effective_width, is_supported_widget_id, load_from,
-    normalize_legacy_json, resolve_widget_density, save_to, widget_density_for,
-    widget_shrink_priority,
+    canonical_widget_setting_id, dock_metrics, effective_bottom_gap, effective_bottom_gap_for,
+    effective_height_for, effective_top_gap, effective_top_gap_for, effective_width,
+    is_supported_widget_id, load_from, normalize_legacy_json, resolve_widget_density, save_to,
+    widget_density_for, widget_shrink_priority,
 };
 
 fn temp_settings(name: &str) -> (PathBuf, PathBuf) {
@@ -981,4 +981,22 @@ fn boundary_display_care_values_are_accepted() {
     assert_eq!(loaded.animation_fps_cap, 120);
     assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn custom_widget_ids_are_supported_but_constrained() {
+    assert!(is_supported_widget_id("custom:usd-try"));
+    assert!(is_supported_widget_id("CUSTOM:Clock_2"));
+    assert!(!is_supported_widget_id("custom:"));
+    assert!(!is_supported_widget_id("custom:../evil"));
+    assert!(!is_supported_widget_id("custom:a/b"));
+    assert_eq!(
+        canonical_widget_setting_id("custom:usd-try"),
+        "custom:usd-try"
+    );
+
+    let mut settings = DockSettings::default();
+    settings.set_widget_enabled("custom:usd-try", true);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+    assert!(settings.is_widget_enabled("custom:usd-try"));
 }

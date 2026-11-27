@@ -198,6 +198,14 @@ pub enum WidgetChipSpec {
         top: String,
         bottom: String,
     },
+    /// User-created widget: icon, value, label and an optional progress bar.
+    Custom {
+        label: String,
+        value: String,
+        ratio: Option<f32>,
+        icon: WidgetIcon,
+        color: Rgb,
+    },
 }
 
 type AiQuotaRow = (String, f32, Rgb, String);
@@ -361,6 +369,10 @@ impl WidgetChipSpec {
             Self::Simple { top, bottom, .. } => vec![
                 line("WidgetDetailInfo", top.clone()),
                 line("WidgetDetailDetail", bottom.clone()),
+            ],
+            Self::Custom { label, value, .. } => vec![
+                line("WidgetDetailInfo", value.clone()),
+                line("WidgetDetailDetail", label.clone()),
             ],
         }
     }
@@ -3226,6 +3238,75 @@ impl DcompEngine {
                         },
                         &s_brush,
                     );
+                }
+                WidgetChipSpec::Custom {
+                    label,
+                    value,
+                    ratio,
+                    icon,
+                    color,
+                } => {
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
+                    draw_chip_icon(
+                        &self.dwrite_factory,
+                        &self.d2d_factory,
+                        dc,
+                        icon,
+                        18.0,
+                        cy,
+                        15.0,
+                        *color,
+                    )?;
+                    let mid = height_dips * 0.51;
+                    draw_text(
+                        value,
+                        &fmt_115_b_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: (mid - 13.5).max(2.0),
+                            right: width_dips - 8.0,
+                            bottom: mid + 1.0,
+                        },
+                        &p_brush,
+                    );
+                    draw_text(
+                        label,
+                        &fmt_10_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: mid - 0.5,
+                            right: width_dips - 8.0,
+                            bottom: (mid + 13.0).min(height_dips - 2.0),
+                        },
+                        &s_brush,
+                    );
+                    if let Some(ratio) = ratio {
+                        let track = D2D_RECT_F {
+                            left: 8.0,
+                            top: height_dips - 4.0,
+                            right: width_dips - 8.0,
+                            bottom: height_dips - 2.0,
+                        };
+                        dc.FillRectangle(&track, &s_brush);
+                        let fill = D2D_RECT_F {
+                            right: track.left + (track.right - track.left) * ratio.clamp(0.0, 1.0),
+                            ..track
+                        };
+                        let bar = dc.CreateSolidColorBrush(
+                            &color_rgba(color.0, color.1, color.2, 0.9),
+                            None,
+                        )?;
+                        dc.FillRectangle(&fill, &bar);
+                    }
                 }
             }
             Ok(())

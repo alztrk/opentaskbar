@@ -4647,6 +4647,40 @@ impl SettingsView {
                             ),
                     ),
             ),
+            WidgetChipSpec::Custom {
+                label,
+                value,
+                color,
+                ..
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(icon_glyph(
+                        "\u{E81E}",
+                        13.0,
+                        crate::design::gpui_rgba(color, 0xff),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(fonts::scaled_size(11.0)))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_fg))
+                                    .child(value),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(fonts::scaled_size(9.0)))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(label),
+                            ),
+                    ),
+            ),
         }
     }
 
@@ -7540,6 +7574,61 @@ impl SettingsView {
             None
         };
 
+        let icon_button = if widgets::custom_widgets::is_custom(wid) {
+            Some(
+                div()
+                    .id(SharedString::from(format!("wicon-{wid}")))
+                    .h(px(28.0))
+                    .px(px(9.0))
+                    .rounded(px(7.0))
+                    .bg(rgba(t.surface_muted))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgba(t.surface_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(path) = crate::ui::prompt::open_file(
+                                "Choose widget icon",
+                                "PNG image",
+                                "*.png",
+                            ) {
+                                let mut overrides =
+                                    widgets::setting_value(&this.settings, "CustomWidgetIcons")
+                                        .and_then(|v| v.as_object().cloned())
+                                        .unwrap_or_default();
+                                overrides.insert(
+                                    wid.to_owned(),
+                                    serde_json::json!(path.to_string_lossy()),
+                                );
+                                widgets::set_setting(
+                                    &mut this.settings,
+                                    "CustomWidgetIcons",
+                                    serde_json::Value::Object(overrides),
+                                );
+                                this.auto_save(cx);
+                            }
+                        }),
+                    )
+                    .child(icon_glyph("\u{E91B}", 11.5, t.text_secondary))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(fonts::scaled_size(11.5)))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgba(t.text_secondary))
+                            .child(loc::t("ThemeSectionIcons")),
+                    ),
+            )
+        } else {
+            None
+        };
+
         let enable_switch = ios_switch(
             SharedString::from(format!("wsw-{wid}")),
             t,
@@ -7626,6 +7715,7 @@ impl SettingsView {
                     .items_center()
                     .gap(px(8.0))
                     .flex_shrink_0()
+                    .when_some(icon_button, |row, b| row.child(b))
                     .when_some(cfg_button, |row, b| row.child(b))
                     .child(enable_switch),
             );
@@ -7753,6 +7843,16 @@ impl SettingsView {
                         ))
                         .child(self.make_dropdown("widget-cat-filter", t, filter_opts, cx)),
                 )
+                .child(button(
+                    "btn-reload-custom-widgets",
+                    t,
+                    loc::t("ThemePackReload"),
+                    ButtonVariant::Secondary,
+                    cx.listener(|_, _, _, cx| {
+                        widgets::custom_widgets::reload();
+                        cx.notify();
+                    }),
+                ))
                 .child(button(
                     "btn-clear-widgets",
                     t,

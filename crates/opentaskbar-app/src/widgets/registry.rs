@@ -506,7 +506,10 @@ pub static WIDGET_CATEGORIES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 
 /// The 22 widgets shown in the Settings catalog.
 pub fn catalog_widgets() -> impl Iterator<Item = &'static WidgetDescriptor> {
-    BUILTINS.iter().filter(|w| w.catalog)
+    BUILTINS
+        .iter()
+        .filter(|w| w.catalog)
+        .chain(super::custom_widgets::descriptors())
 }
 
 /// Resolves a widget that owns a dock chip. Case-insensitive, matching the old
@@ -515,6 +518,11 @@ pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
     BUILTINS
         .iter()
         .find(|w| w.dock_descriptor && w.id.eq_ignore_ascii_case(id))
+        .or_else(|| {
+            super::custom_widgets::descriptors()
+                .into_iter()
+                .find(|w| w.id.eq_ignore_ascii_case(id))
+        })
 }
 
 /// Resolves a user-facing / legacy widget ID to its canonical catalog ID.
@@ -548,6 +556,11 @@ pub fn widget_name(id: &str) -> String {
     BUILTINS
         .iter()
         .find(|w| w.id == id)
+        .or_else(|| {
+            super::custom_widgets::descriptors()
+                .into_iter()
+                .find(|w| w.id == id)
+        })
         .map_or_else(|| id.to_owned(), |w| loc::t(w.name_key))
 }
 
@@ -557,6 +570,11 @@ pub fn widget_has_flyout(id: &str) -> bool {
     BUILTINS
         .iter()
         .find(|w| w.id == id)
+        .or_else(|| {
+            super::custom_widgets::descriptors()
+                .into_iter()
+                .find(|w| w.id == id)
+        })
         .is_some_and(|w| w.has_flyout)
 }
 
@@ -596,7 +614,12 @@ impl WidgetOption {
         let canonical = canonical_widget_id(id);
         let descriptor = BUILTINS
             .iter()
-            .find(|w| (w.catalog || w.id == "showdesktop") && w.id == canonical)?;
+            .find(|w| (w.catalog || w.id == "showdesktop") && w.id == canonical)
+            .or_else(|| {
+                super::custom_widgets::descriptors()
+                    .into_iter()
+                    .find(|w| w.catalog && w.id == canonical)
+            })?;
         Some(Self {
             descriptor,
             has_settings: descriptor.has_settings,

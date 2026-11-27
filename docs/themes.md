@@ -1,6 +1,6 @@
 # Theme Packs
 
-A theme pack restyles OpenTaskbar with colors, fonts and widget styles. All six bundled themes **keep original Windows and application icons**. Custom themes can still include an optional icon pack. OpenTaskbar installs bundled themes into your user theme folder on first launch.
+A theme pack restyles OpenTaskbar with colors, fonts and widget styles. Icon and widget packs are optional; bundled themes keep the original Windows and app icons.
 
 ## Where themes live
 
@@ -9,96 +9,75 @@ A theme pack restyles OpenTaskbar with colors, fonts and widget styles. All six 
 └── my-theme\
     ├── theme.json          ← name, author, description
     ├── icons\
-    │   ├── pack.json       ← icon pack
-    │   ├── firefox.png     ← matched to firefox.exe without a mapping
-    │   └── icons\…
+    │   ├── pack.json       ← optional icon pack
+    │   └── example.png     ← matched to example.exe without a mapping
     └── widgets\
-        └── pack.json       ← widget pack
+        └── pack.json       ← optional widget pack
 ```
 
-Both packs are optional. Pick a theme in **Settings → Appearance → Theme → Theme pack**. **Open folder** opens the `Themes` folder; **Reload** rereads the selected theme after you change its files.
+Pick a theme in **Settings → Appearance → Theme → Theme pack**. **Open folder** opens the Themes folder; **Reload** re-reads the theme after you edit its files.
 
-The built-in library includes Catppuccin Mocha, Gruvbox Material, Nord, Prism, Solarized and Tokyo Night. **All six preserve original app, Start and Recycle Bin icons, even when older installations still contain icon files.** Their widget styles continue to work. A starter custom theme is in [theme-template](theme-template). Bundled themes are available in [themes](../themes).
-
-## theme.json
+`theme.json`:
 
 ```json
 { "name": "My Theme", "author": "You", "description": "Optional.", "preserveOriginalIcons": true }
 ```
 
-Set `preserveOriginalIcons` to `true` to retain native Windows and app icons even if an `icons/pack.json` file exists. All bundled themes do this automatically, including previously installed copies. Custom themes can omit this flag to use an icon pack.
+`preserveOriginalIcons: true` keeps native icons even when an icon pack exists. Bundled themes set it; custom themes can omit it to use an icon pack.
 
-## Optional custom icon pack: icons\pack.json
+## Icon pack: icons\pack.json
 
 ```jsonc
 {
   "icons": {
-    "firefox.exe": "icons/browser.png",
+    "example.exe": "icons/browser.png",
     "Microsoft.WindowsTerminal": "icons/terminal.png",
     "@start": "icons/start.png",
     "@recyclebin": "icons/trash.png",
     "@recyclebin-full": "icons/trash-full.png"
   },
-  "fallback": {
-    "shape": "Petal",
-    "sharpCorner": "TopRight",
-    "cornerRadius": 0.42,
-    "background": "auto",
-    "iconScale": 0.62
-  }
+  "fallback": { "shape": "Petal", "cornerRadius": 0.42, "iconScale": 0.62 }
 }
 ```
 
-Comments and trailing commas are allowed.
-
-### Icon keys
-
-For each app, the first key that matches wins:
+Comments and trailing commas are allowed. Keys are case-insensitive and the first match wins. Values are paths relative to `icons\`; paths leading outside it are ignored.
 
 | Key | Example | Matches |
 | :--- | :--- | :--- |
 | AppUserModelID | `Microsoft.WindowsTerminal_8wekyb3d8bbwe!App` | One Store or packaged app |
-| Package name | `Microsoft.WindowsTerminal` | The part of the ID before `_` |
-| Full path | `C:\Program Files\App\app.exe` | One install of an app |
-| File name | `firefox.exe` | Any `firefox.exe` |
-| Name | `firefox` | Same, without the extension |
-| Special item | `@start`, `@recyclebin`, `@recyclebin-full` | The Start button, the Recycle Bin empty or full |
+| Package name | `Microsoft.WindowsTerminal` | The ID part before `_` |
+| Full path | `C:\Program Files\App\app.exe` | One install |
+| File name | `example.exe` | Any `example.exe` |
+| Name | `example` | Same, without the extension |
+| Special item | `@start`, `@recyclebin`, `@recyclebin-full` | Start button, empty/full Recycle Bin |
 
-Keys are not case-sensitive. Values are paths relative to the `icons` folder; a path that leads outside it is ignored.
+An image named after the executable — `example.png` for `example.exe` — works without a mapping when placed in `icons\` or `icons\icons\`. Formats: PNG, ICO, JPG, BMP; a 128–256 px square PNG works best.
 
-An image named after the executable, such as `firefox.png` in the `icons` folder or in `icons\icons\`, is used without a mapping.
-
-Supported image formats: PNG, ICO, JPG and BMP. A square PNG of 128 to 256 pixels works best.
-
-### Fallback plate
-
-Apps the pack has no image for keep their own icon. With a fallback `shape`, that icon is drawn on a plate so the whole dock matches the theme:
+Apps with no image keep their own icon. A `fallback.shape` draws that icon on a plate so the dock looks consistent:
 
 | Field | Values | Default |
 | :--- | :--- | :--- |
 | `shape` | `None`, `Leaf`, `Petal`, `Rounded`, `Circle` | `None` |
 | `sharpCorner` | `TopLeft`, `TopRight`, `BottomLeft`, `BottomRight` | `TopRight` |
-| `cornerRadius` | `0` to `0.5`, a fraction of the icon size | `0.5` |
-| `background` | `auto` (a pale tint of the icon) or a color such as `#FFFFFF` | `auto` |
-| `iconScale` | `0.2` to `1.0`, the size of the icon on the plate | `0.64` |
+| `cornerRadius` | `0`–`0.5` of the icon size | `0.5` |
+| `background` | `auto` (pale icon tint) or a color like `#FFFFFF` | `auto` |
+| `iconScale` | `0.2`–`1.0` | `0.64` |
 
-`Leaf` keeps one corner square and rounds the other three. `Petal` keeps `sharpCorner` and the opposite corner square, like many Sailfish OS app icons.
+`Leaf` leaves one corner square; `Petal` keeps `sharpCorner` and the opposite corner square.
 
 ## Widget pack: widgets\pack.json
 
-A widget pack replaces **design tokens**: the named resources in [`Design/`](../Design) that the dock, widgets, menus and Settings are drawn with.
+A widget pack replaces design tokens — named colors, brushes, radii, sizes and fonts used by the dock, widgets, menus and Settings.
 
 ```jsonc
 {
   "tokens": {                       // both themes
     "WidgetAccent": "#FF1FC2F0",
-    "WidgetAccentFill": { "stops": ["#FF5AD9FF", "#FF1595D3"], "direction": "vertical" },
     "WidgetRadius": 16,
-    "DockSheenRadius": "21,21,0,0",
     "InterfaceFont": "Segoe UI Variable Display"
   },
-  "dark":  { "DockMaterial": { "stops": ["#FF0E2233", "#FF050E17"] } },   // Dark theme only
-  "light": { "DockMaterial": { "stops": ["#FFEAF7FD", "#FFCFE6F3"] } }    // Light theme only
+  "dark":  { "DockMaterial": { "stops": ["#FF0E2233", "#FF050E17"] } },
+  "light": { "DockMaterial": { "stops": ["#FFEAF7FD", "#FFCFE6F3"] } }
 }
 ```
 
@@ -106,28 +85,19 @@ A value's type follows the token it replaces:
 
 | Token type | Value | Examples |
 | :--- | :--- | :--- |
-| Brush | `"#AARRGGBB"`, or a gradient: `stops` (2 or more colors) and `direction` (`vertical`, `horizontal`, `diagonal`) | `WidgetAccent`, `TextPrimary`, `DockMaterial`, `WidgetCard` |
-| Corner radius, thickness | A number, `"x,y"` or `"left,top,right,bottom"` | `WidgetRadius`, `DockRadius`, `WidgetSpacing` |
+| Brush | `"#AARRGGBB"` or `{ "stops": [colors], "direction": "vertical\|horizontal\|diagonal" }` | `WidgetAccent`, `DockMaterial` |
+| Radius / thickness | A number, `"x,y"` or `"left,top,right,bottom"` | `WidgetRadius`, `DockRadius` |
 | Size | A number | `WidgetHeight`, `TextSizeWidgetValue` |
-| Font | A font family name | `InterfaceFont` |
+| Font | Font family name | `InterfaceFont` |
 
-Brushes and colors change at once. Sizes, radii and fonts are read when a view is first built, so they take effect after OpenTaskbar restarts. Unknown tokens and values of the wrong type are skipped and written to `%LOCALAPPDATA%\OpenTaskbar\log.txt`.
+Brushes update immediately; sizes, radii and fonts are read when a view is built and take effect after a restart. Unknown or wrongly typed tokens are skipped and logged to `%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log`.
 
-The dock and menu glass (`DockMaterial`, `MenuMaterial`) take their colors from the theme. Their alpha comes from the per-surface **Surfaces** settings in Settings → Appearance; a theme pack can change the source colors, but the user's Glass/Solid/None mode and opacity always win. The widget panel reuses `MenuMaterial` as its source with an independent style. The Dynamic Island uses `DynamicIslandMaterial`; its custom background color and opacity in Settings → Widgets take precedence. Choose **Use theme color** to follow the active theme again.
-
-Token names are listed in [Design/Tokens/](../Design/Tokens/) (`Typography`, `Spacing`, `Radii`, `Layout`, `Motion`), [Design/Palettes/Dark.xaml](../Design/Palettes/Dark.xaml), and [Design/Widgets.xaml](../Design/Widgets.xaml).
+Glass colors come from the theme; opacity and the Glass/Solid/None mode come from Settings → Appearance and always win. Dynamic Island uses `DynamicIslandMaterial`, with its own Settings color/opacity taking precedence (**Use theme color** follows the theme again).
 
 ## Licensing
 
-Custom icon packs should only contain images you have permission to distribute. App logos may be trademarks. Bundled themes do not ship replacement app icons.
+Use only images you may distribute; app logos can be trademarks. Bundled themes ship no replacement app icons.
 
 ## Rust port
 
-The Rust port reads the same `%LOCALAPPDATA%\OpenTaskbar\Themes` folder and the same `theme.json` / `icons\pack.json` / `widgets\pack.json` files, so themes are interchangeable between builds. The six bundled themes are installed on first launch. `preserveOriginalIcons` and the icon-matching order described above are honoured by the Rust `platform::icon_pack` path.
-
-Differences worth knowing:
-
-- The Rust widget token resolver converts design tokens to typed values (brush, color, corner radius, thickness, font family) with a 256-token limit; unknown or wrongly typed tokens are skipped instead of aborting theme load.
-- Windows accentPalette and `SystemUsesLightTheme` are read live by the Rust palette listener; a change is applied to the dock, menu, widgets and Settings surfaces without a restart.
-- The theme editor is behind the `enable_theme_editor` flag (default off). With it off, the Rust Settings window still lists, imports and exports themes but does not expose token editing.
-- A full backup (`.otbackup`) includes the active custom theme; importing it can restore settings alone or settings plus the theme. The archive contract is covered by `tests/full_backup.rs`.
+The Rust app reads the same folder and files, so themes work in both builds. `preserveOriginalIcons` and the icon-matching order above behave the same. The theme editor is off by default (`enable_theme_editor`); Settings can still list, import and export themes.

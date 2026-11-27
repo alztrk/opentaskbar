@@ -14,6 +14,7 @@
 
 pub mod ai_flyout;
 pub mod catalog_ops;
+pub mod custom_widgets;
 pub mod diagnostics;
 pub mod focus_break;
 pub mod hover;
@@ -558,6 +559,14 @@ impl WidgetRuntime {
         // 144 Hz animation path) reads this snapshot instead of touching the disk / locale APIs.
         self.poll_snapshot.refresh();
 
+        // User widgets are polled on the same 1 Hz gate; each sidecar applies its
+        // own `pollSeconds` throttle and does its I/O on a worker thread.
+        for widget in registry::catalog_widgets() {
+            if custom_widgets::is_custom(widget.id) && settings.is_widget_enabled(widget.id) {
+                custom_widgets::poll_widget(widget.id);
+            }
+        }
+
         if settings.is_widget_enabled("stats") {
             let show_cpu = settings.stats_meters & 1 != 0;
             let show_ram = settings.stats_meters & 2 != 0;
@@ -901,6 +910,9 @@ impl WidgetRuntime {
     /// update path (WS-7 `LiveEvent::Update`) so Clock / Stats / Focus / Countdown / Stopwatch /
     /// NetSpeed show live data instead of a frozen snapshot.
     pub fn live_spec(&mut self, id: &str, settings: &DockSettings, is_dark: bool) -> FlyoutSpec {
+        if let Some(spec) = custom_widgets::flyout(id) {
+            return spec;
+        }
         match id {
             "clock" => {
                 let info = telemetry::local_clock_info();
@@ -1048,6 +1060,30 @@ impl WidgetRuntime {
     /// Builds the exact reference 1-to-1 `WidgetChipSpec` rendered onto the dock pill.
     pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
         let pal = design::palette(is_dark);
+        if custom_widgets::is_custom(id) {
+            return custom_widgets::chip(id, settings).map_or_else(
+                || WidgetChipSpec::Simple {
+                    icon: custom_widgets::icon_for(
+                        &custom_widgets::CustomChip::default(),
+                        id,
+                        settings,
+                    ),
+                    icon_color: pal.widget_blue,
+                    top: "…".to_owned(),
+                    bottom: widget_name(id),
+                },
+                |chip| {
+                    let icon = custom_widgets::icon_for(&chip, id, settings);
+                    WidgetChipSpec::Custom {
+                        label: chip.label,
+                        value: chip.value,
+                        ratio: chip.ratio,
+                        icon,
+                        color: pal.widget_accent,
+                    }
+                },
+            );
+        }
         if let Some(ai) = telemetry::ai_provider_meta(id) {
             let snap = self
                 .ai_usage
@@ -1763,6 +1799,9 @@ impl WidgetRuntime {
         width_dips: f32,
         _settings: &mut DockSettings,
     ) -> DirectClickOutcome {
+        if custom_widgets::is_custom(id) {
+            return DirectClickOutcome::OpenFlyout;
+        }
         if let Some(ai) = telemetry::ai_provider_meta(id) {
             telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
             return DirectClickOutcome::Handled;
@@ -2495,6 +2534,34 @@ impl WidgetRuntime {
     ) -> bool {
         if !widget_has_flyout(id) {
             return false;
+        }
+
+        if custom_widgets::is_custom(id) {
+            let init = custom_widgets::flyout(id).unwrap_or_else(|| FlyoutSpec {
+                title: widget_name(id),
+                subtitle: None,
+                width_dips: 280.0,
+                blocks: vec![FlyoutBlock::Note(loc::t("AiUsageStatusLoading"))],
+            });
+            flyout::show_flyout_live_with_border(
+                id,
+                owner_hwnd,
+                is_dark,
+                anchor_x,
+                anchor_y,
+                init.clone(),
+                BorderStyle::from_widget_settings(is_dark, settings),
+                |ev| match ev {
+                    LiveEvent::Click(action_id) => {
+                        custom_widgets::click_widget(id, action_id);
+                        LiveOutcome::Close
+                    }
+                    _ => LiveOutcome::Update(
+                        custom_widgets::flyout(id).unwrap_or_else(|| init.clone()),
+                    ),
+                },
+            );
+            return true;
         }
 
         let pal = design::palette(is_dark);

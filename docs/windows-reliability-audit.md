@@ -1,129 +1,120 @@
 # Windows reliability and UX verification matrix
 
-> Status: audit plan, **not** a claim that these cases have been reproduced or fixed. Run on real Windows 10/11 machines or VMs. Keep native taskbar restoration available during testing.
+> Audit plan, **not** a claim that these cases were reproduced or fixed. Run on real Windows 10/11 machines or VMs and keep native taskbar restoration available while testing.
 
-## Source-grounded review targets
+## Code to review
 
-All implementation paths are Rust-only; review them from the repository/workspace root.
+All paths are Rust-only, from the workspace root:
 
-- `crates/opentaskbar-app/src/platform/win32.rs`: `enumerate_monitors`, monitor selection, physical-pixel/DIP conversion, negative virtual-screen origins and fallback when a selected display disappears.
-- `crates/opentaskbar-app/src/main.rs`: dock event loop, `WM_DISPLAYCHANGE`/work-area messages, auto-hide evaluation and shell state reconciliation.
-- `crates/opentaskbar-shell/src/taskbar.rs` and `appbar.rs`: native taskbar hide/restore, crash-recovery journal and app-bar reservations.
-- `crates/opentaskbar-shell/src/journal.rs` and `session.rs`: journal line parsing, recovery retries and single-owner shell session.
-- `crates/opentaskbar-app/src/platform/win32_ex.rs`: current-desktop check; failure currently falls back to showing windows.
-- `crates/opentaskbar-app/src/dock/layout.rs` and `dock/mod.rs`: horizontal overflow, wheel scrolling, magnification and geometry measurement.
-- `crates/opentaskbar-shell/src/watchdog.rs` and `tools/watchdog/watchdog.c`: architecture-matched native watchdog embedded via `build.rs` (x64 `0x8664`, x86 `0x014C`).
+- `crates/opentaskbar-app/src/platform/win32.rs` — monitor enumeration/selection, physical-pixel/DIP conversion, negative virtual-screen origins, missing-display fallback.
+- `crates/opentaskbar-app/src/main.rs` — dock event loop, `WM_DISPLAYCHANGE`/work-area messages, auto-hide, shell state reconciliation.
+- `crates/opentaskbar-shell/src/{taskbar,appbar,journal,session}.rs` — taskbar hide/restore, app-bar reservations, journal parsing, single shell owner.
+- `crates/opentaskbar-app/src/platform/win32_ex.rs` — current-desktop check (failure currently shows windows).
+- `crates/opentaskbar-app/src/dock/{layout,mod}.rs` — overflow, wheel scrolling, magnification, geometry.
+- `crates/opentaskbar-shell/src/watchdog.rs`, `tools/watchdog/watchdog.c` — architecture-matched watchdog embedded via `build.rs` (x64 `0x8664`, x86 `0x014C`).
 
-## P0: do not leave the user without a taskbar
-
-| ID | Scenario | Expected outcome |
-|---|---|---|
-| REC-01 | Force-terminate OpenTaskbar while native taskbar is hidden | Native taskbar is recoverable on next startup/recovery path; document any unavoidable delay |
-| REC-02 | Restart Explorer while replacement is active | Native and replacement taskbars do not permanently overlap or both disappear |
-| REC-03 | Start twice / rapidly exit and restart | Only one owner of taskbar replacement and app-bar reservations |
-| REC-04 | Suspend, hibernate, lock/unlock, RDP reconnect | Dock returns without orphaned reservations or permanent hidden state |
-| REC-05 | Update attempt fails, elevation denied, executable locked | Existing executable remains launchable; taskbar recovery remains possible |
-| REC-06 | Cold boot with Windows startup enabled; Explorer is absent, slow, or recreates its taskbar after OpenTaskbar starts | Dock remains usable, retries are bounded, AppBar registration is restored, and the native taskbar does not remain visible or hidden incorrectly |
-| REC-07 | Move or replace the portable executable, then sign in again | Startup registration points to the running supported executable; a stale path never silently starts an older copy |
-| REC-08 | Explorer restarts while replacement is active and delays or omits a shell notification | Reconciliation detects the new taskbar window, validates its process identity, and restores the reservation without duplicate registration |
-| REC-09 | Explorer creates or shows a secondary taskbar after the initial hide | The secondary taskbar is hidden promptly and remains hidden after delayed creation |
-| REC-10 | Recovery journal is missing, malformed, stale, or cannot be written | Recovery prefers a visible native taskbar and reports the failed operation; it never silently discards uncertain recovery state |
-
-## P1: monitor topology, DPI and fullscreen
+## P0: never leave the user without a taskbar
 
 | ID | Scenario | Expected outcome |
 |---|---|---|
-| MON-01 | 1, 2 and 3 monitors, mixed resolutions and portrait orientation | One correctly positioned dock per enabled display; no duplicate reservations |
-| MON-02 | Secondary monitor left/above primary (negative virtual-screen coordinates) | Correct hit testing, placement, and work-area bounds |
-| MON-03 | Mixed 100%, 125%, 150%, 200% DPI; move primary target | Physical pixel and device-independent layout coordinates agree; no offset or scaling jump |
-| MON-04 | Unplug/replug HDMI/DP/USB-C dock; change primary monitor | Old secondary windows/app-bars disposed; new ones created on valid handles |
-| MON-05 | Disable selected target monitor while app runs | Fallback to a connected monitor; user can still open Settings |
-| MON-06 | Explorer taskbar at top/left/right or auto-hide | Reservation does not assume the bottom strip is always available |
-| MON-07 | Fullscreen game/video on one monitor, normal apps on another | Suppress only the affected monitor's dock; restore on Alt+Tab |
-| MON-08 | Borderless fullscreen vs maximized window; HDR and refresh-rate changes | No incorrect permanent fullscreen suppression |
-| MON-09 | Move one app's windows across monitors | Current-monitor filtering and click/activation choose the expected window |
-| MON-10 | Change virtual desktop or move a window between desktops | Current-desktop filter follows preference; COM failure is visible in diagnostics |
-| MON-11 | Change Windows display scale or work area while dock is open | Correct repositioning after `WM_DPICHANGED`, `WM_DISPLAYCHANGE` and work-area notifications |
-| MON-12 | Explorer restarts while a secondary monitor is disconnected or being re-enumerated | No stale monitor or window handles are reused; the dock recovers when a valid display returns |
+| REC-01 | Force-terminate while native taskbar is hidden | Native taskbar recoverable on next startup; document any delay |
+| REC-02 | Restart Explorer while replacement is active | No permanent overlap or both taskbars missing |
+| REC-03 | Start twice / rapid exit and restart | One owner of taskbar replacement and app-bar reservations |
+| REC-04 | Suspend, hibernate, lock/unlock, RDP reconnect | Dock returns without orphaned reservations or stuck hidden state |
+| REC-05 | Update fails, elevation denied, executable locked | Existing EXE remains launchable; recovery still possible |
+| REC-06 | Cold boot with startup enabled; Explorer absent, slow or recreates its taskbar | Dock usable, bounded retries, app-bar restored, taskbar not wrong |
+| REC-07 | Move or replace the portable EXE, then sign in again | Startup points to the running EXE, never a stale copy |
+| REC-08 | Explorer restarts without or with delayed shell notification | Reconciliation detects the new taskbar, checks process identity, no duplicate registration |
+| REC-09 | Explorer creates/shows a secondary taskbar | It is hidden promptly and stays hidden |
+| REC-10 | Journal missing, malformed, stale or unwritable | Recovery prefers a visible taskbar, reports failure, never discards uncertain state |
 
-## P1: interaction, accessibility and visual design
+## P1: monitors, DPI, fullscreen
 
 | ID | Scenario | Expected outcome |
 |---|---|---|
-| UX-01 | 0, 10, 30, 60+ running/pinned items | No inaccessible icon; overflow discoverable and controllable by keyboard |
-| UX-02 | Wheel over app icon, empty dock, widget and overflow area | Predictable behavior; scrolling and volume/window actions do not conflict |
-| UX-03 | Open context menu, thumbnail, widget flyout with auto-hide enabled | Dock remains visible while interacting, hides after all flyouts close |
-| UX-04 | 1366x768, 1080p, 4K; 100%-200% text scaling | No clipped Settings rows, unreadable captions or offscreen dialogs |
-| UX-05 | Keyboard only, screen reader, high contrast, reduced motion | Focus order, labels and control states remain understandable |
-| UX-06 | RTL language and long translations | No overlap/truncation of critical controls; localization fallback is intentional |
-| UX-07 | First launch, settings reset, invalid settings JSON | User understands what changed and can recover preferences |
-| UX-08 | Compare dock and Settings screenshots across bundled themes | Consistent spacing, contrast, icon sizing, active/hover indicators |
+| MON-01 | 1–3 monitors, mixed resolutions, portrait | One correctly placed dock per display, no duplicate reservations |
+| MON-02 | Secondary left/above primary (negative coordinates) | Correct hit testing, placement and work-area bounds |
+| MON-03 | 100/125/150/200% DPI mixed, primary changes | Physical and DIP coordinates agree; no scaling jump |
+| MON-04 | Unplug/replug display dock, change primary | Old windows/app-bars disposed, new ones created |
+| MON-05 | Disable the target monitor while running | Fallback to a connected monitor; Settings still opens |
+| MON-06 | Native taskbar at top/left/right or auto-hide | Reservation does not assume a bottom strip |
+| MON-07 | Fullscreen on one monitor, apps on another | Only the affected dock hides; Alt+Tab restores it |
+| MON-08 | Borderless vs maximized, HDR/refresh changes | No permanent false fullscreen suppression |
+| MON-09 | Move one app's windows across monitors | Current-monitor filtering picks the expected window |
+| MON-10 | Virtual desktop / window moved between desktops | Current-desktop filter follows preference; COM failure is logged |
+| MON-11 | Display scale or work area changes while dock is open | Repositions on `WM_DPICHANGED`/`WM_DISPLAYCHANGE` |
+| MON-12 | Explorer restarts during monitor re-enumeration | No stale handles reused; dock recovers when a display returns |
+
+## P1: interaction, accessibility, visual design
+
+| ID | Scenario | Expected outcome |
+|---|---|---|
+| UX-01 | 0/10/30/60+ pinned or running items | No inaccessible icon; overflow keyboard-controllable |
+| UX-02 | Wheel over icon, empty dock, widget, overflow | predictable behavior, no conflicting actions |
+| UX-03 | Menu/thumbnail/flyout open with auto-hide on | Dock stays visible until all flyouts close |
+| UX-04 | 1366x768, 1080p, 4K; 100–200% text scaling | No clipped rows, unreadable captions or offscreen dialogs |
+| UX-05 | Keyboard only, screen reader, high contrast, reduced motion | Understandable focus order, labels and states |
+| UX-06 | RTL language and long translations | No overlap or truncation of critical controls |
+| UX-07 | First launch, settings reset, invalid JSON | User understands what changed and can recover |
+| UX-08 | Compare screenshots across bundled themes | Consistent spacing, contrast, icon sizing, active/hover states |
 
 ## P1/P2: performance, security, delivery
 
-- PERF-01: Record idle and active CPU, private bytes, handles, GDI objects, GPU usage, UI frame time at 10/30/60 windows, 1/2/3 displays and 1h/8h uptime.
-  - The retired reference baseline workflow (`scripts/measure-baseline.ps1`) and its numbers no longer apply to the Rust binary. There is no Rust benchmark/baseline script yet; capture a fresh baseline with Windows tools on a real session and record OS build, EXE architecture, display topology and widget set with each run. Still open: every Rust baseline point above.
-- PERF-02: Profile window tracking refreshes, thumbnail previews, image decoding, widget timers and allocations; optimize only after measurement.
-  - Existing icon/flag/album-art decode caps and the bounded icon cache cover the obvious allocation sources. The historical ~180 MB private-byte figure came from the retired managed build and must not be attributed to the Rust binary; measure before drawing conclusions or adopting further changes.
-- SEC-01: Theme ZIP traversal, duplicate entries, reserved Windows names, size limits and import/export symmetry.
-- SEC-02: Update executable asset selection, SHA-256 verification, signing policy, atomic replacement, backup and rollback; coordinate with separate updater PR.
-- SEC-03: Review shell command arguments, paths with special characters, log privacy and permission boundaries.
-- REL-01: Release pipeline reproducibility, artifact checksums, GitHub Actions pinning and Windows test reporting. The release gate `scripts/check-release-version.ps1` checks tag ↔ Cargo workspace `0.4.0` ↔ Rust MSIX `0.4.0.0` before any build; `package-rust-release.ps1` records each artifact's watchdog architecture/PE machine/SHA-256 and verifies every `checksums.txt` row against disk before SLSA attestation.
-- ARCH-01: Reduce coupling between the GPUI dock, on-demand Settings UI and shell taskbar session in `crates` through small independently tested changes.
+- **PERF-01:** Record idle/active CPU, private bytes, handles, GDI objects, GPU usage and frame time at 10/30/60 windows, 1–3 displays and 1h/8h uptime. No Rust baseline script exists yet — capture a fresh baseline with Windows tools and record OS build, EXE architecture, topology and widget set.
+- **PERF-02:** Profile window tracking, thumbnails, image decoding, widget timers and allocations before optimizing. Old managed-build memory figures do not apply to the Rust EXE.
+- **SEC-01:** Theme ZIP traversal, duplicate entries, reserved Windows names, size limits, import/export symmetry.
+- **SEC-02:** Update asset selection, SHA-256 verification, signing, atomic replacement, backup/rollback.
+- **SEC-03:** Shell command arguments, special-character paths, log privacy, permission boundaries.
+- **REL-01:** Reproducible release, checksums, pinned Actions, Windows test reporting. `check-release-version.ps1` gates tag ↔ Cargo `0.4.0` ↔ MSIX `0.4.0.0`; `package-rust-release.ps1` records watchdog architecture/PE machine/SHA-256 and verifies `checksums.txt` before SLSA attestation.
+- **ARCH-01:** Reduce coupling between GPUI dock, Settings and the shell taskbar session in small tested changes.
 
 ## Cross-cutting regression controls
 
-The recurring failures in issues #79, #85, #86, #95, #126, #127, #128, #131 and #152 fall into three related classes:
+Recurring failures (issues #79, #85, #86, #95, #126–128, #131, #152) fall into three classes:
 
-1. **External lifecycle races:** Explorer, its taskbar windows, display enumeration, and startup registration change independently. Treat missing, replaced, delayed, or unresponsive shell objects as normal states. Revalidate window handles and process identity at the point of use; make reconciliation idempotent; bound retries and expose exhaustion in diagnostics.
-2. **Feedback loops in layout:** measured width, scrolling, magnification, and window placement can trigger one another. Keep one source of truth for geometry, avoid changing native reservations during transient drag/slider updates, and test threshold boundaries (including a one-pixel overflow) with deterministic inputs.
-3. **Validation gaps between simulation and Windows:** logic tests can prove transitions and calculations but cannot prove Explorer timing, shell broadcasts, actual AppBar behavior, or multi-monitor placement. Keep simulated checks fast, and separately record live Windows results with OS build, process architecture, display topology, DPI, exact steps, and logs.
+1. **External lifecycle races:** Explorer, taskbar windows, display enumeration and startup registration change independently. Treat missing or delayed shell objects as normal; revalidate handles at use; make reconciliation idempotent; bound retries and report exhaustion.
+2. **Layout feedback loops:** width, scrolling, magnification and placement trigger one another. Keep one geometry source of truth, avoid changing reservations during transient drag/slider updates, and test threshold boundaries with deterministic inputs.
+3. **Simulation vs Windows:** logic tests prove transitions, not Explorer timing or real AppBar behavior. Keep them fast and record live results separately with OS build, architecture, topology, DPI, steps and logs.
 
-Do not infer live compatibility from a passing source-level check. In particular, a simulated `TaskbarCreated` event does not prove Explorer restart recovery, and a single-monitor run does not prove secondary-taskbar handling. The current source-level recovery checks live in `crates/opentaskbar-core/tests/shell_recovery.rs`, `production_seams.rs` and `crates/opentaskbar-shell/src/journal.rs`; keep them aligned with the state machine and preserve separate live checks for the shell boundary.
+A passing source-level check is not live compatibility evidence: a simulated `TaskbarCreated` does not prove Explorer-restart recovery, and a single-monitor run does not prove secondary-taskbar handling. Source-level recovery checks live in `crates/opentaskbar-core/tests/shell_recovery.rs`, `production_seams.rs` and `crates/opentaskbar-shell/src/journal.rs`.
 
-## Windows compatibility evidence
+## Compatibility evidence
 
-For every release candidate, attach a small compatibility record to the release review:
+Attach a compatibility record to each release review:
 
 | Environment | Required evidence |
 |---|---|
-| Minimum supported Windows build, x64 | Startup, taskbar hide/restore, Explorer restart, and updater smoke checks |
-| Current supported Windows release, x64 | The same shell checks plus Start/Search anchoring and window previews |
-| Current supported Windows release, x86 if shipped | Native Win32 handle checks and watchdog recovery |
-| Two displays with mixed DPI and a negative virtual-screen coordinate | Primary and secondary taskbar visibility, placement, disconnect/reconnect recovery |
-| Insider/preview Windows build, when available | Exploratory taskbar/AppBar check; record failures separately from supported-release claims |
+| Minimum supported Windows build, x64 | Startup, taskbar hide/restore, Explorer restart, updater smoke |
+| Current Windows release, x64 | Same shell checks plus Start/Search anchoring and window previews |
+| Current Windows release, x86 if shipped | Win32 handle checks and watchdog recovery |
+| Two displays, mixed DPI, negative origin | Taskbar visibility, placement, disconnect/reconnect |
+| Insider/preview build, when available | Exploratory AppBar check; record failures separately |
 
-Record the exact OS build and app commit for each run. If a live test cannot be performed, mark it **not run**; do not mark it passed based on a simulation or static review. Windows shell behavior is outside this application’s release control, so long-term support requires a recurring compatibility check rather than an assumption that one tested build covers future Windows updates.
+Record OS build and app commit. Mark unrun cases **not run**, never passed from simulation or static review.
 
-## Exit criteria and evidence
+For each case record: OS build, topology, DPI, target monitor, taskbar edge, steps, expected/actual result, screenshot/video, logs and measurements. Implement P0 fixes before broad UI refactors.
 
-For each case record: OS build, display topology, DPI, target monitor, taskbar edge, exact steps, expected/actual result, screenshot/video, logs, CPU/memory/handle measurements when applicable, and regression test reference. Do not mark any case passing based on static review alone. Implement P0 fixes before broad UI refactors; split fixes into narrowly scoped PRs.
+## Rust port: source checks vs live evidence
 
-## Rust port parity controls
-
-The Rust port applies the same three regression classes above through its own deterministic test files under `crates/opentaskbar-core/tests/`:
-
-| Risk class | Rust source-level check | Live Windows evidence still required |
+| Risk class | Source-level check | Live evidence still required |
 |---|---|---|
-| External lifecycle races (Explorer, shell broadcasts, taskbar journal) | `shell_recovery.rs` — journal line parsing, retry backoff, watchdog args, `finally` modifier release, 3-attempt restore verification | Explorer restart recovery, `TaskbarCreated` reconcile, watchdog heartbeat, native flyout repositioning |
-| Layout feedback loops (magnification, gap/height units, reorder hysteresis) | `dock_layout_extra.rs` — critically damped spring, raised-cosine falloff, overlap guard, gap/height resolution, pinned-group ordering | Vertical dock hit-testing, DPI changes, multi-monitor edges, fullscreen overlay filtering |
-| Validation gaps between simulation and Windows | `full_backup.rs`, `wireless_battery_vendors.rs`, `media_timeline.rs`, `audio_mixer.rs`, `ai_usage_logic.rs`, `opentaskbar_core_tests.rs`, `i18n_parity.rs`, `telemetry_parity.rs` | Real HID reports, WinRT radio toggles, CoreAudio session matching, LibreWolf UIA, provider OAuth and quota refreshes |
+| Lifecycle races | `shell_recovery.rs` — journal parsing, retry backoff, watchdog args, modifier release, 3-attempt restore | Explorer restart, `TaskbarCreated`, watchdog heartbeat, flyout repositioning |
+| Layout loops | `dock_layout_extra.rs` — spring, falloff, overlap guard, gap/height units, group order | Vertical dock, DPI changes, multi-monitor edges, fullscreen overlays |
+| Simulation gaps | `full_backup.rs`, `wireless_battery_vendors.rs`, `media_timeline.rs`, `audio_mixer.rs`, `ai_usage_logic.rs`, `i18n_parity.rs`, `telemetry_parity.rs` | HID reports, WinRT radio toggles, CoreAudio, LibreWolf UIA, OAuth/quota refreshes |
 
-The same caveat applies: a passing Rust source-level check is **not** live compatibility evidence. Keep the "Windows compatibility evidence" table above for the Rust build, and record the commit and OS build for each run.
+## Rust live smoke list
 
-### Rust port live smoke list
+Run every row on a real Windows session before release sign-off. Record OS build, commit, EXE architecture, topology, DPI, result and logs; **not run** is the only valid initial status. Logs: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log` (`opentaskbar.log.old`); journals from the same folder.
 
-Run every row on a real Windows session before signing off a release candidate. Record OS build, commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log` (rotated copy `opentaskbar.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskbar\` folder. The taskbar/flyout journals are read from that same shared `%LOCALAPPDATA%\OpenTaskbar` folder.
+| # | Case | Steps | Pass condition | Status |
+|---|---|---|---|---|
+| S1 | Start/flyout anchoring | Open/close Start 10×, then Search/Control Center; restart Explorer mid-sequence | One generation per open; no stale close; correct anchor on both monitors | not run |
+| S2 | Auto-hide and overlays | Hover dock edge, Task View/Alt-Tab, fullscreen app, switch back | Reveals on entry; overlays never stick the dock hidden/visible | not run |
+| S3 | Watchdog, clean exit (x64 + x86) | Force-kill each EXE, then close normally; confirm watchdog PE matches architecture | Restores once on kill, never on clean exit, one heartbeat, no WOW64 fallback in x86 package | not run |
+| S4 | Radio toggles | Toggle Wi-Fi/Bluetooth with airplane mode on and off | UI matches OS, no UI-thread stall | not run |
+| S5 | Multi-monitor, mirrored dock | Move dock, disconnect/reconnect secondary, set negative origin | Live topology seen; no orphan dock; mirror follows `target_display` | not run |
+| S6 | Night Light and media | Toggle Night Light; play/pause/seek track and LibreWolf tab | Registry payload decoded; stale samples rejected; seek clamped | not run |
+| S7 | Full backup | Export, inspect, import on temp profile; edit manifest `Version` to `2`; craft `../` and `.exe` entries | v1 round-trips; other versions rejected; traversal/`.exe` never leaves staging | not run |
+| S8 | Updater, single instance | Run portable updater on Unicode path containing `%`; launch second dock | Path intact, no BOM, atomic replace; second instance exits via named mutex | not run |
 
-| # | Smoke case | Steps | Pass condition | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| S1 | Start/flyout anchoring | Open and close Start 10× in quick succession, then Search and Control Center; restart Explorer mid-sequence. | One generation per open; no stale close cancels a newer open; flyout follows the anchor on both monitors. | not run |
-| S2 | Auto-hide and shell overlays | Hover the dock edge, open Task View/Alt-Tab, enter a fullscreen app, switch back. | Dock reveals on pointer entry; overlays never leave the dock hidden or stuck visible. | not run |
-| S3 | Watchdog and clean exit (x64 + x86) | For each architecture, kill `OpenTaskBar.exe` with Task Manager (`taskkill /F`), then close it normally. Confirm the embedded PE and the app-directory `OpenTaskbarWatchdog.exe` match the EXE architecture (x86 = 0x014C, x64 = 0x8664). | Watchdog restores the shell once on kill; no restore after a clean exit; one process and one heartbeat event throughout; no WOW64 fallback binary in the x86 package. | not run |
-| S4 | Radio toggles | Toggle Wi-Fi and Bluetooth from Quick Settings with airplane mode on and off. | UI state matches the OS after each click; no UI-thread stall or crash from async completion. | not run |
-| S5 | Multi-monitor and mirrored dock | Move the dock between displays, disconnect/reconnect the secondary display, set a negative virtual-screen origin. | `enumerate_monitors` sees the live topology; no orphan dock, mirrored dock follows `target_display`. | not run |
-| S6 | Night Light and media | Toggle Night Light; play/pause/seek a track and a LibreWolf YouTube tab. | Registry payload decodes to the new state; stale samples are rejected; seek and rate changes stay clamped. | not run |
-| S7 | Full backup | Export, inspect, then import on a temp profile; edit the manifest `Version` to `2` and retry; craft `../` and `.exe` theme entries. | Version 1 round-trips settings/pins/theme; other versions are rejected; traversal/`.exe` entries never leave staging. | not run |
-| S8 | Updater and single instance | Run the portable updater with a Unicode path containing `%`; launch a second dock process. | Script keeps the path intact, has no BOM, and replaces atomically; second instance exits via the named mutex. | not run |
-
-Reliability-related flags and their real defaults are documented in `README.md`. `enable_live_tray_host=false` keeps the native tray untouched; `native_flyout_reposition=true` is now the default because Start/Search/Control Center repositioning is generation-cancelled and journal-backed — set it to `false` to fall back to journal-read-only/legacy positioning if a live regression appears. Release-level reproducibility is enforced by generated `checksums.txt` (no stale rows are tracked in the repository), a schemaVersion 2 `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, all covering the Rust-only artifacts.
+Reliability flags and their defaults are in `README.md` (`enable_live_tray_host=false`, `native_flyout_reposition=true`). Release artifacts use generated `checksums.txt`, a schemaVersion 2 `release-manifest.json`, `actions/attest` SLSA provenance and an optional VirusTotal scan.
