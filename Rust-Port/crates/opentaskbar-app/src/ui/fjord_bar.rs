@@ -43,8 +43,8 @@ pub const FJORD_BAR_ARG: &str = "--fjord-bar";
 ///
 /// While this is `false` the bar process is never spawned, the dock no longer
 /// offers the Show/Hide Fjord Bar command, and launch arguments for the bar host
-/// are ignored. Fjord Files and Wi-Fi are unaffected. Set this back to `true`
-/// (and revert the gated call sites in `main.rs` / `dock/mod.rs`) to restore it.
+/// are ignored. Fjord Files and Wi-Fi are unaffected. Setting this back to
+/// `true` restores every gated call site without any other changes.
 pub const FJORD_BAR_ENABLED: bool = false;
 
 const MENU_FILES: u32 = 1;
