@@ -21,8 +21,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opentaskbar_core::settings::DockSettings;
 
@@ -2817,6 +2817,10 @@ pub fn read_all() -> Vec<WirelessReading> {
         BatterySource::RazerHid,
         BatterySource::XInput,
         BatterySource::StandardHid,
+        // WS-4: the passive PnP Bluetooth registry reader must feed the same
+        // aggregator as the HID transports, otherwise BT-only headsets never
+        // appear in the widget when no BLE GATT interface is exposed.
+        BatterySource::Bluetooth,
         BatterySource::BluetoothGatt,
         BatterySource::AsusRogHid,
         BatterySource::CorsairHid,
@@ -3908,9 +3912,22 @@ fn merge_metadata(primary: &mut BatteryReading, secondary: &BatteryReading) {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct OutlierGuard {
     pending: HashMap<String, i32>,
+}
+
+/// The guard is process-wide: a fresh aggregator is built on every poll, but
+/// the "one poll of doubt" state must survive between those polls or the
+/// >=25-point drop protection is silently bypassed on every second sample.
+static PERSISTENT_GUARD: OnceLock<Mutex<OutlierGuard>> = OnceLock::new();
+
+/// Access to the live outlier guard (also used by tests to verify persistence).
+pub fn persistent_guard() -> MutexGuard<'static, OutlierGuard> {
+    PERSISTENT_GUARD
+        .get_or_init(|| Mutex::new(OutlierGuard::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl OutlierGuard {
@@ -4082,11 +4099,15 @@ pub fn read_all_with_settings(settings: &DockSettings) -> Vec<WirelessReading> {
 
     let fresh: Vec<BatteryReading> = read_all().iter().map(to_battery_reading).collect();
     let mut aggregator = WirelessBatteryAggregator::new(agg_settings);
+    // The aggregator object is rebuilt per poll; the guard is not. Carry the
+    // pending-drop state in and write it back so consecutive drops are detected.
+    aggregator.guard = persistent_guard().clone();
     let merged = aggregator
         .merge(fresh)
         .into_iter()
         .map(to_wireless_reading)
         .collect::<Vec<_>>();
+    *persistent_guard() = aggregator.guard.clone();
 
     if let Ok(mut last) = LAST_AGGREGATE.lock() {
         *last = Some((Instant::now(), merged.clone()));
@@ -4144,6 +4165,12 @@ impl WirelessBatteryAggregator {
         let Some(map) = root.as_object() else {
             return;
         };
+        // Absolute write time is authoritative. A clock moving backwards must
+        // never produce a future-dated (or negative-age) cache entry.
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         for (key, value) in map {
             if self.cache.len() >= 64 {
                 break;
@@ -4153,7 +4180,11 @@ impl WirelessBatteryAggregator {
                 continue;
             }
             let source_id = value.get("source").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
-            let age_secs = value.get("age_secs").and_then(|x| x.as_u64()).unwrap_or(0);
+            let age_secs = value
+                .get("written_at")
+                .and_then(|x| x.as_u64())
+                .map(|written| wall_now.saturating_sub(written))
+                .unwrap_or_else(|| value.get("age_secs").and_then(|x| x.as_u64()).unwrap_or(0));
             if Duration::from_secs(age_secs) > STALE_WINDOW {
                 continue;
             }
@@ -4167,6 +4198,12 @@ impl WirelessBatteryAggregator {
                     .unwrap_or(false),
                 source_from_id(source_id),
             );
+            if level < 0 {
+                // A cached -1 means "level unknown"; promote it to an explicit
+                // override instead of presenting a false 0% reading to the UI.
+                reading.level = -1;
+                reading.level_override = Some("-1".to_owned());
+            }
             reading.stale = true;
             reading.sampled_at = now - Duration::from_secs(age_secs.min(1800));
             self.cache.insert(key.clone(), reading);
@@ -4180,6 +4217,10 @@ impl WirelessBatteryAggregator {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut root = serde_json::Map::new();
         for (key, r) in &self.cache {
             root.insert(
@@ -4191,13 +4232,21 @@ impl WirelessBatteryAggregator {
                     "charging": r.charging,
                     "source": r.source as u8,
                     "age_secs": now.saturating_duration_since(r.sampled_at).as_secs(),
+                    "written_at": wall_now,
                 }),
             );
         }
-        let _ = std::fs::write(
-            path,
-            serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_default(),
-        );
+        let json = serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_default();
+        // Write to a sibling temporary file then rename: readers never observe a
+        // half-written JSON document when the dock restarts mid-save.
+        let temp = path.with_extension("json.tmp");
+        if std::fs::write(&temp, json.as_bytes()).is_err() {
+            let _ = std::fs::remove_file(&temp);
+            return;
+        }
+        if std::fs::rename(&temp, path).is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
     }
 
     /// Merges fresh readings with the cache: outlier protection, stale retention (30 min),
@@ -4220,7 +4269,9 @@ impl WirelessBatteryAggregator {
             );
             active.insert(key.clone());
             reading.name = self.settings.display_name(&reading);
-            if reading.connected && reading.level >= 0 {
+            // An explicit -1 override means the level is unknown; never feed it
+            // through the drop guard or present it as a real percentage.
+            if reading.connected && reading.level >= 0 && reading.level_override.is_none() {
                 let prev = self.cache.get(&key).map(|r| r.level).unwrap_or(-1);
                 let (level, guarded) = self.guard.check(&key, prev, reading.level);
                 if guarded && let Some(prev_reading) = self.cache.get(&key) {
@@ -4262,7 +4313,20 @@ impl WirelessBatteryAggregator {
             self.cache.remove(&key);
             self.guard.pending.remove(&key);
         }
-        output.sort_by_key(|r| (r.stale, r.charging, r.level));
+        // Deterministic source-priority ordering: freshest, charging devices
+        // from the most trustworthy transports first.
+        output.sort_by(|a, b| {
+            a.stale
+                .cmp(&b.stale)
+                .then_with(|| b.charging.cmp(&a.charging))
+                .then_with(|| a.source.priority().cmp(&b.source.priority()))
+                .then_with(|| a.level.cmp(&b.level))
+                .then_with(|| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                })
+        });
         self.save(now);
         output
     }
@@ -4587,6 +4651,64 @@ mod ws_g_tests {
         let (level, guarded) = guard.check("dev", 90, 89);
         assert_eq!(level, 89);
         assert!(!guarded);
+    }
+
+    #[test]
+    fn outlier_guard_survives_a_fresh_aggregator() {
+        let key = "ws4-persistent-guard";
+        persistent_guard().pending.remove(key);
+        let (level, guarded) = persistent_guard().check(key, 90, 60);
+        assert_eq!(level, 90);
+        assert!(guarded, "first implausible drop must be held");
+
+        // A new aggregator (as built on every poll) must inherit the doubt.
+        let mut aggregator = WirelessBatteryAggregator::new(AggregatorSettings::default());
+        aggregator.guard = persistent_guard().clone();
+        let (level, guarded) = aggregator.guard.check(key, 90, 55);
+        assert_eq!(level, 55);
+        assert!(!guarded, "second consecutive drop must be accepted");
+        *persistent_guard() = aggregator.guard;
+        persistent_guard().pending.remove(key);
+    }
+
+    #[test]
+    fn disk_cache_handles_future_skew_and_minus_one_override() {
+        let dir = std::env::temp_dir().join(format!("otb-wb-cache-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cache.json");
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let document = serde_json::json!({
+            "unknown": {
+                "id": "unknown", "name": "Unknown", "level": -1,
+                "charging": false, "source": 0, "age_secs": 0,
+                "written_at": wall_now + 600
+            },
+            "fresh": {
+                "id": "fresh", "name": "Headset", "level": 80,
+                "charging": true, "source": 2, "age_secs": 0,
+                "written_at": wall_now
+            }
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+        let mut aggregator = WirelessBatteryAggregator::new(AggregatorSettings::default())
+            .with_cache_path(path.clone());
+        aggregator.ensure_loaded(Instant::now());
+        let unknown = &aggregator.cache["unknown"];
+        assert_eq!(unknown.level, -1);
+        assert_eq!(unknown.level_override.as_deref(), Some("-1"));
+        assert!(unknown.stale);
+        assert_eq!(aggregator.cache["fresh"].level, 80);
+
+        aggregator.save(Instant::now());
+        assert!(path.is_file());
+        assert!(!path.with_extension("json.tmp").exists());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"written_at\""));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
