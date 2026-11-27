@@ -4,7 +4,10 @@
 //! The settings UI owns the widgets; this module owns the values they edit:
 //! an HSV field + hue/alpha sliders, a 16-stop gradient, an angle and a hex box.
 
-use super::tokens::{Gradient, GradientStop, Rgba, TokenValue};
+use super::tokens::{
+    Gradient, GradientStop, Rgba, TokenValue, gradient_endpoints, picker_to_theme_angle,
+    theme_to_picker_angle,
+};
 
 /// Maximum number of gradient stops exposed by the picker (C# `GradientStopCount`).
 pub const MAX_GRADIENT_STOPS: usize = 16;
@@ -100,15 +103,19 @@ impl GradientSpec {
         Self::new(stops, angle_deg)
     }
 
-    /// Converts the angle into a unit vector between `start` and `end`.
+    /// Converts the picker angle into endpoints using the single shared helper.
     pub fn vector(&self) -> ((f64, f64), (f64, f64)) {
-        let rad = self.angle_deg.to_radians();
-        let dx = rad.cos();
-        let dy = rad.sin();
-        (
-            (0.5 - dx * 0.5, 0.5 - dy * 0.5),
-            (0.5 + dx * 0.5, 0.5 + dy * 0.5),
-        )
+        gradient_endpoints(self.to_theme_angle())
+    }
+
+    /// Picker angle (`0 = horizontal`, `90 = vertical`) → C# theme angle.
+    pub fn to_theme_angle(&self) -> f64 {
+        picker_to_theme_angle(self.angle_deg)
+    }
+
+    /// C# theme angle → picker angle; use when persisting a picker brush as `pack.json`.
+    pub fn from_theme_angle(angle_deg: f64) -> f64 {
+        theme_to_picker_angle(angle_deg)
     }
 
     pub fn to_gradient(&self) -> Gradient {

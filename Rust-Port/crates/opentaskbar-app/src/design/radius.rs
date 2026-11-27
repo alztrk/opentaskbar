@@ -4,7 +4,7 @@
 //! reference values so a pack with tighter corners stays tighter while following the user's
 //! master dock radius. `DockSheenRadius` rounds only the two top corners.
 
-use super::tokens::CornerRadius;
+use super::tokens::{CornerRadius, TokenMap, TokenValue};
 
 /// The nine radii C# `RadiusManager.Keys` derives from the dock radius.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +110,33 @@ impl RadiusManager {
     /// C5 contract: derive all nine keys from a user dock radius.
     pub fn derive(base: i32) -> NineKeys {
         Self::new().derive_for(base)
+    }
+
+    /// Production bridge: reads C# radius tokens from the resolved theme layer.
+    /// A pack that authors `DockRadius: 18` shifts every derived radius with it.
+    pub fn from_tokens(tokens: &TokenMap) -> Self {
+        let mut references = RadiusReferences::new();
+        for key in NineKeys::KEYS
+            .iter()
+            .copied()
+            .chain(std::iter::once("DockSheenRadius"))
+        {
+            let value = match tokens.get(key) {
+                Some(TokenValue::CornerRadius(r)) => Some(r.top_left),
+                Some(TokenValue::Double(v)) if v.is_finite() => Some(*v as i32),
+                Some(TokenValue::Solid(c)) => Some(i32::from(c.r)),
+                _ => None,
+            };
+            if let Some(value) = value {
+                references.insert(key.to_owned(), value);
+            }
+        }
+        Self::with_references(references)
+    }
+
+    /// Single resolved radius by C# key, including `DockSheenRadius`.
+    pub fn value(&self, key: &str) -> Option<i32> {
+        self.rebuild().get(key).map(|radius| radius.top_left)
     }
 
     /// Uses theme-pack reference values (e.g. a pack whose `DockRadius` is 18).

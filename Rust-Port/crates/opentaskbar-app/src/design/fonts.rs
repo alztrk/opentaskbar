@@ -51,8 +51,15 @@ pub fn set_selected_family(family: &str) {
         .expect("font lock poisoned") = selected;
 }
 
-/// The font Windows itself uses for menus, e.g. `"Segoe UI"` on Windows 10/11.
+/// The app's default UI family. Inter is bundled (four weights) so every machine
+/// renders the same typography; this is used by both dock DComp text and GPUI.
 pub fn native_ui_face() -> &'static str {
+    INTER_FAMILY
+}
+
+/// The font Windows itself uses for menus, e.g. `"Segoe UI"` on Windows 10/11.
+/// Kept for the OS-font setting/label and as the final GDI fallback.
+pub fn system_menu_face() -> &'static str {
     NATIVE_FACE.get_or_init(|| {
         let mut metrics: NONCLIENTMETRICSW = unsafe { std::mem::zeroed() };
         metrics.cbSize = size_of::<NONCLIENTMETRICSW>() as u32;
@@ -103,7 +110,7 @@ pub fn installed_fonts() -> &'static [String] {
         families.sort_by_key(|name| name.to_lowercase());
         families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         if families.is_empty() {
-            families.push(native_ui_face().to_owned());
+            families.push(system_menu_face().to_owned());
         }
         families
     })
@@ -156,7 +163,12 @@ pub fn ui_family_list() -> String {
 
 fn family_list_with(primary: &str) -> String {
     let mut families = vec![primary.to_owned()];
-    for fallback in ["Segoe UI", "Microsoft Sans Serif", "Arial"] {
+    for fallback in [
+        system_menu_face(),
+        "Segoe UI",
+        "Microsoft Sans Serif",
+        "Arial",
+    ] {
         if !families
             .iter()
             .any(|family| family.eq_ignore_ascii_case(fallback))
@@ -169,8 +181,56 @@ fn family_list_with(primary: &str) -> String {
 
 /// Pushes persisted font settings into the process-wide render state.
 pub fn apply_settings(settings: &DockSettings) {
+    ensure_inter_fonts();
     set_selected_family(&settings.ui_font_family);
     set_font_size(settings.ui_font_size);
+}
+
+/// Makes the bundled Inter faces available to Win32/DirectWrite text (dock DComp,
+/// flyouts and menus). GPUI registers the same bytes through `load_bundled_fonts`.
+#[cfg(windows)]
+pub fn ensure_inter_fonts() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        use windows_sys::Win32::Graphics::Gdi::AddFontResourceW;
+        let Ok(directory) = std::env::var("LOCALAPPDATA") else {
+            return;
+        };
+        let directory = std::path::Path::new(&directory)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Fonts");
+        if std::fs::create_dir_all(&directory).is_err() {
+            return;
+        }
+        for (file, bytes) in bundled_font_files() {
+            let path = directory.join(file);
+            if !path.exists() && std::fs::write(&path, bytes).is_err() {
+                continue;
+            }
+            let wide: Vec<u16> = path
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            unsafe {
+                AddFontResourceW(wide.as_ptr());
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn ensure_inter_fonts() {}
+
+fn bundled_font_files() -> [(&'static str, &'static [u8]); 4] {
+    [
+        ("Inter-Regular.ttf", FONT_REGULAR),
+        ("Inter-Medium.ttf", FONT_MEDIUM),
+        ("Inter-SemiBold.ttf", FONT_SEMIBOLD),
+        ("Inter-Bold.ttf", FONT_BOLD),
+    ]
 }
 
 /// BCP 47 culture passed to DirectWrite so locale-specific glyph selection works.
@@ -197,11 +257,27 @@ mod tests {
 
     #[test]
     fn native_face_is_non_empty_and_list_has_fallbacks() {
-        assert!(!native_ui_face().is_empty());
+        assert_eq!(native_ui_face(), INTER_FAMILY);
+        assert!(!system_menu_face().is_empty());
         let list = ui_family_list();
+        assert!(list.starts_with(INTER_FAMILY), "{list}");
         assert!(list.contains(','), "{list}");
         assert!(list.to_ascii_lowercase().contains("arial"), "{list}");
         assert_eq!(ui_locale().len(), 5);
+    }
+
+    #[test]
+    fn all_four_inter_weights_are_registered() {
+        assert_eq!(INTER_WEIGHTS, [400, 500, 600, 700]);
+        for weight in INTER_WEIGHTS {
+            assert!(inter_font_file(weight).is_some());
+            assert_eq!(inter_family_for_weight(weight), INTER_FAMILY);
+        }
+        assert_eq!(
+            bundled_fonts(),
+            bundled_font_files().map(|(_, bytes)| bytes)
+        );
+        assert!(inter_font_file(800).is_none());
     }
 
     #[test]
@@ -213,11 +289,11 @@ mod tests {
     }
 
     #[test]
-    fn installed_fonts_contains_native_face() {
+    fn installed_fonts_contains_system_face() {
         assert!(
             installed_fonts()
                 .iter()
-                .any(|f| f.eq_ignore_ascii_case(native_ui_face()))
+                .any(|f| f.eq_ignore_ascii_case(system_menu_face()))
         );
     }
 }
@@ -236,9 +312,29 @@ pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../../../Fonts/Inter-SemiBol
 pub const FONT_BOLD: &[u8] = include_bytes!("../../../../Fonts/Inter-Bold.ttf");
 pub const FONT_LICENSE: &[u8] = include_bytes!("../../../../Fonts/LICENSE.txt");
 
+/// All four embedded font weights, in ascending weight order: Regular/Medium/SemiBold/Bold.
+pub const INTER_WEIGHTS: [u16; 4] = [400, 500, 600, 700];
+
 /// All four embedded font weights, in ascending weight order.
 pub fn bundled_fonts() -> [&'static [u8]; 4] {
     [FONT_REGULAR, FONT_MEDIUM, FONT_SEMIBOLD, FONT_BOLD]
+}
+
+/// Asset path for one of the four Inter weights (GPUI picks the nearest face).
+pub fn inter_font_file(weight: u16) -> Option<&'static str> {
+    match weight {
+        400 => Some("fonts/Inter-Regular.ttf"),
+        500 => Some("fonts/Inter-Medium.ttf"),
+        600 => Some("fonts/Inter-SemiBold.ttf"),
+        700 => Some("fonts/Inter-Bold.ttf"),
+        _ => None,
+    }
+}
+
+/// Family name to pass to GPUI `font_family()` for any of the four weights.
+pub fn inter_family_for_weight(weight: u16) -> &'static str {
+    debug_assert!(INTER_WEIGHTS.contains(&weight), "unsupported Inter weight");
+    INTER_FAMILY
 }
 
 /// Registers Inter with GPUI. Call once from app startup before creating windows.

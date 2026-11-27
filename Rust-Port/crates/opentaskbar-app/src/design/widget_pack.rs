@@ -9,7 +9,8 @@ use opentaskbar_core::settings::AppTheme;
 use serde_json::{Map, Value};
 
 use super::tokens::{
-    CornerRadius, Gradient, GradientStop, Rgba, Thickness, TokenKind, TokenMap, TokenValue,
+    CornerRadius, Gradient, GradientStop, RadialGradient, Rgba, Thickness, TokenKind, TokenMap,
+    TokenValue, editor_token_kind, gradient_endpoints,
 };
 
 pub const MANIFEST_FILE_NAME: &str = "pack.json";
@@ -124,7 +125,7 @@ impl WidgetPackManifest {
     }
 }
 
-/// Parses C#-style JSON: `//` comments and trailing commas are allowed (matches
+/// Parses C#-style JSON: `//` and `/* … */` comments and trailing commas are allowed (matches
 /// `JsonSerializerOptions { ReadCommentHandling.Skip, AllowTrailingCommas = true }`).
 pub fn parse_json_lenient(text: &str) -> Result<Value, String> {
     let chars: Vec<char> = text.chars().collect();
@@ -154,6 +155,14 @@ pub fn parse_json_lenient(text: &str) -> Result<Value, String> {
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
             continue;
         }
         cleaned.push(c);
@@ -218,7 +227,13 @@ where
         return result;
     }
     for (key, value) in raw {
-        let kind = current(key).unwrap_or_else(|| TokenKind::for_key(key));
+        // C# `WidgetPack.Resolve` rejects keys the current resource tree does not know.
+        // Rust's registry replaces `Application.Current.Resources[key]`; a heuristic
+        // guess must never turn an unknown key into a live override.
+        let Some(kind) = current(key).or_else(|| editor_token_kind(key)) else {
+            result.problems.push(format!("Unknown token '{key}'."));
+            continue;
+        };
         match convert(value, kind) {
             Some(token) => {
                 result.tokens.insert(key.to_owned(), token);
@@ -300,7 +315,8 @@ pub fn convert(value: &Value, kind: TokenKind) -> Option<TokenValue> {
     }
 }
 
-/// Brushes accept either `#AARRGGBB` / `#RRGGBB` or a gradient object.
+/// Brushes accept a named/`#RGB`… colour, a linear gradient object, or a
+/// `{"type":"radial",…}` object (C# `RadialGradientBrush` such as `IconHoverGlow`).
 pub fn parse_brush(value: &Value) -> Option<TokenValue> {
     if let Value::String(text) = value {
         return Rgba::from_hex(text).map(TokenValue::Solid);
@@ -308,40 +324,18 @@ pub fn parse_brush(value: &Value) -> Option<TokenValue> {
     let Value::Object(object) = value else {
         return None;
     };
-    let stops_value = object.get("stops")?;
-    let Value::Array(stops) = stops_value else {
+    let Value::Array(raw_stops) = object.get("stops")? else {
         return None;
     };
-    if stops.len() < 2 || stops.len() > MAX_GRADIENT_STOPS {
+    if raw_stops.len() < 2 || raw_stops.len() > MAX_GRADIENT_STOPS {
         return None;
     }
-    let mut colors = Vec::with_capacity(stops.len());
-    for stop in stops {
+    let mut colors = Vec::with_capacity(raw_stops.len());
+    for stop in raw_stops {
         let Value::String(text) = stop else {
             return None;
         };
         colors.push(Rgba::from_hex(text)?);
-    }
-
-    let direction = object
-        .get("direction")
-        .and_then(Value::as_str)
-        .unwrap_or("vertical")
-        .to_ascii_lowercase();
-    let mut start = (0.0, 0.0);
-    let mut end = match direction.as_str() {
-        "horizontal" => (1.0, 0.0),
-        "diagonal" => (1.0, 1.0),
-        _ => (0.0, 1.0),
-    };
-    if let Some(angle) = object.get("angle").and_then(Value::as_f64) {
-        if !angle.is_finite() || !(0.0..=360.0).contains(&angle) {
-            return None;
-        }
-        let radians = angle * std::f64::consts::PI / 180.0;
-        let (sin, cos) = radians.sin_cos();
-        start = (0.5 - sin / 2.0, 0.5 + cos / 2.0);
-        end = (0.5 + sin / 2.0, 0.5 - cos / 2.0);
     }
 
     let positions = if let Some(Value::Array(positions)) = object.get("positions") {
@@ -362,12 +356,64 @@ pub fn parse_brush(value: &Value) -> Option<TokenValue> {
             .map(|i| i as f64 / (colors.len() - 1) as f64)
             .collect()
     };
-
-    let stops = colors
+    let stops: Vec<GradientStop> = colors
         .into_iter()
         .zip(positions)
         .map(|(color, position)| GradientStop { color, position })
         .collect();
+
+    let kind = object
+        .get("type")
+        .or_else(|| object.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("linear")
+        .to_ascii_lowercase();
+    if kind == "radial" {
+        let point = |key: &str, fallback: (f64, f64)| -> Option<(f64, f64)> {
+            let Some(Value::Array(values)) = object.get(key) else {
+                return Some(fallback);
+            };
+            let x = values.first()?.as_f64()?;
+            let y = values.get(1)?.as_f64()?;
+            if !x.is_finite() || !y.is_finite() {
+                return None;
+            }
+            Some((x, y))
+        };
+        let center = point("center", (0.5, 0.5))?;
+        let origin = point("origin", center)?;
+        let radius = point("radius", (0.5, 0.5))?;
+        if [center.0, center.1, origin.0, origin.1, radius.0, radius.1]
+            .iter()
+            .any(|v| !(0.0..=2.0).contains(v))
+        {
+            return None;
+        }
+        return Some(TokenValue::RadialGradient(RadialGradient::new(
+            stops, center, origin, radius,
+        )));
+    }
+    if kind != "linear" {
+        return None;
+    }
+
+    let direction = object
+        .get("direction")
+        .and_then(Value::as_str)
+        .unwrap_or("vertical")
+        .to_ascii_lowercase();
+    let (start, end) = if let Some(angle) = object.get("angle").and_then(Value::as_f64) {
+        if !angle.is_finite() || !(0.0..=360.0).contains(&angle) {
+            return None;
+        }
+        gradient_endpoints(angle)
+    } else {
+        match direction.as_str() {
+            "horizontal" => ((0.0, 0.5), (1.0, 0.5)),
+            "diagonal" => ((0.0, 0.0), (1.0, 1.0)),
+            _ => ((0.5, 0.0), (0.5, 1.0)),
+        }
+    };
     Some(TokenValue::Gradient(Gradient { stops, start, end }))
 }
 
@@ -480,6 +526,68 @@ mod tests {
     }
 
     #[test]
+    fn radial_gradient_and_short_hex_colors_parse() {
+        let value: Value = serde_json::from_str(
+            r##"{"type":"radial","stops":["#fff","Transparent"],"center":[0.5,0.75],"origin":[0.5,0.8],"radius":[0.6,0.6]}"##,
+        )
+        .unwrap();
+        let TokenValue::RadialGradient(g) = convert(&value, TokenKind::Brush).unwrap() else {
+            panic!("expected radial gradient")
+        };
+        assert_eq!(g.stops[0].color, Rgba::from_rgb(255, 255, 255));
+        assert_eq!(g.stops[1].color, Rgba::new(0, 0, 0, 0));
+        assert_eq!(g.center, (0.5, 0.75));
+        assert_eq!(g.origin, (0.5, 0.8));
+        assert_eq!(g.radius, (0.6, 0.6));
+        assert_eq!(
+            convert(&Value::from("#ABCDEF"), TokenKind::Brush),
+            Some(TokenValue::Solid(Rgba::from_rgb(0xAB, 0xCD, 0xEF)))
+        );
+    }
+
+    #[test]
+    fn block_comments_are_stripped_without_touching_string_literals() {
+        let manifest = WidgetPackManifest::from_str(
+            r##"{
+                /* a block comment with "quotes" and // inside */
+                "tokens": { "WidgetAccent": "#12AB34", // line comment
+                            "TextPrimary": "#FFF" },
+            }"##,
+        )
+        .unwrap();
+        assert_eq!(manifest.tokens.len(), 2);
+        let resolved = resolve_widget_tokens(&manifest, AppTheme::Dark, |_| None);
+        assert!(resolved.problems.is_empty(), "{:?}", resolved.problems);
+        assert_eq!(
+            resolved.tokens.get("WidgetAccent"),
+            Some(&TokenValue::Solid(Rgba::from_rgb(0x12, 0xAB, 0x34)))
+        );
+    }
+
+    #[test]
+    fn unknown_tokens_are_reported_instead_of_accepted() {
+        let manifest = WidgetPackManifest::from_str(
+            r##"{"tokens":{"NoSuchToken":5,"WidgetRadius":8,"AlsoUnknown":"#fff"}}"##,
+        )
+        .unwrap();
+        let result = resolve_widget_tokens(&manifest, AppTheme::Dark, |_| None);
+        assert_eq!(result.tokens.len(), 1);
+        assert_eq!(result.problems.len(), 2);
+        assert!(
+            result
+                .problems
+                .iter()
+                .any(|p| p.contains("Unknown token 'NoSuchToken'"))
+        );
+        assert!(
+            result
+                .problems
+                .iter()
+                .any(|p| p.contains("Unknown token 'AlsoUnknown'"))
+        );
+    }
+
+    #[test]
     fn bundled_packs_have_valid_manifests() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes");
         for id in [
@@ -494,6 +602,14 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{id}: {e}"));
             assert!(pack.raw_for(AppTheme::Dark).len() <= MAX_TOKENS);
             assert!(pack.raw_for(AppTheme::Light).len() <= MAX_TOKENS);
+            for theme in [AppTheme::Dark, AppTheme::Light] {
+                let resolved = resolve_widget_tokens(&pack, theme, |_| None);
+                assert!(
+                    resolved.problems.is_empty(),
+                    "{id} {theme:?}: {:?}",
+                    resolved.problems
+                );
+            }
             for (_key, value) in pack.raw_for(AppTheme::Dark) {
                 let kind = TokenKind::for_key(_key);
                 assert!(

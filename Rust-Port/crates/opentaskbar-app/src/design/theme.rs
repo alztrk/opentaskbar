@@ -4,6 +4,7 @@
 //! are applied in order **base palette < Windows accent < theme pack**, so an explicitly selected
 //! pack wins for the keys it defines. Rebuilding a surface emits `ThemeChanged`.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -11,9 +12,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use opentaskbar_core::settings::{AppTheme, DockSettings, SurfaceBackground};
 use serde_json::Value;
 
-use super::brush::GradientSpec;
 use super::palette;
-use super::tokens::{Gradient, Rgba, TokenKind, TokenMap, TokenValue};
+use super::radius::RadiusManager;
+#[allow(unused_imports)]
+pub use super::tokens::editor_token_count;
+use super::tokens::{
+    CornerRadius, Gradient, Rgba, Thickness, TokenKind, TokenMap, TokenValue, editor_token_kind,
+};
+use super::widget_pack::parse_brush;
 use super::windows_palette;
 
 /// The four themed surfaces of the app.
@@ -104,6 +110,10 @@ pub struct SurfaceMaterials {
     pub content: Option<TokenValue>,
     pub hover: TokenValue,
     pub pressed: TokenValue,
+    /// Snapshot of every registered editor token after all layers are applied.
+    pub tokens: TokenMap,
+    /// Concentric radii derived from the live dock radius and pack references.
+    pub radii: BTreeMap<String, CornerRadius>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +143,8 @@ struct ThemeState {
     /// Explicit per-surface opacity values. These win over the legacy global
     /// `surface_opacity` fallback on every `apply`, so live previews survive a reload.
     opacity_overrides: BTreeMap<SurfaceKind, f64>,
+    /// Radius hierarchy derived from the resolved `DockRadius` token + pack references.
+    radii: RadiusManager,
 }
 
 impl Default for ThemeState {
@@ -160,7 +172,9 @@ impl Default for ThemeState {
             legacy_opacity: 0.9,
             settings_opacity: 0.95,
             opacity_overrides: BTreeMap::new(),
+            radii: RadiusManager::new(),
         };
+        state.refresh_radii();
         state.rebuild_all();
         state
     }
@@ -194,6 +208,42 @@ impl ThemeState {
             .or_else(|| self.base.get(key))
             .cloned()
             .unwrap_or_else(|| self.brush(key))
+    }
+
+    /// Every C# editor token, resolved through the real layer stack. This is the
+    /// snapshot handed to GPUI/DComp consumers via `ThemeManager::materials`.
+    fn editor_tokens(&self) -> TokenMap {
+        super::tokens::EDITOR_TOKENS
+            .iter()
+            .filter_map(|token| {
+                self.resolve(token.key)
+                    .map(|v| (token.key.to_owned(), v.clone()))
+            })
+            .collect()
+    }
+
+    fn refresh_radii(&mut self) {
+        self.radii = RadiusManager::from_tokens(&self.editor_tokens());
+    }
+
+    /// Replaces the theme-pack layer (used by `apply_pack_tokens_to_palette`).
+    fn set_pack(&mut self, values: TokenMap) {
+        self.pack = values;
+        if self
+            .pack
+            .get("DockBackgroundMode")
+            .and_then(|v| match v {
+                TokenValue::Mode(m) => Some(m == "None"),
+                _ => None,
+            })
+            .unwrap_or(false)
+        {
+            self.pack.insert("DockBorderMaterial".into(), transparent());
+            self.pack.insert("DockHighlight".into(), transparent());
+        }
+        self.refresh_radii();
+        self.generation = self.generation.wrapping_add(1);
+        self.rebuild_all();
     }
 
     fn rebuild_all(&mut self) {
@@ -307,6 +357,8 @@ impl ThemeState {
             content,
             hover: hover_source.scaled_alpha(scale),
             pressed: pressed_source.scaled_alpha(scale),
+            tokens: self.editor_tokens(),
+            radii: self.radii.rebuild(),
         }
     }
 }
@@ -448,7 +500,240 @@ fn default_palette(dark: bool) -> TokenMap {
             Rgba::from_rgb(p.elevated.0, p.elevated.1, p.elevated.2),
         )),
     );
+    add_csharp_editor_defaults(&mut map, dark);
     map
+}
+
+/// Seeds every C# editor token from `Design/Palettes/{Dark,Light}.xaml` and
+/// `Design/Theme.xaml` so `ThemeManager::resolve()` always has a typed value,
+/// even before a pack or the theme editor overrides it.
+fn add_csharp_editor_defaults(map: &mut TokenMap, dark: bool) {
+    let solid = |map: &mut TokenMap, key: &str, hex: &str| {
+        if let Some(color) = Rgba::from_hex(hex) {
+            map.entry(key.to_owned())
+                .or_insert(TokenValue::Solid(color));
+        }
+    };
+    let number = |map: &mut TokenMap, key: &str, value: f64| {
+        map.entry(key.to_owned())
+            .or_insert(TokenValue::Double(value));
+    };
+    let radius = |map: &mut TokenMap, key: &str, value: i32| {
+        map.entry(key.to_owned())
+            .or_insert(TokenValue::CornerRadius(CornerRadius::uniform(value)));
+    };
+    let color = |d: &'static str, l: &'static str| -> &'static str { if dark { d } else { l } };
+
+    solid(map, "TextPrimary", color("#FFF3F4F6", "#FF1B1B1B"));
+    solid(map, "TextSecondary", color("#FFAAB2C0", "#FF61666E"));
+    solid(map, "AccentBrush", color("#FF38BDF8", "#FF0369A1"));
+    solid(map, "AccentText", color("#FF05070B", "#FFFFFFFF"));
+    solid(map, "StrokeSubtle", color("#FF3A4352", "#FFE5E5E5"));
+    solid(map, "StrokeFocus", color("#FF38BDF8", "#FF0369A1"));
+    solid(map, "SurfaceSelected", color("#14FFFFFF", "#0D000000"));
+    solid(map, "SurfaceHover", color("#18FFFFFF", "#12162038"));
+    solid(map, "SurfacePressed", color("#22FFFFFF", "#16000000"));
+    map.entry("DockBackgroundMode".into())
+        .or_insert(TokenValue::Mode("Glass".into()));
+    radius(map, "DockRadius", 20);
+    radius(map, "DockInnerRadius", 19);
+    radius(map, "ControlRadius", 12);
+    radius(map, "PopupRadius", 12);
+    radius(map, "PopupInnerRadius", 11);
+    radius(map, "WidgetRadius", 12);
+    radius(map, "DockWidgetRadius", 12);
+    radius(map, "DockWidgetActionRadius", 5);
+    radius(map, "WidgetFieldRadius", 7);
+    radius(map, "WidgetQuickActionRadius", 18);
+    map.entry("DockWidgetPadding".into())
+        .or_insert_with(|| TokenValue::Thickness(Thickness::parse("9,5").unwrap()));
+    map.entry("SettingsPageInset".into())
+        .or_insert_with(|| TokenValue::Thickness(Thickness::parse("28,24,28,36").unwrap()));
+    number(map, "DockShadowBlur", 28.0);
+    number(map, "DockShadowOpacity", 0.45);
+    number(map, "SettingsBackgroundOpacity", 0.95);
+    number(map, "MenuLabelWidth", 286.0);
+    number(map, "TextSizeBody", 13.0);
+    number(map, "TextSizeCaption", 12.0);
+    number(map, "TextSizeWidgetValue", 18.0);
+    solid(map, "DockShadowColor", "#FF000000");
+
+    solid(map, "WidgetCard", "#00000000");
+    solid(map, "WidgetCardHover", color("#22FFFFFF", "#18000000"));
+    solid(map, "WidgetCardPressed", color("#38FFFFFF", "#2A000000"));
+    solid(map, "WidgetCardStroke", "#00000000");
+    solid(map, "WidgetTrack", color("#2EFFFFFF", "#1F000000"));
+    solid(map, "WidgetAccent", color("#FF2DD4BF", "#FF0D9488"));
+    solid(map, "DockWidgetSurface", color("#38252B34", "#AFFFFFFF"));
+    solid(map, "MenuDivider", color("#FF323A48", "#FFE8E8E8"));
+    solid(map, "SurfacePopup", color("#F7252B37", "#F7FFFFFF"));
+    solid(map, "SettingsControl", color("#FF252B37", "#FFFFFFFF"));
+    solid(map, "SettingsControlHover", color("#14FFFFFF", "#0D000000"));
+    solid(map, "IconForeground", color("#FFF3F4F6", "#FF1B1B1B"));
+    solid(map, "StartTileBackground", "#00000000");
+    solid(map, "StartTileStroke", "#00000000");
+    solid(map, "StartTileHover", color("#2BFFFFFF", "#1E000000"));
+    solid(map, "WidgetWarning", color("#FFFBBF24", "#FFD97706"));
+    solid(map, "WidgetFocusAccent", color("#FFEF4444", "#FFDC2626"));
+    map.entry("InterfaceFont".into())
+        .or_insert(TokenValue::FontFamily(
+            super::fonts::INTER_FAMILY.to_owned(),
+        ));
+
+    let logo = if dark {
+        ["#FF38BDF8", "#FF0284C7", "#FF0369A1"]
+    } else {
+        ["#FF0EA5E9", "#FF0284C7", "#FF0369A1"]
+    };
+    map.entry("WindowsLogoBrush".into()).or_insert_with(|| {
+        TokenValue::Gradient(super::tokens::Gradient {
+            stops: vec![
+                super::tokens::GradientStop {
+                    color: Rgba::from_hex(logo[0]).unwrap(),
+                    position: 0.0,
+                },
+                super::tokens::GradientStop {
+                    color: Rgba::from_hex(logo[1]).unwrap(),
+                    position: 0.55,
+                },
+                super::tokens::GradientStop {
+                    color: Rgba::from_hex(logo[2]).unwrap(),
+                    position: 1.0,
+                },
+            ],
+            start: (0.0, 0.0),
+            end: (1.0, 1.0),
+        })
+    });
+    let glow = if dark {
+        ["#267DD3FC", "#00000000"]
+    } else {
+        ["#300284C7", "#00FFFFFF"]
+    };
+    map.entry("IconHoverGlow".into()).or_insert_with(|| {
+        TokenValue::RadialGradient(super::tokens::RadialGradient::new(
+            vec![
+                super::tokens::GradientStop {
+                    color: Rgba::from_hex(glow[0]).unwrap(),
+                    position: 0.0,
+                },
+                super::tokens::GradientStop {
+                    color: Rgba::from_hex(glow[1]).unwrap(),
+                    position: 1.0,
+                },
+            ],
+            (0.5, 0.75),
+            (0.5, 0.8),
+            (0.6, 0.6),
+        ))
+    });
+    add_editor_remainder_defaults(map, dark);
+}
+
+/// Defaults for the advanced keys exposed in the C# editor's "Advanced" tab.
+fn add_editor_remainder_defaults(map: &mut TokenMap, dark: bool) {
+    let solid = |map: &mut TokenMap, key: &str, hex: &str| {
+        if let Some(color) = Rgba::from_hex(hex) {
+            map.entry(key.to_owned())
+                .or_insert(TokenValue::Solid(color));
+        }
+    };
+    let number = |map: &mut TokenMap, key: &str, value: f64| {
+        map.entry(key.to_owned())
+            .or_insert(TokenValue::Double(value));
+    };
+    let color = |d: &'static str, l: &'static str| -> &'static str { if dark { d } else { l } };
+
+    solid(map, "AccentTrack", color("#FF0369A1", "#FF075985"));
+    solid(map, "CaptionCloseForeground", "#FFFFFFFF");
+    solid(map, "DangerText", color("#FFFF9DA7", "#FFAF2338"));
+    solid(map, "IndicatorBrush", color("#90E2E8F0", "#601E293B"));
+    solid(
+        map,
+        "IndicatorForegroundBrush",
+        color("#FFFFFFFF", "#E00F172A"),
+    );
+    solid(map, "NotificationBrush", color("#FFFF6673", "#FFD22D42"));
+    solid(map, "SettingsTrack", color("#FF141922", "#FFE9E9E9"));
+    solid(map, "ShellButtonHover", color("#2AFFFFFF", "#1A000000"));
+    solid(map, "ShellButtonPressed", color("#47FFFFFF", "#30000000"));
+    solid(map, "StartTileBorder", "#00000000");
+    solid(map, "StartTilePressed", color("#3EFFFFFF", "#30000000"));
+    solid(map, "SurfaceDanger", "#FFC43846");
+    solid(map, "SurfaceKeyboardFocus", color("#FF2A303C", "#FFE9E9E9"));
+    solid(
+        map,
+        "SurfaceSelectedStrong",
+        color("#22FFFFFF", "#16000000"),
+    );
+    solid(map, "TextMuted", "#807C8698");
+    solid(map, "WidgetAccentText", "#FFFFFFFF");
+    solid(map, "WidgetBlue", color("#FFA2C0FF", "#FF1D66D7"));
+    solid(
+        map,
+        "WidgetDangerForeground",
+        color("#FFF36C74", "#FFDC2626"),
+    );
+    solid(map, "WidgetDangerHover", color("#22DF4B53", "#1FDF4B53"));
+    solid(map, "WidgetDangerStroke", color("#42DF4B53", "#3ADF4B53"));
+    solid(map, "WidgetGlassCard", "#00000000");
+    solid(map, "WidgetGlassCardHover", color("#18FFFFFF", "#12000000"));
+    solid(map, "WidgetGlassCardStroke", "#00000000");
+    solid(map, "WidgetGreen", color("#FF58D8B2", "#FF0D9E78"));
+    solid(map, "WidgetIsland", color("#08FFFFFF", "#0A000000"));
+    solid(map, "WidgetIslandStroke", color("#10FFFFFF", "#12000000"));
+    solid(map, "WidgetOnStroke", color("#FF4F8EF7", "#FF2563EB"));
+    solid(map, "WidgetSelectedFill", color("#335B92FF", "#262474E9"));
+    solid(
+        map,
+        "WidgetSelectedForeground",
+        color("#FFA2C0FF", "#FF1D66D7"),
+    );
+    solid(map, "WidgetSelectedStroke", color("#7891B8FF", "#702C74E9"));
+    if let Some(color) = Rgba::from_hex(color("#18FFFFFF", "#12162038")) {
+        map.entry("SurfaceHoverColor".into())
+            .or_insert(TokenValue::Color(color));
+    }
+    map.entry("DockSheenRadius".into())
+        .or_insert(TokenValue::CornerRadius(CornerRadius {
+            top_left: 19,
+            top_right: 19,
+            bottom_right: 0,
+            bottom_left: 0,
+        }));
+    map.entry("MenuRowPadding".into())
+        .or_insert_with(|| TokenValue::Thickness(Thickness::parse("10,7").unwrap()));
+    map.entry("MenuDividerInset".into())
+        .or_insert_with(|| TokenValue::Thickness(Thickness::parse("12,7").unwrap()));
+    map.entry("WidgetActionFont".into())
+        .or_insert(TokenValue::FontFamily("Segoe MDL2 Assets".to_owned()));
+    number(map, "TextSizeWidgetLabel", 11.0);
+    number(map, "SurfaceOpacity", 0.9);
+    number(map, "DockOpacity", 0.9);
+    number(map, "MenuOpacity", 0.9);
+    number(map, "WidgetOpacity", 0.9);
+    number(map, "SettingsOpacity", 0.95);
+
+    let gradient = |map: &mut TokenMap, key: &str, top: &str, bottom: &str| {
+        map.entry(key.to_owned()).or_insert_with(|| {
+            TokenValue::Gradient(Gradient::vertical(
+                Rgba::from_hex(top).unwrap_or_default(),
+                Rgba::from_hex(bottom).unwrap_or_default(),
+            ))
+        });
+    };
+    gradient(map, "DockInnerBevelMaterial", "#70FFFFFF", "#18000000");
+    gradient(map, "DockScrollScrimStart", "#55000000", "#00000000");
+    gradient(map, "DockScrollScrimEnd", "#55000000", "#00000000");
+    gradient(map, "DockScrollScrimTop", "#55000000", "#00000000");
+    gradient(map, "DockScrollScrimBottom", "#55000000", "#00000000");
+    gradient(map, "MenuStroke", "#70FFFFFF", "#4A0B1220");
+    gradient(
+        map,
+        "WidgetAccentFill",
+        color("#FF2DD4BF", "#FF14B8A6"),
+        color("#FF0EA5E9", "#FF0284C7"),
+    );
 }
 
 fn transparent_color() -> Rgba {
@@ -544,6 +829,7 @@ impl ThemeManager {
             state.settings_opacity = state.style(SurfaceKind::Settings).opacity;
             state.initialized = true;
             state.generation = state.generation.wrapping_add(1);
+            state.refresh_radii();
             state.rebuild_all();
         }
         Self::notify_all();
@@ -564,23 +850,7 @@ impl ThemeManager {
     pub fn set_overrides(values: TokenMap) {
         {
             let mut state = lock();
-            state.pack = values;
-            if state
-                .pack
-                .get("DockBackgroundMode")
-                .and_then(|v| match v {
-                    TokenValue::Mode(m) => Some(m == "None"),
-                    _ => None,
-                })
-                .unwrap_or(false)
-            {
-                state
-                    .pack
-                    .insert("DockBorderMaterial".into(), transparent());
-                state.pack.insert("DockHighlight".into(), transparent());
-            }
-            state.generation = state.generation.wrapping_add(1);
-            state.rebuild_all();
+            state.set_pack(values);
         }
         Self::notify_all();
     }
@@ -783,6 +1053,16 @@ impl ThemeManager {
         lock().generated.get(&kind).cloned().unwrap_or_default()
     }
 
+    /// Concentric radius value for a C# radius key (`DockRadius`, `PopupRadius`, …).
+    pub fn radius(key: &str) -> Option<i32> {
+        lock().radii.value(key)
+    }
+
+    /// Full radius hierarchy including the top-corner-only `DockSheenRadius`.
+    pub fn radii() -> BTreeMap<String, CornerRadius> {
+        lock().radii.rebuild()
+    }
+
     fn notify_all() {
         let state = lock();
         if state.initialized {
@@ -816,10 +1096,28 @@ pub fn apply_token_overrides(values: TokenMap) {
     {
         let mut state = lock();
         state.overrides = values;
+        state.refresh_radii();
         state.generation = state.generation.wrapping_add(1);
         state.rebuild_all();
     }
     ThemeManager::notify_all();
+}
+
+/// Production bridge for the settings UI / theme packs: pushes resolved C# tokens
+/// into the **real** palette (not a preview swatch) and rebuilds every surface.
+/// Accepts an owned map or a borrow of one.
+pub fn apply_pack_tokens_to_palette(tokens: impl Borrow<TokenMap>) {
+    let tokens = tokens.borrow();
+    {
+        let mut state = lock();
+        state.set_pack(tokens.clone());
+    }
+    ThemeManager::notify_all();
+}
+
+/// Module-level alias of [`ThemeManager::resolve`] for cross-WS callers.
+pub fn resolve_token(key: &str) -> Option<TokenValue> {
+    ThemeManager::resolve(key)
 }
 
 /// Startup hook: applies the tokens persisted in `settings.extra["ThemeTokens"]`.
@@ -838,44 +1136,39 @@ pub fn apply_saved_token_overrides(settings: &DockSettings) {
 pub fn token_overrides_from_json(map: &serde_json::Map<String, Value>) -> TokenMap {
     let mut out = TokenMap::new();
     for (key, value) in map {
-        let token = match value {
-            Value::String(text) => {
-                let text = text.trim();
-                if let Some(color) = Rgba::from_hex(text) {
-                    match TokenKind::for_key(key) {
-                        TokenKind::Color => Some(TokenValue::Color(color)),
-                        TokenKind::Double => Some(TokenValue::Double(color.luminance())),
-                        _ => Some(TokenValue::Solid(color)),
-                    }
-                } else {
-                    match TokenKind::for_key(key) {
-                        TokenKind::Double => text.parse::<f64>().ok().map(TokenValue::Double),
-                        TokenKind::FontFamily => Some(TokenValue::FontFamily(text.to_owned())),
-                        _ => Some(TokenValue::Mode(text.to_owned())),
-                    }
-                }
+        // Unknown keys are ignored (never smuggled into the live palette with a
+        // guessed type), matching C# `WidgetPack.Resolve`'s "Unknown token" rule.
+        let Some(kind) = editor_token_kind(key) else {
+            continue;
+        };
+        let token = match (kind, value) {
+            (TokenKind::Double, Value::Number(number)) => number.as_f64().map(TokenValue::Double),
+            (TokenKind::Double, Value::String(text)) => {
+                text.trim().parse::<f64>().ok().map(TokenValue::Double)
             }
-            Value::Number(number) => number.as_f64().map(TokenValue::Double),
-            Value::Object(object) => {
-                let stops: Vec<Rgba> = object
-                    .get("stops")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str().and_then(Rgba::from_hex))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if stops.is_empty() {
-                    None
-                } else {
-                    let angle = object.get("angle").and_then(Value::as_f64).unwrap_or(90.0);
-                    Some(TokenValue::Gradient(
-                        GradientSpec::new(stops, angle).to_gradient(),
-                    ))
-                }
+            (TokenKind::FontFamily, Value::String(text)) if !text.trim().is_empty() => {
+                Some(TokenValue::FontFamily(text.trim().to_owned()))
             }
+            (TokenKind::Mode, Value::String(text))
+                if matches!(text.as_str(), "Glass" | "Solid" | "None") =>
+            {
+                Some(TokenValue::Mode(text.clone()))
+            }
+            (TokenKind::CornerRadius, Value::String(text)) => {
+                super::tokens::CornerRadius::parse(text).map(TokenValue::CornerRadius)
+            }
+            (TokenKind::CornerRadius, Value::Number(number)) => number
+                .as_f64()
+                .and_then(|v| (v.is_finite() && (0.0..=2048.0).contains(&v)).then_some(v as i32))
+                .map(|v| TokenValue::CornerRadius(CornerRadius::uniform(v))),
+            (TokenKind::Thickness, Value::String(text)) => {
+                super::tokens::Thickness::parse(text).map(TokenValue::Thickness)
+            }
+            (TokenKind::Color, Value::String(text)) => Rgba::from_hex(text).map(TokenValue::Color),
+            (TokenKind::Brush, Value::Object(_)) => parse_brush(value),
+            (TokenKind::Brush, Value::String(text)) => Rgba::from_hex(text)
+                .map(TokenValue::Solid)
+                .or_else(|| parse_brush(value)),
             _ => None,
         };
         if let Some(token) = token {
@@ -999,6 +1292,7 @@ impl ThemeState {
             legacy_opacity: self.legacy_opacity,
             settings_opacity: self.settings_opacity,
             opacity_overrides: self.opacity_overrides.clone(),
+            radii: self.radii.clone(),
         };
         clone.styles.insert(kind, style);
         clone.build(kind)
@@ -1008,6 +1302,15 @@ impl ThemeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ThemeManager is process-global; serialize tests that mutate it so a live
+    // preview from one test cannot change another test's opacity mid-assertion.
+    static THEME_TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn glass_solid_none_alpha_behaviour() {
@@ -1049,6 +1352,7 @@ mod tests {
 
     #[test]
     fn editor_token_overrides_reach_the_real_palette_and_clear() {
+        let _guard = theme_test_guard();
         ThemeManager::apply(AppTheme::Dark, None);
         apply_token_overrides(TokenMap::new());
         let baseline = ThemeManager::resolve("AccentBrush");
@@ -1095,6 +1399,7 @@ mod tests {
 
     #[test]
     fn live_preview_emits_events_and_settings_opacity_is_clamped() {
+        let _guard = theme_test_guard();
         ThemeManager::apply(AppTheme::Dark, None);
         let rx = ThemeManager::subscribe();
         assert!(
@@ -1142,6 +1447,7 @@ mod tests {
 
     #[test]
     fn per_surface_opacity_wins_over_global_fallback_and_survives_reapply() {
+        let _guard = theme_test_guard();
         ThemeManager::clear_opacity_overrides();
         ThemeManager::apply(AppTheme::Dark, None);
 
@@ -1193,5 +1499,78 @@ mod tests {
             SurfaceBackground::None
         );
         ThemeManager::clear_opacity_overrides();
+    }
+
+    #[test]
+    fn pack_tokens_reach_the_live_palette_and_materials() {
+        let _guard = theme_test_guard();
+        ThemeManager::apply(AppTheme::Dark, None);
+        let mut pack = TokenMap::new();
+        pack.insert(
+            "AccentBrush".to_owned(),
+            TokenValue::Solid(Rgba::from_rgb(0x12, 0x34, 0x56)),
+        );
+        pack.insert(
+            "WidgetRadius".to_owned(),
+            TokenValue::CornerRadius(CornerRadius::uniform(7)),
+        );
+        apply_pack_tokens_to_palette(&pack);
+        assert_eq!(
+            ThemeManager::resolve("AccentBrush"),
+            Some(TokenValue::Solid(Rgba::from_rgb(0x12, 0x34, 0x56)))
+        );
+        let materials = ThemeManager::materials(SurfaceKind::Widget);
+        assert_eq!(
+            materials.tokens.get("AccentBrush"),
+            Some(&TokenValue::Solid(Rgba::from_rgb(0x12, 0x34, 0x56)))
+        );
+        assert_eq!(materials.tokens.len(), editor_token_count());
+        assert_eq!(ThemeManager::radius("WidgetRadius"), Some(7));
+        assert_eq!(
+            materials.radii.get("WidgetRadius"),
+            Some(&CornerRadius::uniform(7))
+        );
+        apply_pack_tokens_to_palette(TokenMap::new());
+        apply_token_overrides(TokenMap::new());
+    }
+
+    #[test]
+    fn editor_tokens_accept_short_hex_named_colors_and_radial_brushes() {
+        let _guard = theme_test_guard();
+        use serde_json::{Map, json};
+        let mut map = Map::new();
+        map.insert("AccentBrush".into(), json!("#0af"));
+        map.insert("TextPrimary".into(), json!("Transparent"));
+        map.insert(
+            "IconHoverGlow".into(),
+            json!({
+                "type": "radial",
+                "stops": ["#fff", "#0000"],
+                "center": [0.5, 0.75],
+                "origin": [0.5, 0.8],
+                "radius": [0.6, 0.6],
+            }),
+        );
+        map.insert("UnknownToken".into(), json!("#ffffff"));
+        let tokens = token_overrides_from_json(&map);
+        assert_eq!(
+            tokens.get("AccentBrush"),
+            Some(&TokenValue::Solid(Rgba::from_rgb(0, 0xAA, 0xFF)))
+        );
+        assert_eq!(
+            tokens.get("TextPrimary"),
+            Some(&TokenValue::Solid(Rgba::new(0, 0, 0, 0)))
+        );
+        assert!(matches!(
+            tokens.get("IconHoverGlow"),
+            Some(TokenValue::RadialGradient(_))
+        ));
+        assert!(!tokens.contains_key("UnknownToken"));
+        apply_token_overrides(tokens);
+        assert!(matches!(
+            ThemeManager::resolve("IconHoverGlow"),
+            Some(TokenValue::RadialGradient(_))
+        ));
+        apply_token_overrides(TokenMap::new());
     }
 }

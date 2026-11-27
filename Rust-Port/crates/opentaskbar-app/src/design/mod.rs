@@ -113,17 +113,11 @@ pub const fn palette(is_dark: bool) -> Palette {
     if is_dark { DARK } else { LIGHT }
 }
 
-/// Parses `#RRGGBB` (or `RRGGBB`) into the RGB tuple used by DComp/GDI surfaces.
+/// Parses `#RGB` / `#ARGB` / `#RRGGBB` / `#AARRGGBB` or a named colour into the
+/// RGB tuple used by DComp/GDI surfaces. Alpha is intentionally discarded here.
 pub fn parse_hex_rgb(value: &str) -> Option<Rgb> {
-    let hex = value.trim().trim_start_matches('#');
-    if hex.len() != 6 {
-        return None;
-    }
-    Some((
-        u8::from_str_radix(&hex[0..2], 16).ok()?,
-        u8::from_str_radix(&hex[2..4], 16).ok()?,
-        u8::from_str_radix(&hex[4..6], 16).ok()?,
-    ))
+    let color = tokens::Rgba::from_hex(value)?;
+    Some((color.r, color.g, color.b))
 }
 
 pub fn palette_with_border(is_dark: bool, border: Option<Rgb>) -> Palette {
@@ -169,4 +163,18 @@ pub fn level_color(p: &Palette, ratio: f32) -> Rgb {
 /// Computes dock widget chip height automatically from the live dock pill height (C# `WidgetHeight = 46`).
 pub fn widget_height_dips(pill_h_dips: f32) -> f32 {
     (pill_h_dips - 10.0).clamp(32.0, 56.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex_rgb;
+
+    #[test]
+    fn surface_colors_accept_short_hex_and_named_colors() {
+        assert_eq!(parse_hex_rgb("#38BDF8"), Some((0x38, 0xBD, 0xF8)));
+        assert_eq!(parse_hex_rgb("#0af"), Some((0, 0xAA, 0xFF)));
+        assert_eq!(parse_hex_rgb("#80FF0000"), Some((255, 0, 0)));
+        assert_eq!(parse_hex_rgb("Transparent"), Some((0, 0, 0)));
+        assert_eq!(parse_hex_rgb("not-a-color"), None);
+    }
 }
