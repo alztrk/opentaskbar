@@ -39,11 +39,11 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1ArithmeticComposite, CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_PROPERTIES1,
+    CLSID_D2D1ArithmeticComposite, CLSID_D2D1Contrast, CLSID_D2D1GaussianBlur,
+    CLSID_D2D1Saturation, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_PROPERTIES1,
     D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
     D2D1_COLOR_SPACE_SRGB, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_EXTEND_MODE_WRAP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
     D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
 };
@@ -316,6 +316,59 @@ impl IGraphicsEffectD2D1Interop_Impl for ArithmeticCompositeEffect_Impl {
     }
 }
 
+#[implement(IGraphicsEffect, IGraphicsEffectSource, IGraphicsEffectD2D1Interop)]
+struct ContrastEffect {
+    name: RefCell<HSTRING>,
+    contrast: f32,
+    source: IGraphicsEffectSource,
+}
+
+impl IGraphicsEffectSource_Impl for ContrastEffect_Impl {}
+
+impl IGraphicsEffect_Impl for ContrastEffect_Impl {
+    fn Name(&self) -> WinResult<HSTRING> {
+        Ok(self.name.borrow().clone())
+    }
+    fn SetName(&self, name: &HSTRING) -> WinResult<()> {
+        *self.name.borrow_mut() = name.clone();
+        Ok(())
+    }
+}
+
+impl IGraphicsEffectD2D1Interop_Impl for ContrastEffect_Impl {
+    fn GetEffectId(&self) -> WinResult<GUID> {
+        Ok(CLSID_D2D1Contrast)
+    }
+    fn GetNamedPropertyMapping(
+        &self,
+        _name: &PCWSTR,
+        _index: *mut u32,
+        _mapping: *mut GRAPHICS_EFFECT_PROPERTY_MAPPING,
+    ) -> WinResult<()> {
+        Err(windows::Win32::Foundation::E_INVALIDARG.into())
+    }
+    fn GetPropertyCount(&self) -> WinResult<u32> {
+        Ok(2)
+    }
+    fn GetProperty(&self, index: u32) -> WinResult<IPropertyValue> {
+        match index {
+            0 => PropertyValue::CreateSingle(self.contrast)?.cast(),
+            1 => PropertyValue::CreateBoolean(true)?.cast(), // Clamp input
+            _ => Err(windows::Win32::Foundation::E_INVALIDARG.into()),
+        }
+    }
+    fn GetSource(&self, index: u32) -> WinResult<IGraphicsEffectSource> {
+        if index == 0 {
+            Ok(self.source.clone())
+        } else {
+            Err(windows::Win32::Foundation::E_INVALIDARG.into())
+        }
+    }
+    fn GetSourceCount(&self) -> WinResult<u32> {
+        Ok(1)
+    }
+}
+
 // ============================================================================
 // Optical Glass Parameters & Presets
 // ============================================================================
@@ -329,58 +382,68 @@ struct GlassParams {
     tint_alpha: f32,
     specular: f32,
     shine: f32,
+    meniscus_strength: f32,
+    meniscus_enabled: bool,
     pointer_light: bool,
 }
 
 impl GlassParams {
-    fn liquid_glass(is_dark: bool) -> Self {
+    fn liquid_crystal(is_dark: bool) -> Self {
         Self {
-            preset_name: "1 · Liquid Glass",
-            is_dark,
-            blur_sigma: 12.0,
-            saturation: 1.68,
-            tint_alpha: if is_dark { 0.26 } else { 0.20 },
-            specular: 1.05,
-            shine: 42.0,
-            pointer_light: true,
-        }
-    }
-
-    fn crystal_clear(is_dark: bool) -> Self {
-        Self {
-            preset_name: "2 · Kristal Cam",
+            preset_name: "1 · Liquid Crystal",
             is_dark,
             blur_sigma: 6.0,
-            saturation: 1.80,
-            tint_alpha: if is_dark { 0.12 } else { 0.10 },
-            specular: 1.25,
-            shine: 56.0,
+            saturation: 1.72,
+            tint_alpha: if is_dark { 0.14 } else { 0.10 },
+            specular: 1.15,
+            shine: 112.0,
+            meniscus_strength: 0.78,
+            meniscus_enabled: true,
             pointer_light: true,
         }
     }
 
-    fn deep_frosted(is_dark: bool) -> Self {
+    fn pure_water(is_dark: bool) -> Self {
         Self {
-            preset_name: "3 · Derin Buzlu",
+            preset_name: "2 · Pure Water",
             is_dark,
-            blur_sigma: 26.0,
-            saturation: 1.32,
-            tint_alpha: if is_dark { 0.36 } else { 0.38 },
-            specular: 0.65,
-            shine: 32.0,
+            blur_sigma: 2.0,
+            saturation: 1.85,
+            tint_alpha: if is_dark { 0.05 } else { 0.04 },
+            specular: 1.35,
+            shine: 132.0,
+            meniscus_strength: 0.92,
+            meniscus_enabled: true,
             pointer_light: true,
         }
     }
 
-    fn minimal_smoked(is_dark: bool) -> Self {
+    fn smoked_obsidian(is_dark: bool) -> Self {
         Self {
-            preset_name: "4 · Füme Cam",
+            preset_name: "3 · Smoked Obsidian",
             is_dark,
-            blur_sigma: 14.0,
-            saturation: 1.15,
-            tint_alpha: if is_dark { 0.50 } else { 0.48 },
-            specular: 0.50,
-            shine: 28.0,
+            blur_sigma: 10.0,
+            saturation: 1.45,
+            tint_alpha: if is_dark { 0.34 } else { 0.28 },
+            specular: 0.95,
+            shine: 96.0,
+            meniscus_strength: 0.65,
+            meniscus_enabled: true,
+            pointer_light: true,
+        }
+    }
+
+    fn frosted_silk(is_dark: bool) -> Self {
+        Self {
+            preset_name: "4 · Frosted Silk",
+            is_dark,
+            blur_sigma: 22.0,
+            saturation: 1.35,
+            tint_alpha: if is_dark { 0.26 } else { 0.28 },
+            specular: 0.70,
+            shine: 64.0,
+            meniscus_strength: 0.50,
+            meniscus_enabled: true,
             pointer_light: true,
         }
     }
@@ -434,9 +497,9 @@ fn build_bevel_normal_map(width: u32, height: u32, radius_px: f32, bevel_px: f32
                 } else {
                     (0.0, y.signum())
                 };
-                // Smooth cubic lens bevel confined to the optical glass rim.
+                // Liquid water-drop meniscus curvature: sharp outer lip melting smoothly inward.
                 let u = (inward / bevel).clamp(0.0, 1.0);
-                let curve = (1.0 - u).powf(2.4) * 0.82;
+                let curve = (1.0 - u).powf(2.6) * 0.90;
                 let vx = gx * curve;
                 let vy = gy * curve;
                 let vz = 1.0_f32;
@@ -477,13 +540,17 @@ struct GlassPiece {
     w_px: f32,
     h_px: f32,
     radius_px: f32,
-    _shadow_visual: SpriteVisual,
-    drop_shadow: DropShadow,
-    glass_visual: SpriteVisual,
+    _shadow_lift_visual: SpriteVisual,
+    drop_shadow_lift: DropShadow,
+    _shadow_contact_visual: SpriteVisual,
+    drop_shadow_contact: DropShadow,
+    core_visual: SpriteVisual,
+    rim_visual: SpriteVisual,
     _overlay_visual: SpriteVisual,
     normal_surface: CompositionDrawingSurface,
+    meniscus_mask_surface: CompositionDrawingSurface,
     overlay_surface: CompositionDrawingSurface,
-    _mask_surface: CompositionDrawingSurface,
+    _pill_mask_surface: CompositionDrawingSurface,
 }
 
 impl GlassPiece {
@@ -509,8 +576,8 @@ impl GlassPiece {
         let clip = compositor.CreateGeometricClip()?;
         clip.SetGeometry(&geom)?;
 
-        // Soft GPU floating drop shadow behind the glass capsule.
-        let mask_surface = gfx_device.CreateDrawingSurface(
+        // Dual-depth floating optical shadow (ethereal wide lift + crisp close contact).
+        let pill_mask_surface = gfx_device.CreateDrawingSurface(
             Size {
                 Width: w_px,
                 Height: h_px,
@@ -518,39 +585,71 @@ impl GlassPiece {
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             DirectXAlphaMode::Premultiplied,
         )?;
-        upload_pill_mask(&mask_surface, w_px, h_px, radius_px)?;
-        let mask_brush = compositor.CreateSurfaceBrushWithSurface(&mask_surface)?;
-        mask_brush.SetStretch(CompositionStretch::Fill)?;
+        upload_pill_mask(&pill_mask_surface, w_px, h_px, radius_px)?;
+        let pill_mask_brush = compositor.CreateSurfaceBrushWithSurface(&pill_mask_surface)?;
+        pill_mask_brush.SetStretch(CompositionStretch::Fill)?;
 
-        let drop_shadow = compositor.CreateDropShadow()?;
-        drop_shadow.SetMask(&mask_brush)?;
-        drop_shadow.SetBlurRadius(24.0 * dpi)?;
-        drop_shadow.SetOffset(Vector3 {
+        let drop_shadow_lift = compositor.CreateDropShadow()?;
+        drop_shadow_lift.SetMask(&pill_mask_brush)?;
+        drop_shadow_lift.SetBlurRadius(28.0 * dpi)?;
+        drop_shadow_lift.SetOffset(Vector3 {
             X: 0.0,
-            Y: 8.0 * dpi,
+            Y: 12.0 * dpi,
             Z: 0.0,
         })?;
-        drop_shadow.SetColor(ui_color(115, 0, 0, 0))?;
+        drop_shadow_lift.SetColor(ui_color(84, 4, 10, 20))?;
 
-        let shadow_visual = compositor.CreateSpriteVisual()?;
-        shadow_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
-        shadow_visual.SetOffset(Vector3 {
+        let shadow_lift_visual = compositor.CreateSpriteVisual()?;
+        shadow_lift_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
+        shadow_lift_visual.SetOffset(Vector3 {
             X: x_px,
             Y: y_px,
             Z: 0.0,
         })?;
-        shadow_visual.SetShadow(&drop_shadow)?;
-        parent.Children()?.InsertAtTop(&shadow_visual)?;
+        shadow_lift_visual.SetShadow(&drop_shadow_lift)?;
+        parent.Children()?.InsertAtTop(&shadow_lift_visual)?;
 
-        let glass_visual = compositor.CreateSpriteVisual()?;
-        glass_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
-        glass_visual.SetOffset(Vector3 {
+        let drop_shadow_contact = compositor.CreateDropShadow()?;
+        drop_shadow_contact.SetMask(&pill_mask_brush)?;
+        drop_shadow_contact.SetBlurRadius(7.0 * dpi)?;
+        drop_shadow_contact.SetOffset(Vector3 {
+            X: 0.0,
+            Y: 2.0 * dpi,
+            Z: 0.0,
+        })?;
+        drop_shadow_contact.SetColor(ui_color(56, 2, 8, 16))?;
+
+        let shadow_contact_visual = compositor.CreateSpriteVisual()?;
+        shadow_contact_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
+        shadow_contact_visual.SetOffset(Vector3 {
             X: x_px,
             Y: y_px,
             Z: 0.0,
         })?;
-        glass_visual.SetClip(&clip)?;
-        parent.Children()?.InsertAtTop(&glass_visual)?;
+        shadow_contact_visual.SetShadow(&drop_shadow_contact)?;
+        parent.Children()?.InsertAtTop(&shadow_contact_visual)?;
+
+        // Zone 1: Mirror-polished Crystal Liquid Core visual.
+        let core_visual = compositor.CreateSpriteVisual()?;
+        core_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
+        core_visual.SetOffset(Vector3 {
+            X: x_px,
+            Y: y_px,
+            Z: 0.0,
+        })?;
+        core_visual.SetClip(&clip)?;
+        parent.Children()?.InsertAtTop(&core_visual)?;
+
+        // Zone 2: Live Optical Meniscus Refraction + Chromatic RGB Dispersion Ring visual.
+        let rim_visual = compositor.CreateSpriteVisual()?;
+        rim_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
+        rim_visual.SetOffset(Vector3 {
+            X: x_px,
+            Y: y_px,
+            Z: 0.0,
+        })?;
+        rim_visual.SetClip(&clip)?;
+        parent.Children()?.InsertAtTop(&rim_visual)?;
 
         let normal_surface = gfx_device.CreateDrawingSurface(
             Size {
@@ -565,7 +664,23 @@ impl GlassPiece {
             w_px as u32,
             h_px as u32,
             radius_px,
-            9.0 * dpi,
+            13.5 * dpi,
+        )?;
+
+        let meniscus_mask_surface = gfx_device.CreateDrawingSurface(
+            Size {
+                Width: w_px,
+                Height: h_px,
+            },
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            DirectXAlphaMode::Premultiplied,
+        )?;
+        upload_meniscus_mask(
+            &meniscus_mask_surface,
+            w_px as u32,
+            h_px as u32,
+            radius_px,
+            15.0 * dpi,
         )?;
 
         let overlay_surface = gfx_device.CreateDrawingSurface(
@@ -596,13 +711,17 @@ impl GlassPiece {
             w_px,
             h_px,
             radius_px,
-            _shadow_visual: shadow_visual,
-            drop_shadow,
-            glass_visual,
+            _shadow_lift_visual: shadow_lift_visual,
+            drop_shadow_lift,
+            _shadow_contact_visual: shadow_contact_visual,
+            drop_shadow_contact,
+            core_visual,
+            rim_visual,
             _overlay_visual: overlay_visual,
             normal_surface,
+            meniscus_mask_surface,
             overlay_surface,
-            _mask_surface: mask_surface,
+            _pill_mask_surface: pill_mask_surface,
         })
     }
 
@@ -613,90 +732,266 @@ impl GlassPiece {
         params: GlassParams,
     ) -> WinResult<()> {
         let tint_rgb = if params.is_dark {
-            ui_color(255, 14, 18, 26)
+            ui_color(255, 10, 14, 22)
         } else {
-            ui_color(255, 248, 251, 255)
+            ui_color(255, 250, 252, 255)
         };
         let tint_brush: CompositionColorBrush = compositor.CreateColorBrushWithColor(tint_rgb)?;
 
         let normal_brush = compositor.CreateSurfaceBrushWithSurface(&self.normal_surface)?;
         normal_brush.SetStretch(CompositionStretch::Fill)?;
 
-        let backdrop_param: IGraphicsEffectSource =
+        // ---- ZONE 1: Mirror-Polished Crystal Liquid Core ----
+        let core_backdrop_param: IGraphicsEffectSource =
             CompositionEffectSourceParameter::Create(&HSTRING::from("Backdrop"))?.cast()?;
-        let tint_param: IGraphicsEffectSource =
+        let core_tint_param: IGraphicsEffectSource =
             CompositionEffectSourceParameter::Create(&HSTRING::from("Tint"))?.cast()?;
-        let normal_param: IGraphicsEffectSource =
+        let core_normal_param: IGraphicsEffectSource =
             CompositionEffectSourceParameter::Create(&HSTRING::from("NormalMap"))?.cast()?;
 
-        // 1. Gaussian blur on live host backdrop.
-        let blur: IGraphicsEffectSource = IGraphicsEffect::from(GaussianBlurEffect {
-            name: RefCell::new(HSTRING::from("Blur")),
+        let core_blur: IGraphicsEffectSource = IGraphicsEffect::from(GaussianBlurEffect {
+            name: RefCell::new(HSTRING::from("CoreBlur")),
             blur_sigma: params.blur_sigma,
-            source: backdrop_param,
+            source: core_backdrop_param,
         })
         .cast()?;
-
-        // 2. Color vibrancy boost (prevents muddy gray look).
-        let sat: IGraphicsEffectSource = IGraphicsEffect::from(SaturationEffect {
-            name: RefCell::new(HSTRING::from("Sat")),
+        let core_sat: IGraphicsEffectSource = IGraphicsEffect::from(SaturationEffect {
+            name: RefCell::new(HSTRING::from("CoreSat")),
             saturation: params.saturation,
-            source: blur,
+            source: core_blur,
+        })
+        .cast()?;
+        let core_contrast: IGraphicsEffectSource = IGraphicsEffect::from(ContrastEffect {
+            name: RefCell::new(HSTRING::from("CoreContrast")),
+            contrast: if params.is_dark { 0.12 } else { 0.08 },
+            source: core_sat,
         })
         .cast()?;
 
-        // 3. Soft translucent tint blend (`(1 - alpha) * sat + alpha * tint`).
+        // Optical Beer-Lambert luminance-preserving glass transmission (never crushes whites into flat gray).
         let a = params.tint_alpha.clamp(0.0, 0.85);
-        let tinted: IGraphicsEffectSource = IGraphicsEffect::from(ArithmeticCompositeEffect {
-            name: RefCell::new(HSTRING::from("Tinted")),
-            c1: 0.0,
-            c2: 1.0 - a,
-            c3: a,
-            c4: 0.0,
-            source1: sat,
-            source2: tint_param,
-        })
-        .cast()?;
+        let core_tinted: IGraphicsEffectSource = if params.is_dark {
+            IGraphicsEffect::from(ArithmeticCompositeEffect {
+                name: RefCell::new(HSTRING::from("CoreTinted")),
+                c1: a * 0.45,
+                c2: 1.0 - a * 0.82,
+                c3: a * 0.38,
+                c4: 0.0,
+                source1: core_contrast,
+                source2: core_tint_param,
+            })
+            .cast()?
+        } else {
+            IGraphicsEffect::from(ArithmeticCompositeEffect {
+                name: RefCell::new(HSTRING::from("CoreTinted")),
+                c1: 0.0,
+                c2: 1.0 - a,
+                c3: a,
+                c4: 0.0,
+                source1: core_contrast,
+                source2: core_tint_param,
+            })
+            .cast()?
+        };
 
-        // 4. 3D Normal-Mapped Blinn-Phong specular lighting layer (`SceneLightingEffect`).
-        let scene_light = SceneLightingEffect::new()?;
-        scene_light.SetName(&HSTRING::from("GlassLight"))?;
-        scene_light.SetNormalMapSource(&normal_param)?;
-        scene_light.SetAmbientAmount(0.0)?;
-        scene_light.SetDiffuseAmount(if params.is_dark { 0.025 } else { 0.04 })?;
-        scene_light.SetSpecularAmount(params.specular)?;
-        scene_light.SetSpecularShine(params.shine)?;
-        scene_light.SetReflectanceModel(SceneLightingEffectReflectanceModel::BlinnPhong)?;
-        let light_source: IGraphicsEffectSource = scene_light.cast()?;
+        let core_light = SceneLightingEffect::new()?;
+        core_light.SetName(&HSTRING::from("CoreLight"))?;
+        core_light.SetNormalMapSource(&core_normal_param)?;
+        core_light.SetAmbientAmount(0.0)?;
+        core_light.SetDiffuseAmount(0.012)?;
+        core_light.SetSpecularAmount(params.specular * 0.45)?;
+        core_light.SetSpecularShine(params.shine * 0.85)?;
+        core_light.SetReflectanceModel(SceneLightingEffectReflectanceModel::BlinnPhong)?;
+        let core_light_src: IGraphicsEffectSource = core_light.cast()?;
 
-        // 5. Hybrid soft-Screen blend so 3D glass rim reflections stay luminous even over
-        //    bright pastel skies while avoiding harsh white chrome clipping.
-        let k = if params.is_dark { 0.78 } else { 0.72 };
-        let final_effect: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
-            name: RefCell::new(HSTRING::from("FinalGlass")),
-            c1: -k * 0.72,
+        let core_final: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
+            name: RefCell::new(HSTRING::from("CoreFinal")),
+            c1: -0.58,
             c2: 1.0,
-            c3: k,
+            c3: 0.65,
             c4: 0.0,
-            source1: tinted,
-            source2: light_source,
+            source1: core_tinted,
+            source2: core_light_src,
         });
 
-        let factory = compositor.CreateEffectFactory(&final_effect)?;
-        let effect_brush = factory.CreateBrush()?;
-        effect_brush.SetSourceParameter(&HSTRING::from("Backdrop"), backdrop)?;
-        effect_brush.SetSourceParameter(&HSTRING::from("Tint"), &tint_brush)?;
-        effect_brush.SetSourceParameter(&HSTRING::from("NormalMap"), &normal_brush)?;
-        let brush: CompositionBrush = effect_brush.cast()?;
-        self.glass_visual.SetBrush(&brush)?;
+        let core_factory = compositor.CreateEffectFactory(&core_final)?;
+        let core_effect_brush = core_factory.CreateBrush()?;
+        core_effect_brush.SetSourceParameter(&HSTRING::from("Backdrop"), backdrop)?;
+        core_effect_brush.SetSourceParameter(&HSTRING::from("Tint"), &tint_brush)?;
+        core_effect_brush.SetSourceParameter(&HSTRING::from("NormalMap"), &normal_brush)?;
+        let core_brush: CompositionBrush = core_effect_brush.cast()?;
+        self.core_visual.SetBrush(&core_brush)?;
 
-        self.drop_shadow.SetColor(if params.is_dark {
-            ui_color(115, 0, 0, 0)
+        // ---- ZONE 2: Live Optical Meniscus Caustic Ring (100% DWM-native, zero capture!) ----
+        // Sharpens, concentrates, and boosts optical contrast + vibrancy along the outer 15 DIP
+        // curved lens lip, topped with high-gloss dual-color 3D Blinn-Phong specular arcs.
+        if params.meniscus_enabled && params.meniscus_strength > 0.05 {
+            let rim_backdrop_param: IGraphicsEffectSource =
+                CompositionEffectSourceParameter::Create(&HSTRING::from("Backdrop"))?.cast()?;
+            let rim_normal_param: IGraphicsEffectSource =
+                CompositionEffectSourceParameter::Create(&HSTRING::from("NormalMap"))?.cast()?;
+
+            let rim_blur: IGraphicsEffectSource = IGraphicsEffect::from(GaussianBlurEffect {
+                name: RefCell::new(HSTRING::from("RimBlur")),
+                blur_sigma: (params.blur_sigma * 0.20).clamp(0.8, 3.0),
+                source: rim_backdrop_param,
+            })
+            .cast()?;
+            let rim_sat: IGraphicsEffectSource = IGraphicsEffect::from(SaturationEffect {
+                name: RefCell::new(HSTRING::from("RimSat")),
+                saturation: (params.saturation + 0.32 * params.meniscus_strength).min(2.5),
+                source: rim_blur,
+            })
+            .cast()?;
+            let rim_concentrated: IGraphicsEffectSource = IGraphicsEffect::from(ContrastEffect {
+                name: RefCell::new(HSTRING::from("RimContrast")),
+                contrast: (0.28 * params.meniscus_strength).clamp(0.0, 0.45),
+                source: rim_sat,
+            })
+            .cast()?;
+
+            let rim_light = SceneLightingEffect::new()?;
+            rim_light.SetName(&HSTRING::from("RimLight"))?;
+            rim_light.SetNormalMapSource(&rim_normal_param)?;
+            rim_light.SetAmbientAmount(0.0)?;
+            rim_light.SetDiffuseAmount(0.02)?;
+            rim_light.SetSpecularAmount(params.specular * 1.25)?;
+            rim_light.SetSpecularShine(params.shine)?;
+            rim_light.SetReflectanceModel(SceneLightingEffectReflectanceModel::BlinnPhong)?;
+            let rim_light_src: IGraphicsEffectSource = rim_light.cast()?;
+
+            let lift = 0.08 * params.meniscus_strength;
+            let rim_final: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
+                name: RefCell::new(HSTRING::from("RimFinal")),
+                c1: -0.54,
+                c2: 1.0 + lift,
+                c3: 0.94,
+                c4: if params.is_dark { 0.012 } else { 0.028 } * params.meniscus_strength,
+                source1: rim_concentrated,
+                source2: rim_light_src,
+            });
+
+            let rim_factory = compositor.CreateEffectFactory(&rim_final)?;
+            let rim_effect_brush = rim_factory.CreateBrush()?;
+            rim_effect_brush.SetSourceParameter(&HSTRING::from("Backdrop"), backdrop)?;
+            rim_effect_brush.SetSourceParameter(&HSTRING::from("NormalMap"), &normal_brush)?;
+
+            let meniscus_mask_brush =
+                compositor.CreateSurfaceBrushWithSurface(&self.meniscus_mask_surface)?;
+            meniscus_mask_brush.SetStretch(CompositionStretch::Fill)?;
+
+            let masked_rim = compositor.CreateMaskBrush()?;
+            masked_rim.SetSource(&rim_effect_brush)?;
+            masked_rim.SetMask(&meniscus_mask_brush)?;
+            let rim_brush: CompositionBrush = masked_rim.cast()?;
+            self.rim_visual.SetBrush(&rim_brush)?;
+            self.rim_visual
+                .SetOpacity(params.meniscus_strength.clamp(0.15, 1.0))?;
+            self.rim_visual.SetIsVisible(true)?;
         } else {
-            ui_color(68, 12, 24, 38)
+            self.rim_visual.SetIsVisible(false)?;
+        }
+
+        self.drop_shadow_lift.SetColor(if params.is_dark {
+            ui_color(84, 4, 10, 20)
+        } else {
+            ui_color(48, 12, 24, 38)
+        })?;
+        self.drop_shadow_contact.SetColor(if params.is_dark {
+            ui_color(56, 2, 8, 16)
+        } else {
+            ui_color(34, 10, 20, 32)
         })?;
         Ok(())
     }
+}
+
+/// Generates a silky smooth radial-SDF alpha mask (`alpha = 1` at outer rim, fading to `0`
+/// over `rim_width_px` inward) so the live refracted meniscus melts seamlessly into the core.
+fn upload_meniscus_mask(
+    surface: &CompositionDrawingSurface,
+    width: u32,
+    height: u32,
+    radius_px: f32,
+    rim_width_px: f32,
+) -> WinResult<()> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut pixels = vec![0u8; w * h * 4];
+    let hw = width as f32 * 0.5;
+    let hh = height as f32 * 0.5;
+    let r = radius_px.min(hw).min(hh).max(2.0);
+    let bx = (hw - r).max(0.0);
+    let by = (hh - r).max(0.0);
+    let rim_w = rim_width_px.max(4.0);
+
+    for py in 0..h {
+        let y = py as f32 + 0.5 - hh;
+        let ay = y.abs() - by;
+        for px in 0..w {
+            let x = px as f32 + 0.5 - hw;
+            let ax = x.abs() - bx;
+            let qx = ax.max(0.0);
+            let qy = ay.max(0.0);
+            let sdf = (qx * qx + qy * qy).sqrt() + ax.max(ay).min(0.0) - r;
+            let inward = (-sdf).max(0.0);
+            let alpha = if sdf > 0.5 {
+                0.0
+            } else if inward < rim_w {
+                let u = (inward / rim_w).clamp(0.0, 1.0);
+                // Smooth cubic ease-out so the refracted lens blends invisibly into the core.
+                (1.0 - u).powf(1.65)
+            } else {
+                0.0
+            };
+            let a_u8 = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            let off = (py * w + px) * 4;
+            pixels[off] = a_u8;
+            pixels[off + 1] = a_u8;
+            pixels[off + 2] = a_u8;
+            pixels[off + 3] = a_u8;
+        }
+    }
+
+    let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;
+    let mut offset = WinPoint::default();
+    let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
+    unsafe {
+        dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            ..Default::default()
+        };
+        if let Ok(bmp) = dc.CreateBitmap(
+            D2D_SIZE_U { width, height },
+            Some(pixels.as_ptr().cast()),
+            width * 4,
+            &props,
+        ) {
+            let dst = D2D_RECT_F {
+                left: offset.x as f32,
+                top: offset.y as f32,
+                right: offset.x as f32 + width as f32,
+                bottom: offset.y as f32 + height as f32,
+            };
+            dc.DrawBitmap(
+                &bmp,
+                Some(&dst),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
+        }
+        interop.EndDraw()?;
+    }
+    Ok(())
 }
 
 fn upload_pill_mask(
@@ -794,6 +1089,7 @@ struct LabState {
     backdrop: CompositionBackdropBrush,
     _ambient_light: AmbientLight,
     distant_light: DistantLight,
+    bounce_light: DistantLight,
     point_light: PointLight,
     card: GlassPiece,
     dock: GlassPiece,
@@ -857,38 +1153,74 @@ impl LabState {
         let card = GlassPiece::create(&compositor, &gfx_device, &root, CARD_RECT_DIPS, dpi)?;
         let dock = GlassPiece::create(&compositor, &gfx_device, &root, DOCK_RECT_DIPS, dpi)?;
 
-        // 3D Lights attached to both Liquid Glass capsules inside DWM.
+        // 3-Light 3D Optical Rig targeting both Crystal Core & Refracted Meniscus Rim.
         let ambient_light = compositor.CreateAmbientLight()?;
         ambient_light.SetColor(ui_color(255, 255, 255, 255))?;
-        ambient_light.Targets()?.Add(&card.glass_visual)?;
-        ambient_light.Targets()?.Add(&dock.glass_visual)?;
+        for v in [
+            &card.core_visual,
+            &card.rim_visual,
+            &dock.core_visual,
+            &dock.rim_visual,
+        ] {
+            ambient_light.Targets()?.Add(v)?;
+        }
 
-        // Overhead top-left directional sky light -> harmonizes with the top-left Fresnel rim.
+        // Key light: cool overhead top-left sky reflection.
         let distant_light = compositor.CreateDistantLight()?;
         distant_light.SetCoordinateSpace(&root)?;
         distant_light.SetDirection(Vector3 {
-            X: -0.22,
-            Y: -0.62,
-            Z: -0.75,
+            X: -0.24,
+            Y: -0.64,
+            Z: -0.73,
         })?;
-        distant_light.SetColor(ui_color(255, 232, 244, 255))?;
-        distant_light.Targets()?.Add(&card.glass_visual)?;
-        distant_light.Targets()?.Add(&dock.glass_visual)?;
+        distant_light.SetColor(ui_color(255, 236, 246, 255))?;
+        for v in [
+            &card.core_visual,
+            &card.rim_visual,
+            &dock.core_visual,
+            &dock.rim_visual,
+        ] {
+            distant_light.Targets()?.Add(v)?;
+        }
 
-        // Focused cursor-tracking 3D PointLight -> glides smoothly across the optical glass rim.
+        // Opposing horizon rebound light: soft bottom-right caustic specular arc.
+        let bounce_light = compositor.CreateDistantLight()?;
+        bounce_light.SetCoordinateSpace(&root)?;
+        bounce_light.SetDirection(Vector3 {
+            X: 0.26,
+            Y: 0.58,
+            Z: -0.77,
+        })?;
+        bounce_light.SetColor(ui_color(255, 138, 168, 206))?;
+        for v in [
+            &card.core_visual,
+            &card.rim_visual,
+            &dock.core_visual,
+            &dock.rim_visual,
+        ] {
+            bounce_light.Targets()?.Add(v)?;
+        }
+
+        // Fluid cursor-tracking 3D PointLight -> glides like liquid mercury along the glass rim.
         let point_light = compositor.CreatePointLight()?;
         point_light.SetCoordinateSpace(&root)?;
-        point_light.SetColor(ui_color(255, 224, 242, 255))?;
+        point_light.SetColor(ui_color(255, 232, 246, 255))?;
         point_light.SetConstantAttenuation(1.0)?;
-        point_light.SetLinearAttenuation(0.0030)?;
-        point_light.SetQuadraticAttenuation(0.000_012)?;
+        point_light.SetLinearAttenuation(0.0026)?;
+        point_light.SetQuadraticAttenuation(0.000_010)?;
         point_light.SetOffset(Vector3 {
             X: WIN_W_DIPS * dpi * 0.35,
             Y: WIN_H_DIPS * dpi * 0.25,
-            Z: 34.0 * dpi,
+            Z: 32.0 * dpi,
         })?;
-        point_light.Targets()?.Add(&card.glass_visual)?;
-        point_light.Targets()?.Add(&dock.glass_visual)?;
+        for v in [
+            &card.core_visual,
+            &card.rim_visual,
+            &dock.core_visual,
+            &dock.rim_visual,
+        ] {
+            point_light.Targets()?.Add(v)?;
+        }
 
         let mut state = Self {
             _hwnd: hwnd,
@@ -902,10 +1234,11 @@ impl LabState {
             backdrop,
             _ambient_light: ambient_light,
             distant_light,
+            bounce_light,
             point_light,
             card,
             dock,
-            params: GlassParams::liquid_glass(true),
+            params: GlassParams::liquid_crystal(true),
             mouse_px: (WIN_W_DIPS * dpi * 0.5, WIN_H_DIPS * dpi * 0.45),
             hovered_icon: None,
             dragging: None,
@@ -923,18 +1256,20 @@ impl LabState {
         self.dock
             .apply_glass_brush(&self.compositor, &self.backdrop, p)?;
 
-        // Sync 3D light color/intensity with Dark vs Light mode.
+        // Opposing chromatic lights -> cool sapphire top-left + subtle prism-violet bottom-right.
         if p.is_dark {
-            self.distant_light.SetColor(ui_color(255, 232, 244, 255))?;
+            self.distant_light.SetColor(ui_color(255, 214, 244, 255))?;
+            self.bounce_light.SetColor(ui_color(255, 218, 192, 255))?;
             self.point_light.SetColor(if p.pointer_light {
-                ui_color(255, 210, 238, 255)
+                ui_color(255, 232, 248, 255)
             } else {
                 ui_color(0, 0, 0, 0)
             })?;
         } else {
-            self.distant_light.SetColor(ui_color(255, 255, 255, 255))?;
+            self.distant_light.SetColor(ui_color(255, 236, 250, 255))?;
+            self.bounce_light.SetColor(ui_color(255, 235, 214, 255))?;
             self.point_light.SetColor(if p.pointer_light {
-                ui_color(255, 255, 252, 245)
+                ui_color(255, 255, 253, 248)
             } else {
                 ui_color(0, 0, 0, 0)
             })?;
@@ -984,28 +1319,6 @@ impl LabState {
     }
 }
 
-fn build_micro_grain_pixels(size: u32, is_dark: bool) -> Vec<u8> {
-    let n = (size * size) as usize;
-    let mut out = vec![0u8; n * 4];
-    let max_a = if is_dark { 6u8 } else { 5u8 };
-    for idx in 0..n {
-        // Deterministic SplitMix32 hash for fine monochrome optical glass texture.
-        let mut z = (idx as u32).wrapping_add(0x9E37_79B9);
-        z = (z ^ (z >> 16)).wrapping_mul(0x85EB_CA6B);
-        z = (z ^ (z >> 13)).wrapping_mul(0xC2B2_AE35);
-        z ^= z >> 16;
-        let bright = (z & 1) == 0;
-        let a = ((z >> 8) as u8) % (max_a + 1);
-        let c = if bright { a } else { 0 };
-        let off = idx * 4;
-        out[off] = c;
-        out[off + 1] = c;
-        out[off + 2] = c;
-        out[off + 3] = a;
-    }
-    out
-}
-
 impl LabState {
     fn draw_fresnel_rim(
         &self,
@@ -1017,9 +1330,9 @@ impl LabState {
         r: f32,
     ) -> WinResult<()> {
         let is_dark = self.params.is_dark;
-        let spec_scale = (self.params.specular / 1.05).clamp(0.30, 1.35);
+        let spec_scale = (self.params.specular / 1.15).clamp(0.30, 1.35);
 
-        // 1. Optical glass depth gradient: subtle top luminance + calm lower legibility body.
+        // 1. Mirror-smooth top optical glass sheen (zero sand grain, zero muddy gray wash).
         let gloss_stops = [
             D2D1_GRADIENT_STOP {
                 position: 0.0,
@@ -1027,25 +1340,16 @@ impl LabState {
                     255,
                     255,
                     255,
-                    if is_dark { 0.14 } else { 0.34 } * spec_scale,
+                    if is_dark { 0.10 } else { 0.24 } * spec_scale,
                 ),
             },
             D2D1_GRADIENT_STOP {
-                position: 0.30,
-                color: rgba_f(
-                    255,
-                    255,
-                    255,
-                    if is_dark { 0.02 } else { 0.06 } * spec_scale,
-                ),
-            },
-            D2D1_GRADIENT_STOP {
-                position: 0.68,
-                color: rgba_f(10, 14, 22, if is_dark { 0.06 } else { 0.01 }),
+                position: 0.24,
+                color: rgba_f(255, 255, 255, 0.0),
             },
             D2D1_GRADIENT_STOP {
                 position: 1.0,
-                color: rgba_f(8, 12, 20, if is_dark { 0.15 } else { 0.04 }),
+                color: rgba_f(0, 0, 0, 0.0),
             },
         ];
         unsafe {
@@ -1077,99 +1381,8 @@ impl LabState {
             };
             dc.FillRoundedRectangle(&body_rr, &gloss_brush);
 
-            // 2. Ultra-fine monochrome frosted micro-grain (1.5-2% physical glass tactility).
-            let grain_sz = 128u32;
-            let grain_px = build_micro_grain_pixels(grain_sz, is_dark);
-            let bmp_props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                ..Default::default()
-            };
-            if let Ok(grain_bmp) = dc.CreateBitmap(
-                D2D_SIZE_U {
-                    width: grain_sz,
-                    height: grain_sz,
-                },
-                Some(grain_px.as_ptr().cast()),
-                grain_sz * 4,
-                &bmp_props,
-            ) {
-                let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES1 {
-                    extendModeX: D2D1_EXTEND_MODE_WRAP,
-                    extendModeY: D2D1_EXTEND_MODE_WRAP,
-                    interpolationMode: D2D1_INTERPOLATION_MODE_LINEAR,
-                };
-                if let Ok(grain_brush) = dc.CreateBitmapBrush(&grain_bmp, Some(&brush_props), None)
-                {
-                    dc.FillRoundedRectangle(&body_rr, &grain_brush);
-                }
-            }
-
-            // 3. Inner refractive lens thickness band (creates 3-4mm thick curved glass depth
-            //    that stays clearly visible even against bright skies without a dark ink box).
-            let depth_w = (2.6 * self.dpi).max(2.0);
-            let depth_inset = 1.6 * self.dpi + depth_w * 0.5;
-            let depth_stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: rgba_f(
-                        255,
-                        255,
-                        255,
-                        if is_dark { 0.14 } else { 0.28 } * spec_scale,
-                    ),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.45,
-                    color: rgba_f(10, 20, 36, if is_dark { 0.14 } else { 0.09 }),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: rgba_f(
-                        195,
-                        230,
-                        255,
-                        if is_dark { 0.16 } else { 0.24 } * spec_scale,
-                    ),
-                },
-            ];
-            let depth_coll = dc.CreateGradientStopCollection(
-                &depth_stops,
-                D2D1_COLOR_SPACE_SRGB,
-                D2D1_COLOR_SPACE_SRGB,
-                D2D1_BUFFER_PRECISION_8BPC_UNORM,
-                D2D1_EXTEND_MODE_CLAMP,
-                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-            )?;
-            let depth_brush = dc.CreateLinearGradientBrush(
-                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                    startPoint: Vector2 { X: ox, Y: oy },
-                    endPoint: Vector2 {
-                        X: ox + w * 0.25,
-                        Y: oy + h,
-                    },
-                },
-                None,
-                &depth_coll,
-            )?;
-            let depth_rr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: ox + depth_inset,
-                    top: oy + depth_inset,
-                    right: ox + w - depth_inset,
-                    bottom: oy + h - depth_inset,
-                },
-                radiusX: (r - depth_inset).max(1.0),
-                radiusY: (r - depth_inset).max(1.0),
-            };
-            dc.DrawRoundedRectangle(&depth_rr, &depth_brush, depth_w, None);
-
-            // 4. Signature Liquid Glass diagonal specular Fresnel rim: brightest on top-left &
-            //    bottom-right curved corners, calm across the middle span, zero dark ink outline.
+            // 2. Single razor-thin diagonal specular meniscus lip (brightest on opposing curved
+            //    corners, whispering near-zero along flat spans — no double-ring bezel).
             let rim_stops = [
                 D2D1_GRADIENT_STOP {
                     position: 0.0,
@@ -1177,43 +1390,43 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.80 } else { 0.96 } * spec_scale,
+                        if is_dark { 0.86 } else { 0.96 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.24,
+                    position: 0.22,
                     color: rgba_f(
-                        210,
-                        236,
+                        220,
+                        240,
                         255,
-                        if is_dark { 0.24 } else { 0.44 } * spec_scale,
+                        if is_dark { 0.18 } else { 0.34 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 0.50,
                     color: rgba_f(
-                        230,
-                        242,
                         255,
-                        if is_dark { 0.10 } else { 0.20 } * spec_scale,
+                        255,
+                        255,
+                        if is_dark { 0.05 } else { 0.12 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.76,
+                    position: 0.78,
                     color: rgba_f(
-                        220,
-                        215,
+                        216,
+                        234,
                         255,
-                        if is_dark { 0.22 } else { 0.40 } * spec_scale,
+                        if is_dark { 0.18 } else { 0.34 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 1.0,
                     color: rgba_f(
-                        232,
-                        246,
+                        240,
+                        248,
                         255,
-                        if is_dark { 0.66 } else { 0.86 } * spec_scale,
+                        if is_dark { 0.72 } else { 0.90 } * spec_scale,
                     ),
                 },
             ];
@@ -1236,7 +1449,7 @@ impl LabState {
                 None,
                 &rim_coll,
             )?;
-            let stroke_w = (1.35 * self.dpi).max(1.0);
+            let stroke_w = (1.05 * self.dpi).max(1.0);
             let inset = stroke_w * 0.5;
             let rim_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -1249,77 +1462,6 @@ impl LabState {
                 radiusY: (r - inset).max(1.0),
             };
             dc.DrawRoundedRectangle(&rim_rr, &rim_brush, stroke_w, None);
-
-            // 5. Crisp chromatic prism dispersion glint along the top optical bevel.
-            let prism_stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: rgba_f(120, 210, 255, 0.0),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.18,
-                    color: rgba_f(
-                        145,
-                        226,
-                        255,
-                        if is_dark { 0.34 } else { 0.52 } * spec_scale,
-                    ),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.48,
-                    color: rgba_f(
-                        255,
-                        255,
-                        255,
-                        if is_dark { 0.54 } else { 0.78 } * spec_scale,
-                    ),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.80,
-                    color: rgba_f(
-                        228,
-                        196,
-                        255,
-                        if is_dark { 0.28 } else { 0.42 } * spec_scale,
-                    ),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: rgba_f(255, 255, 255, 0.0),
-                },
-            ];
-            let prism_coll = dc.CreateGradientStopCollection(
-                &prism_stops,
-                D2D1_COLOR_SPACE_SRGB,
-                D2D1_COLOR_SPACE_SRGB,
-                D2D1_BUFFER_PRECISION_8BPC_UNORM,
-                D2D1_EXTEND_MODE_CLAMP,
-                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-            )?;
-            let prism_brush = dc.CreateLinearGradientBrush(
-                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                    startPoint: Vector2 { X: ox + r, Y: oy },
-                    endPoint: Vector2 {
-                        X: ox + w - r,
-                        Y: oy,
-                    },
-                },
-                None,
-                &prism_coll,
-            )?;
-            dc.DrawLine(
-                Vector2 {
-                    X: ox + r * 0.65,
-                    Y: oy + 1.6 * self.dpi,
-                },
-                Vector2 {
-                    X: ox + w - r * 0.65,
-                    Y: oy + 1.6 * self.dpi,
-                },
-                &prism_brush,
-                (1.1 * self.dpi).max(1.0),
-                None,
-            );
         }
         Ok(())
     }
@@ -1509,9 +1651,14 @@ impl LabState {
         )?;
 
         // 4 live optical telemetry chips.
+        let meniscus_val = if p.meniscus_enabled {
+            format!("{:.0}%", p.meniscus_strength * 100.0)
+        } else {
+            "Kapalı".to_owned()
+        };
         let chips = [
             ("Bulanıklık (Q/W)", format!("{:.0} px", p.blur_sigma)),
-            ("Canlılık (E/R)", format!("{:.2}x", p.saturation)),
+            ("Kenar Mercek (C/V)", meniscus_val),
             ("Cam Tonu (A/S)", format!("{:.0}%", p.tint_alpha * 100.0)),
             ("Işık Yansıması (Z/X)", format!("{:.2}", p.specular)),
         ];
@@ -1575,9 +1722,14 @@ impl LabState {
 
         // Concise live guide lines.
         let light_str = if p.pointer_light { "Açık" } else { "Kapalı" };
+        let prism_str = if p.meniscus_enabled {
+            "Açık"
+        } else {
+            "Kapalı"
+        };
         let theme_str = if p.is_dark { "Koyu" } else { "Açık" };
         let line1 = format!(
-            "Sürükle: Pencereyi taşı   ·   Fareyi gezdir: 3D ışık yansıması ({light_str}, L)   ·   Tema: {theme_str} (T)"
+            "Sürükle: Taşı  ·  3D Işık: {light_str} (L)  ·  Kenar Mercek: {prism_str} (P)  ·  Tema: {theme_str} (T)"
         );
         self.draw_text(
             &dc,
@@ -1598,7 +1750,7 @@ impl LabState {
         )?;
         self.draw_text(
             &dc,
-            "1: Liquid Glass   ·   2: Kristal   ·   3: Derin Buzlu   ·   4: Füme   ·   Esc / Sağ tık: Çıkış",
+            "1: Liquid Crystal  ·  2: Pure Water  ·  3: Obsidian  ·  4: Silk  ·  E/R: Canlılık  ·  Esc: Çıkış",
             D2D_RECT_F {
                 left: ox + s(20.0),
                 top: oy + s(140.0),
@@ -1771,15 +1923,24 @@ impl LabState {
         }
         let mut changed = true;
         match vk as u8 {
-            b'1' => self.params = GlassParams::liquid_glass(self.params.is_dark),
-            b'2' => self.params = GlassParams::crystal_clear(self.params.is_dark),
-            b'3' => self.params = GlassParams::deep_frosted(self.params.is_dark),
-            b'4' => self.params = GlassParams::minimal_smoked(self.params.is_dark),
+            b'1' => self.params = GlassParams::liquid_crystal(self.params.is_dark),
+            b'2' => self.params = GlassParams::pure_water(self.params.is_dark),
+            b'3' => self.params = GlassParams::smoked_obsidian(self.params.is_dark),
+            b'4' => self.params = GlassParams::frosted_silk(self.params.is_dark),
             b'T' => {
                 self.params.is_dark = !self.params.is_dark;
             }
             b'L' => {
                 self.params.pointer_light = !self.params.pointer_light;
+            }
+            b'P' => {
+                self.params.meniscus_enabled = !self.params.meniscus_enabled;
+            }
+            b'C' => {
+                self.params.meniscus_strength = (self.params.meniscus_strength - 0.12).max(0.0);
+            }
+            b'V' => {
+                self.params.meniscus_strength = (self.params.meniscus_strength + 0.12).min(1.0);
             }
             b'Q' => self.params.blur_sigma = (self.params.blur_sigma - 2.0).max(0.0),
             b'W' => self.params.blur_sigma = (self.params.blur_sigma + 2.0).min(48.0),
