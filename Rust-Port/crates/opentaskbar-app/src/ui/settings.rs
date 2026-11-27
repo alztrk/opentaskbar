@@ -8411,10 +8411,8 @@ impl SettingsView {
                 ],
             )
             .into_any_element(),
-            section_card(
-                t,
-                loc::t("SectionSystem"),
-                vec![
+            section_card(t, loc::t("SectionSystem"), {
+                let mut rows: Vec<AnyElement> = vec![
                     self.target_row(
                         "Startup",
                         t,
@@ -8507,7 +8505,10 @@ impl SettingsView {
                             }),
                         ),
                     ),
-                    self.target_row(
+                ];
+                // Temporarily disabled together with the Fjord top bar.
+                if crate::ui::fjord_bar::FJORD_BAR_ENABLED {
+                    rows.push(self.target_row(
                         "FjordBarVisible",
                         t,
                         Some("\u{E838}"),
@@ -8526,9 +8527,10 @@ impl SettingsView {
                                 this.auto_save(cx);
                             }),
                         ),
-                    ),
-                ],
-            )
+                    ));
+                }
+                rows
+            })
             .into_any_element(),
             section_card(
                 t,
