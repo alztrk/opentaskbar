@@ -269,22 +269,24 @@ impl HotkeyBinding {
         })
     }
 
-    /// A custom string wins over the legacy choice; "Disabled" disables the binding.
+    /// A custom string wins over the legacy choice. Every opt-out spelling (`Disabled`,
+    /// `Esc`, `Escape`, `Backspace`, empty) means "no binding" and never falls back to the
+    /// legacy preset — the same rule `DockSettings::launcher_binding` uses at runtime.
     pub fn resolve(choice: HotkeyChoice, custom: Option<&str>) -> Option<Self> {
         match custom {
-            Some(text) if text.trim().eq_ignore_ascii_case("Disabled") => None,
-            Some(text) if !text.trim().is_empty() => Self::try_parse(text),
-            _ => Self::from_choice(choice),
+            Some(text) if is_disabled_hotkey(text) => None,
+            Some(text) => Self::try_parse(text),
+            None => Self::from_choice(choice),
         }
     }
 
-    /// Null, "Disabled" and any parseable combination are all valid persisted values.
+    /// Null, any opt-out spelling and any parseable combination are valid persisted values.
+    /// Keeping this set identical to `is_disabled_hotkey` prevents `validate()` from rejecting
+    /// a file whose hotkey is intentionally disabled.
     pub fn is_valid_custom_string(text: Option<&str>) -> bool {
         match text {
             None => true,
-            Some(value) => {
-                value.trim().eq_ignore_ascii_case("Disabled") || Self::try_parse(value).is_some()
-            }
+            Some(value) => is_disabled_hotkey(value) || Self::try_parse(value).is_some(),
         }
     }
 
@@ -614,6 +616,29 @@ mod tests {
             resolver.as_ref(),
             HotkeyBinding::from_choice(HotkeyChoice::CtrlAltD).as_ref()
         ));
+    }
+
+    #[test]
+    fn every_disabled_spelling_validates_and_resolves_to_no_binding() {
+        for text in ["Esc", "escape", "BACKSPACE", "Disabled", "", "  "] {
+            assert!(is_disabled_hotkey(text), "{text:?}");
+            assert!(
+                HotkeyBinding::is_valid_custom_string(Some(text)),
+                "{text:?}"
+            );
+            assert!(
+                HotkeyBinding::resolve(HotkeyChoice::AltSpace, Some(text)).is_none(),
+                "{text:?} must not fall back to the preset"
+            );
+            assert!(HotkeyBinding::try_parse(text).is_none(), "{text:?}");
+        }
+        assert!(HotkeyBinding::is_valid_custom_string(Some("Ctrl+Alt+D")));
+        assert!(!HotkeyBinding::is_valid_custom_string(Some("Ctrl+Escape")));
         assert!(!HotkeyBinding::equals_binding(None, None));
+        let binding = HotkeyBinding::from_choice(HotkeyChoice::CtrlAltD);
+        assert!(HotkeyBinding::equals_binding(
+            binding.as_ref(),
+            HotkeyBinding::from_choice(HotkeyChoice::CtrlAltD).as_ref()
+        ));
     }
 }

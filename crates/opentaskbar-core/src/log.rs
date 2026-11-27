@@ -20,24 +20,17 @@ static LOG_PATH: OnceLock<Mutex<PathBuf>> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn init(path: PathBuf) {
-    // Older callers still pass `opentaskbar.log` from the old Rust data folder.
-    // Redirect them to the shared, Rust-specific log so both builds can coexist.
-    let legacy_name = path
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(crate::paths::LEGACY_RUST_LOG_FILE_NAME));
-    let in_shared_folder = path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .is_some_and(|name| name.eq_ignore_ascii_case(crate::paths::APP_DATA_FOLDER_NAME));
-    let path = if legacy_name && in_shared_folder {
-        crate::paths::rust_log_path()
-    } else {
-        path
-    };
+    // Honor the caller's path. The historic "legacy name" is the same string as the current
+    // Rust log name, so redirecting `...\OpenTaskbar\opentaskbar.log` silently discarded any
+    // relocated/LOCALAPPDATA override supplied by the caller.
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = LOG_PATH.set(Mutex::new(path));
+    if LOG_PATH.set(Mutex::new(path)).is_err() {
+        // `eprintln!` rather than `warn!`: the logger is already initialized and writing a
+        // warning through it would obscure the fact that this call was ignored.
+        eprintln!("log: init called more than once; keeping the first log path");
+    }
 }
 
 /// Rotation destination. The file is always `opentaskbar.log.old`, never
@@ -159,11 +152,9 @@ pub fn resolve_message(message_key: &str, arguments: &[&str]) -> String {
     if message_key.trim().is_empty() {
         return String::new();
     }
-    let mut resolved = message_key.to_owned();
-    for (index, argument) in arguments.iter().enumerate() {
-        resolved = resolved.replace(&format!("{{{index}}}"), argument);
-    }
-    resolved
+    // Same single-pass substitution as `i18n::t_fmt`: sequential `str::replace` calls also
+    // rewrote `{n}` sequences that arrived inside previously inserted argument text.
+    crate::i18n::substitute_placeholders(message_key, arguments)
 }
 
 /// Writes one structured failure record (localization key + resolved text).
@@ -191,6 +182,12 @@ mod tests {
             rotated_log_path(&legacy),
             log.with_file_name(RUST_LOG_BACKUP_FILE_NAME)
         );
+        // A relocated/custom log keeps its own name plus `.old`.
+        let custom = Path::new(r"C:\Custom\app.log");
+        assert_eq!(
+            rotated_log_path(custom),
+            Path::new(r"C:\Custom\app.log.old")
+        );
     }
 
     #[test]
@@ -204,5 +201,16 @@ mod tests {
         assert_eq!(resolve_message("ErrorFile", &["C:\\x"]), "ErrorFile");
         assert_eq!(resolve_message("Error {0} {1}", &["a", "b"]), "Error a b");
         assert_eq!(resolve_message("", &[]), "");
+    }
+
+    #[test]
+    fn resolve_message_is_single_pass_like_i18n_t_fmt() {
+        // Sequential `replace` calls would rewrite the `{1}` coming from argument 0.
+        assert_eq!(resolve_message("{0} {1}", &["{1}", "b"]), "{1} b");
+        // Multi-digit indices must not be parsed as index 1 followed by a literal '0'.
+        let args: Vec<String> = (0..11).map(|i| format!("a{i}")).collect();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(resolve_message("{10} / {1}", &refs), "a10 / a1");
+        assert_eq!(resolve_message("{0} {1}", &["{2}", "{3}"]), "{2} {3}");
     }
 }

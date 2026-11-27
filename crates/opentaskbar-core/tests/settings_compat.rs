@@ -1018,6 +1018,138 @@ fn boundary_display_care_values_are_accepted() {
 }
 
 #[test]
+fn comma_separated_ai_provider_flags_survive_legacy_migration() {
+    let (dir, path) = temp_settings("ai-flags-csv");
+    fs::write(
+        &path,
+        r#"{
+            "Widgets": ["AiUsage"],
+            "InstalledWidgets": ["AiUsage"],
+            "AiUsageProviders": "Claude, Codex"
+        }"#,
+    )
+    .unwrap();
+    let loaded = load_from(&path);
+    assert!(
+        loaded.is_widget_enabled("AiUsageClaude"),
+        "Claude was dropped: {:?}",
+        loaded.enabled_widgets
+    );
+    assert!(
+        loaded.is_widget_enabled("AiUsageCodex"),
+        "Codex was dropped: {:?}",
+        loaded.enabled_widgets
+    );
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+
+    save_to(&path, &loaded).unwrap();
+    let reloaded = load_from(&path);
+    assert!(reloaded.is_widget_enabled("AiUsageClaude"));
+    assert!(reloaded.is_widget_enabled("AiUsageCodex"));
+    assert!(reloaded.validate().is_empty(), "{:?}", reloaded.validate());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn profile_without_a_theme_pack_preserves_the_current_pack() {
+    let mut settings = DockSettings {
+        theme_pack: "previous".to_owned(),
+        ..DockSettings::default()
+    };
+    let profile = DockProfile {
+        name: "Partial".to_owned(),
+        theme: Some(AppTheme::Light),
+        enabled_widgets: vec!["Clock".to_owned()],
+        installed_widgets: vec!["Clock".to_owned()],
+        ..DockProfile::default()
+    };
+    apply_full_profile(&mut settings, &profile);
+    assert_eq!(settings.theme_pack, "previous");
+    assert_eq!(settings.theme, AppTheme::Light);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn mixed_case_custom_ids_canonicalize_through_every_collection() {
+    assert_eq!(
+        canonical_widget_setting_id("CUSTOM:Usd-Try"),
+        "custom:Usd-Try"
+    );
+    let mut direct = DockSettings::default();
+    direct.set_widget_enabled("CUSTOM:Direct", true);
+    assert!(direct.is_widget_enabled("custom:direct"));
+    assert_eq!(direct.enabled_widgets, ["custom:Direct"]);
+
+    let (dir, path) = temp_settings("custom-mixed-case");
+    fs::write(
+        &path,
+        r#"{
+            "Widgets": ["CUSTOM:Usd-Try", "Clock"],
+            "InstalledWidgets": ["custom:Usd-Try", "Clock"],
+            "WidgetDensityOverrides": {"CUSTOM:Usd-Try": "Compact"},
+            "DynamicIslandPlacements": {"CUSTOM:Usd-Try": "*"},
+            "DynamicIslandWidgetOrders": {"DISPLAY1": ["CUSTOM:Usd-Try"]},
+            "Profiles": [{
+                "Name": "P",
+                "Widgets": ["CUSTOM:Usd-Try"],
+                "InstalledWidgets": ["custom:Usd-Try"]
+            }]
+        }"#,
+    )
+    .unwrap();
+    let loaded = load_from(&path);
+    assert_eq!(loaded.enabled_widgets, ["custom:Usd-Try", "Clock"]);
+    assert_eq!(loaded.installed_widgets, ["custom:Usd-Try", "Clock"]);
+    assert_eq!(
+        loaded.widget_density_overrides.get("custom:Usd-Try"),
+        Some(&WidgetDensityMode::Compact)
+    );
+    assert_eq!(
+        loaded
+            .dynamic_island_placements
+            .get("custom:Usd-Try")
+            .map(String::as_str),
+        Some("*")
+    );
+    assert_eq!(
+        loaded.dynamic_island_widget_orders.get("DISPLAY1").unwrap(),
+        &vec!["custom:Usd-Try".to_owned()]
+    );
+    assert_eq!(loaded.profiles[0].enabled_widgets, ["custom:Usd-Try"]);
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+
+    save_to(&path, &loaded).unwrap();
+    let reloaded = load_from(&path);
+    assert_eq!(reloaded, loaded);
+    assert!(reloaded.validate().is_empty(), "{:?}", reloaded.validate());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn density_overrides_resolve_through_legacy_id_spellings() {
+    let settings = DockSettings {
+        global_widget_density: WidgetDensityMode::Full,
+        widget_density_overrides: std::collections::BTreeMap::from([(
+            "SystemStats".to_owned(),
+            WidgetDensityMode::Compact,
+        )]),
+        ..DockSettings::default()
+    };
+    assert_eq!(
+        resolve_widget_density(&settings, "stats"),
+        WidgetDensityMode::Compact
+    );
+    assert_eq!(
+        resolve_widget_density(&settings, "SystemStats"),
+        WidgetDensityMode::Compact
+    );
+    assert_eq!(
+        resolve_widget_density(&settings, "Media"),
+        WidgetDensityMode::Full
+    );
+}
+
+#[test]
 fn custom_widget_ids_are_supported_but_constrained() {
     assert!(is_supported_widget_id("custom:usd-try"));
     assert!(is_supported_widget_id("CUSTOM:Clock_2"));

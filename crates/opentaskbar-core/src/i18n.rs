@@ -70,8 +70,12 @@ fn catalogs() -> &'static Catalogs {
 
 fn catalog_for(culture: &str) -> Option<Arc<Catalog>> {
     let tag = canonical(culture)?;
-    let catalogs = catalogs();
-    if let Some(catalog) = catalogs.by_culture.read().ok()?.get(tag) {
+    let by_culture = &catalogs().by_culture;
+    if let Some(catalog) = by_culture
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(tag)
+    {
         return Some(Arc::clone(catalog));
     }
     let (_, source) = CATALOG_SOURCES
@@ -87,7 +91,9 @@ fn catalog_for(culture: &str) -> Option<Arc<Catalog>> {
             return None;
         }
     };
-    let mut by_culture = catalogs.by_culture.write().ok()?;
+    let mut by_culture = by_culture
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let entry = by_culture.entry(tag).or_insert_with(|| Arc::new(parsed));
     Some(Arc::clone(entry))
 }
@@ -115,7 +121,9 @@ pub fn is_supported(culture: &str) -> bool {
 
 /// The currently active BCP 47 tag, e.g. `"tr-TR"`.
 pub fn language() -> &'static str {
-    *current_slot().read().expect("localization lock poisoned")
+    *current_slot()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Switch the UI language. Returns false for unsupported tags.
@@ -123,7 +131,9 @@ pub fn set_language(culture: &str) -> bool {
     let Some(tag) = canonical(culture) else {
         return false;
     };
-    *current_slot().write().expect("localization lock poisoned") = tag;
+    *current_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = tag;
     true
 }
 
@@ -234,11 +244,13 @@ pub fn key_count(culture: &str) -> usize {
     catalog_for(culture).map_or(0, |catalog| catalog.len())
 }
 
-/// Translate and replace `{0}`, `{1}`, ... placeholders with `args`.
-pub fn t_fmt(key: &str, args: &[&str]) -> String {
-    let template = t(key);
+/// Single-pass `{0}`, `{1}`, ... substitution shared with `log::resolve_message`.
+///
+/// Inserted argument text is never rescanned, so an argument containing `"{1}"` (or a template
+/// with `{10}` and more) keeps its literal value.
+pub fn substitute_placeholders(template: &str, args: &[&str]) -> String {
     let mut result = String::with_capacity(template.len() + args.len() * 8);
-    let mut rest = template.as_str();
+    let mut rest = template;
     while let Some(start) = rest.find('{') {
         result.push_str(&rest[..start]);
         let after = &rest[start + 1..];
@@ -261,6 +273,16 @@ pub fn t_fmt(key: &str, args: &[&str]) -> String {
     }
     result.push_str(rest);
     result
+}
+
+/// Translate `key` with an explicit culture and fill its placeholders.
+pub fn t_fmt_culture(culture: &str, key: &str, args: &[&str]) -> String {
+    substitute_placeholders(&tr(culture, key), args)
+}
+
+/// Translate and replace `{0}`, `{1}`, ... placeholders with `args` using the active language.
+pub fn t_fmt(key: &str, args: &[&str]) -> String {
+    t_fmt_culture(language(), key, args)
 }
 
 #[cfg(test)]
@@ -290,10 +312,21 @@ mod tests {
         assert_eq!(tr("tr-TR", "Settings"), "Ayarlar");
     }
 
+    /// Restores the default language even when an assertion fails, so a language-mutating
+    /// test cannot leak state into other tests running in the same process.
+    struct LanguageGuard;
+    impl Drop for LanguageGuard {
+        fn drop(&mut self) {
+            let _ = set_language(DEFAULT_LANGUAGE);
+        }
+    }
+
     #[test]
     fn format_replaces_placeholders() {
-        let template = t("CountdownEditingHelp");
-        let formatted = t_fmt("CountdownEditingHelp", &["1", "1440"]);
+        // Use an explicit culture: the global active language is mutable and other tests
+        // exercise `set_language`, so `t()` here would make this test order-dependent.
+        let template = tr(DEFAULT_LANGUAGE, "CountdownEditingHelp");
+        let formatted = t_fmt_culture(DEFAULT_LANGUAGE, "CountdownEditingHelp", &["1", "1440"]);
         assert!(formatted.contains("1"));
         assert!(formatted.contains("1440"));
         assert!(!formatted.contains("{0}"));
@@ -301,12 +334,24 @@ mod tests {
     }
 
     #[test]
+    fn substitution_does_not_rescan_inserted_arguments() {
+        assert_eq!(substitute_placeholders("{0} {1}", &["{1}", "b"]), "{1} b");
+        let args: Vec<String> = (0..11).map(|i| format!("a{i}")).collect();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(substitute_placeholders("{10} {1}", &refs), "a10 a1");
+        assert_eq!(
+            substitute_placeholders("{0} {x} {{2}", &["A"]),
+            "A {x} {{2}"
+        );
+    }
+
+    #[test]
     fn set_language_normalizes_and_rejects_unknown_tags() {
+        let _guard = LanguageGuard;
         assert!(set_language("TR-tr"));
         assert_eq!(language(), "tr-TR");
         assert!(!set_language("xx-YY"));
         assert_eq!(language(), "tr-TR");
-        let _ = set_language(DEFAULT_LANGUAGE);
     }
 
     #[test]

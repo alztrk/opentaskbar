@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 pub const APP_DATA_FOLDER_NAME: &str = "OpenTaskbar";
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const RUST_LOG_FILE_NAME: &str = "opentaskbar.log";
-pub const LEGACY_RUST_LOG_FILE_NAME: &str = "opentaskbar.log";
+/// Historic alias kept for callers and for log rotation; it has always had the same value as
+/// `RUST_LOG_FILE_NAME`, so there is no old path to redirect to. `log::init` honors its argument.
+pub const LEGACY_RUST_LOG_FILE_NAME: &str = RUST_LOG_FILE_NAME;
 pub const THEMES_FOLDER_NAME: &str = "Themes";
 pub const SECRETS_FOLDER_NAME: &str = "secrets";
 pub const WATCHDOG_FILE_NAME: &str = "OpenTaskbarWatchdog.exe";
