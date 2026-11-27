@@ -16,6 +16,21 @@
 // wired incrementally; keep the surface warning-clean without deleting code.
 #![allow(dead_code)]
 
+// Bundled resource paths, anchored to the crate manifest instead of a chain of
+// `../..`. The TypeScript-style `@/` equivalent for this repository; paths are
+// relative to `resources/` at the repository root:
+//   crate::resource!("themes/nord") -> &'static str            (runtime paths)
+//   include_bytes!(concat!(crate::resource!("fonts/Inter-Bold.ttf")))
+// `include_bytes!` cannot expand a wrapping `macro_rules!` directly, but it
+// does accept a `concat!` whose argument is this macro.
+#[cfg(windows)]
+#[macro_export]
+macro_rules! resource {
+    ($path:literal) => {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/", $path)
+    };
+}
+
 #[cfg(windows)]
 mod design;
 #[cfg(windows)]

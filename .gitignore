@@ -10,6 +10,8 @@ release/
 tmp/
 .reports/
 .local/
+.notes/
+.research/
 OpenTaskbar-*.zip
 checksums.txt
 
