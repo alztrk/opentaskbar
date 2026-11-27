@@ -11,11 +11,19 @@
 //!
 //! Run locally:
 //!   cargo run -p opentaskbar-app --example liquid_glass_lab --release
+//!
+//! The effect graph mirrors `design/spatial_glass.rs`; the Clear Crystal tint,
+//! tint coefficients and sheen stop have been aligned with production. Being a
+//! standalone binary it cannot link the app crate, so a few small helpers (the
+//! font family picker and `rgba_f`) are intentionally local lab copies.
 
 #![cfg(windows)]
 
 use std::cell::RefCell;
 use std::mem::size_of;
+
+// Keep the Clear Crystal preset in sync with production's opacity→tint rule.
+use opentaskbar_core::settings::clear_crystal_tint_alpha;
 
 use windows::Foundation::{IPropertyValue, PropertyValue, Size};
 use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
@@ -90,6 +98,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_RBUTTONUP, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOPMOST, WS_POPUP,
 };
+
+/// Mirrors `design::d2d::with_surface_draw` — this example is a standalone
+/// binary and cannot link the app crate, so the small error-path guard is local.
+fn with_surface_draw<R, E>(
+    draw: impl FnOnce() -> Result<R, E>,
+    end: impl FnOnce() -> Result<(), E>,
+) -> Result<R, E> {
+    let draw_res = draw();
+    let end_res = end();
+    match draw_res {
+        Ok(value) => end_res.map(|()| value),
+        Err(err) => Err(err),
+    }
+}
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_DONOTROUND: u32 = 1;
@@ -343,7 +365,7 @@ impl GlassParams {
             is_dark,
             blur_sigma: 9.0,
             saturation: 1.32,
-            tint_alpha: if is_dark { 0.12 } else { 0.18 },
+            tint_alpha: clear_crystal_tint_alpha(0.9, is_dark),
             edge_glow: 0.88,
             pointer_light: true,
         }
@@ -543,7 +565,7 @@ impl GlassPiece {
     ) -> WinResult<()> {
         // Neutral architectural obsidian (dark) or crisp alabaster (light) — zero color cast.
         let tint_rgb = if params.is_dark {
-            ui_color(255, 14, 16, 22)
+            ui_color(255, 8, 11, 16)
         } else {
             ui_color(255, 246, 248, 252)
         };
@@ -657,24 +679,26 @@ fn upload_pill_mask(
     let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
     let ox = offset.x as f32;
     let oy = offset.y as f32;
-    unsafe {
-        dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
-        let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
-        let rr = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: ox,
-                top: oy,
-                right: ox + w_px,
-                bottom: oy + h_px,
-            },
-            radiusX: radius_px,
-            radiusY: radius_px,
-        };
-        dc.FillRoundedRectangle(&rr, &white);
-        interop.EndDraw()?;
-    }
-    Ok(())
+    with_surface_draw(
+        || unsafe {
+            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+            let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
+            let rr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: ox,
+                    top: oy,
+                    right: ox + w_px,
+                    bottom: oy + h_px,
+                },
+                radiusX: radius_px,
+                radiusY: radius_px,
+            };
+            dc.FillRoundedRectangle(&rr, &white);
+            Ok(())
+        },
+        || unsafe { interop.EndDraw() },
+    )
 }
 
 /// Renders a crisp 1.35 DIP anti-aliased perimeter stroke mask so cursor light glides
@@ -693,24 +717,26 @@ fn upload_razor_rim_mask(
     let oy = offset.y as f32;
     let stroke_w = (1.35 * dpi).max(1.25);
     let inset = stroke_w * 0.5;
-    unsafe {
-        dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
-        let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
-        let rr = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: ox + inset,
-                top: oy + inset,
-                right: ox + w_px - inset,
-                bottom: oy + h_px - inset,
-            },
-            radiusX: (radius_px - inset).max(1.0),
-            radiusY: (radius_px - inset).max(1.0),
-        };
-        dc.DrawRoundedRectangle(&rr, &white, stroke_w, None);
-        interop.EndDraw()?;
-    }
-    Ok(())
+    with_surface_draw(
+        || unsafe {
+            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+            let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
+            let rr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: ox + inset,
+                    top: oy + inset,
+                    right: ox + w_px - inset,
+                    bottom: oy + h_px - inset,
+                },
+                radiusX: (radius_px - inset).max(1.0),
+                radiusY: (radius_px - inset).max(1.0),
+            };
+            dc.DrawRoundedRectangle(&rr, &white, stroke_w, None);
+            Ok(())
+        },
+        || unsafe { interop.EndDraw() },
+    )
 }
 
 // ============================================================================
@@ -893,7 +919,7 @@ impl LabState {
         r: f32,
     ) -> WinResult<()> {
         let is_dark = self.params.is_dark;
-        let edge_scale = (self.params.edge_glow / 0.72).clamp(0.25, 1.35);
+        let edge_scale = (self.params.edge_glow / 0.88).clamp(0.25, 1.35);
 
         unsafe {
             // Subtle whisper of top atmospheric glass sheen (barely-there optical depth).
@@ -908,7 +934,7 @@ impl LabState {
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.32,
+                    position: 0.34,
                     color: rgba_f(255, 255, 255, 0.0),
                 },
                 D2D1_GRADIENT_STOP {
@@ -1127,136 +1153,138 @@ impl LabState {
             rgba_f(255, 255, 255, 0.68)
         };
 
-        unsafe {
-            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
-        }
+        with_surface_draw(
+            || {
+                unsafe {
+                    dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                    dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+                }
 
-        self.draw_spatial_rim(&dc, ox, oy, w, h, self.card.radius_px)?;
+                self.draw_spatial_rim(&dc, ox, oy, w, h, self.card.radius_px)?;
 
-        self.draw_text(
-            &dc,
-            "OpenTaskbar Spatial Glass Lab",
-            D2D_RECT_F {
-                left: ox + s(20.0),
-                top: oy + s(16.0),
-                right: ox + w - s(170.0),
-                bottom: oy + s(38.0),
-            },
-            TextStyle {
-                size_dips: 15.5,
-                weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                align: 0,
-                color: fg,
-                fluent: false,
-            },
-        )?;
-        self.draw_text(
-            &dc,
-            p.preset_name,
-            D2D_RECT_F {
-                left: ox + w - s(168.0),
-                top: oy + s(16.0),
-                right: ox + w - s(20.0),
-                bottom: oy + s(38.0),
-            },
-            TextStyle {
-                size_dips: 12.0,
-                weight: DWRITE_FONT_WEIGHT_MEDIUM,
-                align: 2,
-                color: muted,
-                fluent: false,
-            },
-        )?;
-
-        let chips = [
-            ("Bulanıklık (Q/W)", format!("{:.0} px", p.blur_sigma)),
-            ("Doygunluk (E/R)", format!("{:.2}x", p.saturation)),
-            ("Cam Tonu (A/S)", format!("{:.0}%", p.tint_alpha * 100.0)),
-            ("Kenar Işığı (Z/X)", format!("{:.0}%", p.edge_glow * 100.0)),
-        ];
-        let gap = s(8.0);
-        let cw = (w - s(40.0) - gap * 3.0) / 4.0;
-        let cy = oy + s(50.0);
-        let ch = s(50.0);
-        unsafe {
-            let cb = dc.CreateSolidColorBrush(&chip_fill, None)?;
-            let cs = dc.CreateSolidColorBrush(&chip_stroke, None)?;
-            for (i, (label, val)) in chips.iter().enumerate() {
-                let cl = ox + s(20.0) + i as f32 * (cw + gap);
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: cl,
-                        top: cy,
-                        right: cl + cw,
-                        bottom: cy + ch,
-                    },
-                    radiusX: s(11.0),
-                    radiusY: s(11.0),
-                };
-                dc.FillRoundedRectangle(&rr, &cb);
-                dc.DrawRoundedRectangle(&rr, &cs, 1.0, None);
                 self.draw_text(
                     &dc,
-                    label,
+                    "OpenTaskbar Spatial Glass Lab",
                     D2D_RECT_F {
-                        left: cl + s(9.0),
-                        top: cy + s(6.0),
-                        right: cl + cw - s(8.0),
-                        bottom: cy + s(21.0),
+                        left: ox + s(20.0),
+                        top: oy + s(16.0),
+                        right: ox + w - s(170.0),
+                        bottom: oy + s(38.0),
                     },
                     TextStyle {
-                        size_dips: 10.0,
-                        weight: DWRITE_FONT_WEIGHT_MEDIUM,
-                        align: 0,
-                        color: muted,
-                        fluent: false,
-                    },
-                )?;
-                self.draw_text(
-                    &dc,
-                    val,
-                    D2D_RECT_F {
-                        left: cl + s(9.0),
-                        top: cy + s(23.0),
-                        right: cl + cw - s(8.0),
-                        bottom: cy + ch - s(6.0),
-                    },
-                    TextStyle {
-                        size_dips: 14.0,
-                        weight: DWRITE_FONT_WEIGHT_BOLD,
+                        size_dips: 15.5,
+                        weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
                         align: 0,
                         color: fg,
                         fluent: false,
                     },
                 )?;
-            }
-        }
+                self.draw_text(
+                    &dc,
+                    p.preset_name,
+                    D2D_RECT_F {
+                        left: ox + w - s(168.0),
+                        top: oy + s(16.0),
+                        right: ox + w - s(20.0),
+                        bottom: oy + s(38.0),
+                    },
+                    TextStyle {
+                        size_dips: 12.0,
+                        weight: DWRITE_FONT_WEIGHT_MEDIUM,
+                        align: 2,
+                        color: muted,
+                        fluent: false,
+                    },
+                )?;
 
-        let light_str = if p.pointer_light { "Açık" } else { "Kapalı" };
-        let theme_str = if p.is_dark { "Koyu" } else { "Açık" };
-        let line1 = format!(
-            "Sürükle: Taşı   ·   İmleç Kenar Işığı: {light_str} (L)   ·   Tema: {theme_str} (T)"
-        );
-        self.draw_text(
-            &dc,
-            &line1,
-            D2D_RECT_F {
-                left: ox + s(20.0),
-                top: oy + s(114.0),
-                right: ox + w - s(20.0),
-                bottom: oy + s(136.0),
-            },
-            TextStyle {
-                size_dips: 11.5,
-                weight: DWRITE_FONT_WEIGHT_MEDIUM,
-                align: 0,
-                color: fg,
-                fluent: false,
-            },
-        )?;
-        self.draw_text(
+                let chips = [
+                    ("Bulanıklık (Q/W)", format!("{:.0} px", p.blur_sigma)),
+                    ("Doygunluk (E/R)", format!("{:.2}x", p.saturation)),
+                    ("Cam Tonu (A/S)", format!("{:.0}%", p.tint_alpha * 100.0)),
+                    ("Kenar Işığı (Z/X)", format!("{:.0}%", p.edge_glow * 100.0)),
+                ];
+                let gap = s(8.0);
+                let cw = (w - s(40.0) - gap * 3.0) / 4.0;
+                let cy = oy + s(50.0);
+                let ch = s(50.0);
+                unsafe {
+                    let cb = dc.CreateSolidColorBrush(&chip_fill, None)?;
+                    let cs = dc.CreateSolidColorBrush(&chip_stroke, None)?;
+                    for (i, (label, val)) in chips.iter().enumerate() {
+                        let cl = ox + s(20.0) + i as f32 * (cw + gap);
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: cl,
+                                top: cy,
+                                right: cl + cw,
+                                bottom: cy + ch,
+                            },
+                            radiusX: s(11.0),
+                            radiusY: s(11.0),
+                        };
+                        dc.FillRoundedRectangle(&rr, &cb);
+                        dc.DrawRoundedRectangle(&rr, &cs, 1.0, None);
+                        self.draw_text(
+                            &dc,
+                            label,
+                            D2D_RECT_F {
+                                left: cl + s(9.0),
+                                top: cy + s(6.0),
+                                right: cl + cw - s(8.0),
+                                bottom: cy + s(21.0),
+                            },
+                            TextStyle {
+                                size_dips: 10.0,
+                                weight: DWRITE_FONT_WEIGHT_MEDIUM,
+                                align: 0,
+                                color: muted,
+                                fluent: false,
+                            },
+                        )?;
+                        self.draw_text(
+                            &dc,
+                            val,
+                            D2D_RECT_F {
+                                left: cl + s(9.0),
+                                top: cy + s(23.0),
+                                right: cl + cw - s(8.0),
+                                bottom: cy + ch - s(6.0),
+                            },
+                            TextStyle {
+                                size_dips: 14.0,
+                                weight: DWRITE_FONT_WEIGHT_BOLD,
+                                align: 0,
+                                color: fg,
+                                fluent: false,
+                            },
+                        )?;
+                    }
+                }
+
+                let light_str = if p.pointer_light { "Açık" } else { "Kapalı" };
+                let theme_str = if p.is_dark { "Koyu" } else { "Açık" };
+                let line1 = format!(
+                    "Sürükle: Taşı   ·   İmleç Kenar Işığı: {light_str} (L)   ·   Tema: {theme_str} (T)"
+                );
+                self.draw_text(
+                    &dc,
+                    &line1,
+                    D2D_RECT_F {
+                        left: ox + s(20.0),
+                        top: oy + s(114.0),
+                        right: ox + w - s(20.0),
+                        bottom: oy + s(136.0),
+                    },
+                    TextStyle {
+                        size_dips: 11.5,
+                        weight: DWRITE_FONT_WEIGHT_MEDIUM,
+                        align: 0,
+                        color: fg,
+                        fluent: false,
+                    },
+                )?;
+                self.draw_text(
             &dc,
             "1: Spatial Glass  ·  2: Clear Crystal  ·  3: Deep Obsidian  ·  4: Soft Frost  ·  Esc: Çıkış",
             D2D_RECT_F {
@@ -1274,8 +1302,10 @@ impl LabState {
             },
         )?;
 
-        unsafe { interop.EndDraw()? };
-        Ok(())
+                Ok(())
+            },
+            || unsafe { interop.EndDraw() },
+        )
     }
 
     fn redraw_dock_overlay(&self) -> WinResult<()> {
@@ -1289,93 +1319,97 @@ impl LabState {
         let s = |v: f32| v * self.dpi;
         let is_dark = self.params.is_dark;
 
-        unsafe {
-            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
-        }
-
-        self.draw_spatial_rim(&dc, ox, oy, w, h, self.dock.radius_px)?;
-
-        // Clean, minimal visionOS-style glass dock glyphs (subtle hover pill instead of noisy pastel boxes).
-        let icons = [
-            "\u{E721}", "\u{E7C4}", "\u{E8B7}", "\u{E756}", "\u{E774}", "\u{E8D6}", "\u{E706}",
-            "\u{E713}",
-        ];
-        let icon_sz = s(44.0);
-        let gap = s(12.0);
-        let total = icons.len() as f32 * icon_sz + (icons.len() - 1) as f32 * gap;
-        let start_x = ox + (w - total) * 0.5;
-        let top_y = oy + (h - icon_sz) * 0.5;
-
-        for (i, glyph) in icons.iter().enumerate() {
-            let hovered = self.hovered_icon == Some(i);
-            let l = start_x + i as f32 * (icon_sz + gap);
-            let lift = if hovered { s(2.0) } else { 0.0 };
-            let fill = if hovered {
-                if is_dark {
-                    rgba_f(255, 255, 255, 0.16)
-                } else {
-                    rgba_f(255, 255, 255, 0.58)
+        with_surface_draw(
+            || {
+                unsafe {
+                    dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                    dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
                 }
-            } else if is_dark {
-                rgba_f(255, 255, 255, 0.06)
-            } else {
-                rgba_f(255, 255, 255, 0.30)
-            };
-            let stroke = if hovered {
-                if is_dark {
-                    rgba_f(255, 255, 255, 0.36)
-                } else {
-                    rgba_f(255, 255, 255, 0.85)
-                }
-            } else if is_dark {
-                rgba_f(255, 255, 255, 0.11)
-            } else {
-                rgba_f(255, 255, 255, 0.45)
-            };
-            unsafe {
-                let fb = dc.CreateSolidColorBrush(&fill, None)?;
-                let sb = dc.CreateSolidColorBrush(&stroke, None)?;
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: l,
-                        top: top_y - lift,
-                        right: l + icon_sz,
-                        bottom: top_y - lift + icon_sz,
-                    },
-                    radiusX: s(13.0),
-                    radiusY: s(13.0),
-                };
-                dc.FillRoundedRectangle(&rr, &fb);
-                dc.DrawRoundedRectangle(&rr, &sb, 1.0, None);
-            }
-            let glyph_col = if is_dark {
-                rgba_f(248, 250, 255, if hovered { 1.0 } else { 0.90 })
-            } else {
-                rgba_f(16, 22, 32, if hovered { 1.0 } else { 0.88 })
-            };
-            self.draw_text(
-                &dc,
-                glyph,
-                D2D_RECT_F {
-                    left: l,
-                    top: top_y - lift,
-                    right: l + icon_sz,
-                    bottom: top_y - lift + icon_sz,
-                },
-                TextStyle {
-                    size_dips: 18.0,
-                    weight: DWRITE_FONT_WEIGHT_NORMAL,
-                    align: 1,
-                    color: glyph_col,
-                    fluent: true,
-                },
-            )?;
-        }
 
-        unsafe { interop.EndDraw()? };
-        Ok(())
+                self.draw_spatial_rim(&dc, ox, oy, w, h, self.dock.radius_px)?;
+
+                // Clean, minimal visionOS-style glass dock glyphs (subtle hover pill instead of noisy pastel boxes).
+                let icons = [
+                    "\u{E721}", "\u{E7C4}", "\u{E8B7}", "\u{E756}", "\u{E774}", "\u{E8D6}",
+                    "\u{E706}", "\u{E713}",
+                ];
+                let icon_sz = s(44.0);
+                let gap = s(12.0);
+                let total = icons.len() as f32 * icon_sz + (icons.len() - 1) as f32 * gap;
+                let start_x = ox + (w - total) * 0.5;
+                let top_y = oy + (h - icon_sz) * 0.5;
+
+                for (i, glyph) in icons.iter().enumerate() {
+                    let hovered = self.hovered_icon == Some(i);
+                    let l = start_x + i as f32 * (icon_sz + gap);
+                    let lift = if hovered { s(2.0) } else { 0.0 };
+                    let fill = if hovered {
+                        if is_dark {
+                            rgba_f(255, 255, 255, 0.16)
+                        } else {
+                            rgba_f(255, 255, 255, 0.58)
+                        }
+                    } else if is_dark {
+                        rgba_f(255, 255, 255, 0.06)
+                    } else {
+                        rgba_f(255, 255, 255, 0.30)
+                    };
+                    let stroke = if hovered {
+                        if is_dark {
+                            rgba_f(255, 255, 255, 0.36)
+                        } else {
+                            rgba_f(255, 255, 255, 0.85)
+                        }
+                    } else if is_dark {
+                        rgba_f(255, 255, 255, 0.11)
+                    } else {
+                        rgba_f(255, 255, 255, 0.45)
+                    };
+                    unsafe {
+                        let fb = dc.CreateSolidColorBrush(&fill, None)?;
+                        let sb = dc.CreateSolidColorBrush(&stroke, None)?;
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: l,
+                                top: top_y - lift,
+                                right: l + icon_sz,
+                                bottom: top_y - lift + icon_sz,
+                            },
+                            radiusX: s(13.0),
+                            radiusY: s(13.0),
+                        };
+                        dc.FillRoundedRectangle(&rr, &fb);
+                        dc.DrawRoundedRectangle(&rr, &sb, 1.0, None);
+                    }
+                    let glyph_col = if is_dark {
+                        rgba_f(248, 250, 255, if hovered { 1.0 } else { 0.90 })
+                    } else {
+                        rgba_f(16, 22, 32, if hovered { 1.0 } else { 0.88 })
+                    };
+                    self.draw_text(
+                        &dc,
+                        glyph,
+                        D2D_RECT_F {
+                            left: l,
+                            top: top_y - lift,
+                            right: l + icon_sz,
+                            bottom: top_y - lift + icon_sz,
+                        },
+                        TextStyle {
+                            size_dips: 18.0,
+                            weight: DWRITE_FONT_WEIGHT_NORMAL,
+                            align: 1,
+                            color: glyph_col,
+                            fluent: true,
+                        },
+                    )?;
+                }
+
+                Ok(())
+            },
+            || unsafe { interop.EndDraw() },
+        )
     }
 
     fn handle_key(&mut self, vk: u16) {

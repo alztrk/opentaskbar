@@ -5,11 +5,13 @@
 //! `ui/menu.rs`), and GPUI (`ui/components.rs`, `ui/settings.rs`) so every surface speaks
 //! one cohesive visual language.
 
-// New C5 modules expose APIs consumed by other workstreams after merge.
+// Shared design helpers and token API surface; some helpers are consumed by the
+// dock renderer, the lab example and the theme/widget-pack resolvers.
 #![allow(dead_code)]
 
 pub mod brand_paths;
 pub mod brush;
+pub mod d2d;
 pub mod fonts;
 pub mod glass;
 pub mod icons;

@@ -352,51 +352,11 @@ pub const FLAG_LOCALES: [&str; 14] = [
 
 /// Looks up an embedded flag by locale name (e.g. `tr-TR`). Case-insensitive.
 pub fn flag_bytes(locale: &str) -> Option<&'static [u8]> {
-    match locale.to_ascii_lowercase().as_str() {
-        "de-de" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/de-DE.png"
-        )))),
-        "en-us" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/en-US.png"
-        )))),
-        "es-es" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/es-ES.png"
-        )))),
-        "fr-fr" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/fr-FR.png"
-        )))),
-        "it-it" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/it-IT.png"
-        )))),
-        "ja-jp" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/ja-JP.png"
-        )))),
-        "ko-kr" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/ko-KR.png"
-        )))),
-        "nl-nl" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/nl-NL.png"
-        )))),
-        "pl-pl" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/pl-PL.png"
-        )))),
-        "pt-br" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/pt-BR.png"
-        )))),
-        "ru-ru" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/ru-RU.png"
-        )))),
-        "tr-tr" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/tr-TR.png"
-        )))),
-        "uk-ua" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/uk-UA.png"
-        )))),
-        "zh-cn" => Some(include_bytes!(concat!(crate::resource!(
-            "assets/flags/zh-CN.png"
-        )))),
-        _ => None,
-    }
+    let wanted = format!("flags/{locale}.png");
+    EMBEDDED_ASSETS
+        .iter()
+        .find(|(path, _)| path.eq_ignore_ascii_case(&wanted))
+        .map(|(_, bytes)| *bytes)
 }
 
 pub fn flag_path(locale: &str) -> String {
@@ -412,63 +372,93 @@ pub const BUNDLED_THEME_IDS: [&str; 6] = [
     "tokyo-night",
 ];
 
+macro_rules! embedded_assets {
+    ($(($key:literal, $source:literal)),+ $(,)?) => {
+        &[$(($key, include_bytes!(concat!(crate::resource!($source))))),+]
+    };
+}
+
+/// Single source of truth for every embedded file: GPUI path → bytes. Lookups,
+/// listings and asset-source loading all derive from this table.
+pub static EMBEDDED_ASSETS: &[(&str, &[u8])] = embedded_assets![
+    ("fonts/Inter-Regular.ttf", "fonts/Inter-Regular.ttf"),
+    ("fonts/Inter-Medium.ttf", "fonts/Inter-Medium.ttf"),
+    ("fonts/Inter-SemiBold.ttf", "fonts/Inter-SemiBold.ttf"),
+    ("fonts/Inter-Bold.ttf", "fonts/Inter-Bold.ttf"),
+    ("fonts/LICENSE.txt", "fonts/LICENSE.txt"),
+    ("flags/de-DE.png", "assets/flags/de-DE.png"),
+    ("flags/en-US.png", "assets/flags/en-US.png"),
+    ("flags/es-ES.png", "assets/flags/es-ES.png"),
+    ("flags/fr-FR.png", "assets/flags/fr-FR.png"),
+    ("flags/it-IT.png", "assets/flags/it-IT.png"),
+    ("flags/ja-JP.png", "assets/flags/ja-JP.png"),
+    ("flags/ko-KR.png", "assets/flags/ko-KR.png"),
+    ("flags/nl-NL.png", "assets/flags/nl-NL.png"),
+    ("flags/pl-PL.png", "assets/flags/pl-PL.png"),
+    ("flags/pt-BR.png", "assets/flags/pt-BR.png"),
+    ("flags/ru-RU.png", "assets/flags/ru-RU.png"),
+    ("flags/tr-TR.png", "assets/flags/tr-TR.png"),
+    ("flags/uk-UA.png", "assets/flags/uk-UA.png"),
+    ("flags/zh-CN.png", "assets/flags/zh-CN.png"),
+    (
+        "themes/catppuccin/theme.json",
+        "themes/catppuccin/theme.json"
+    ),
+    (
+        "themes/catppuccin/widgets/pack.json",
+        "themes/catppuccin/widgets/pack.json"
+    ),
+    ("themes/gruvbox/theme.json", "themes/gruvbox/theme.json"),
+    (
+        "themes/gruvbox/widgets/pack.json",
+        "themes/gruvbox/widgets/pack.json"
+    ),
+    ("themes/nord/theme.json", "themes/nord/theme.json"),
+    (
+        "themes/nord/widgets/pack.json",
+        "themes/nord/widgets/pack.json"
+    ),
+    ("themes/prism/theme.json", "themes/prism/theme.json"),
+    (
+        "themes/prism/widgets/pack.json",
+        "themes/prism/widgets/pack.json"
+    ),
+    ("themes/prism/LICENSE", "themes/prism/LICENSE"),
+    ("themes/prism/README.md", "themes/prism/README.md"),
+    ("themes/solarized/theme.json", "themes/solarized/theme.json"),
+    (
+        "themes/solarized/widgets/pack.json",
+        "themes/solarized/widgets/pack.json"
+    ),
+    (
+        "themes/tokyo-night/theme.json",
+        "themes/tokyo-night/theme.json"
+    ),
+    (
+        "themes/tokyo-night/widgets/pack.json",
+        "themes/tokyo-night/widgets/pack.json"
+    ),
+];
+
 /// All embedded asset paths (fonts, flags, theme files, licenses).
 pub fn all_paths() -> Vec<&'static str> {
-    let mut paths = vec![
-        "fonts/Inter-Regular.ttf",
-        "fonts/Inter-Medium.ttf",
-        "fonts/Inter-SemiBold.ttf",
-        "fonts/Inter-Bold.ttf",
-        "fonts/LICENSE.txt",
-    ];
-    paths.extend(FLAG_LOCALES.iter().map(|locale| match *locale {
-        "de-DE" => "flags/de-DE.png",
-        "en-US" => "flags/en-US.png",
-        "es-ES" => "flags/es-ES.png",
-        "fr-FR" => "flags/fr-FR.png",
-        "it-IT" => "flags/it-IT.png",
-        "ja-JP" => "flags/ja-JP.png",
-        "ko-KR" => "flags/ko-KR.png",
-        "nl-NL" => "flags/nl-NL.png",
-        "pl-PL" => "flags/pl-PL.png",
-        "pt-BR" => "flags/pt-BR.png",
-        "ru-RU" => "flags/ru-RU.png",
-        "tr-TR" => "flags/tr-TR.png",
-        "uk-UA" => "flags/uk-UA.png",
-        "zh-CN" => "flags/zh-CN.png",
-        _ => unreachable!(),
-    }));
-    for id in BUNDLED_THEME_IDS {
-        paths.push(theme_json_path(id));
-        paths.push(widget_pack_path(id));
-    }
-    paths.push("themes/prism/LICENSE");
-    paths.push("themes/prism/README.md");
-    paths
+    EMBEDDED_ASSETS.iter().map(|(path, _)| *path).collect()
+}
+
+fn embedded_path(path: &str) -> &'static str {
+    EMBEDDED_ASSETS
+        .iter()
+        .find(|(candidate, _)| *candidate == path)
+        .map(|(candidate, _)| *candidate)
+        .unwrap_or("")
 }
 
 pub fn theme_json_path(id: &str) -> &'static str {
-    match id {
-        "catppuccin" => "themes/catppuccin/theme.json",
-        "gruvbox" => "themes/gruvbox/theme.json",
-        "nord" => "themes/nord/theme.json",
-        "prism" => "themes/prism/theme.json",
-        "solarized" => "themes/solarized/theme.json",
-        "tokyo-night" => "themes/tokyo-night/theme.json",
-        _ => "",
-    }
+    embedded_path(&format!("themes/{id}/theme.json"))
 }
 
 pub fn widget_pack_path(id: &str) -> &'static str {
-    match id {
-        "catppuccin" => "themes/catppuccin/widgets/pack.json",
-        "gruvbox" => "themes/gruvbox/widgets/pack.json",
-        "nord" => "themes/nord/widgets/pack.json",
-        "prism" => "themes/prism/widgets/pack.json",
-        "solarized" => "themes/solarized/widgets/pack.json",
-        "tokyo-night" => "themes/tokyo-night/widgets/pack.json",
-        _ => "",
-    }
+    embedded_path(&format!("themes/{id}/widgets/pack.json"))
 }
 
 /// Embedded asset source. Pass to `gpui::Application::with_assets(EmbeddedAssets)`.
@@ -478,98 +468,10 @@ pub struct EmbeddedAssets;
 impl AssetSource for EmbeddedAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let key = path.replace('\\', "/");
-        let bytes: Option<&'static [u8]> = match key.as_str() {
-            "fonts/Inter-Regular.ttf" => Some(FONT_REGULAR),
-            "fonts/Inter-Medium.ttf" => Some(FONT_MEDIUM),
-            "fonts/Inter-SemiBold.ttf" => Some(FONT_SEMIBOLD),
-            "fonts/Inter-Bold.ttf" => Some(FONT_BOLD),
-            "fonts/LICENSE.txt" => Some(FONT_LICENSE),
-            "flags/de-DE.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/de-DE.png"
-            )))),
-            "flags/en-US.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/en-US.png"
-            )))),
-            "flags/es-ES.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/es-ES.png"
-            )))),
-            "flags/fr-FR.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/fr-FR.png"
-            )))),
-            "flags/it-IT.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/it-IT.png"
-            )))),
-            "flags/ja-JP.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/ja-JP.png"
-            )))),
-            "flags/ko-KR.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/ko-KR.png"
-            )))),
-            "flags/nl-NL.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/nl-NL.png"
-            )))),
-            "flags/pl-PL.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/pl-PL.png"
-            )))),
-            "flags/pt-BR.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/pt-BR.png"
-            )))),
-            "flags/ru-RU.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/ru-RU.png"
-            )))),
-            "flags/tr-TR.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/tr-TR.png"
-            )))),
-            "flags/uk-UA.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/uk-UA.png"
-            )))),
-            "flags/zh-CN.png" => Some(include_bytes!(concat!(crate::resource!(
-                "assets/flags/zh-CN.png"
-            )))),
-            "themes/catppuccin/theme.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/catppuccin/theme.json"
-            )))),
-            "themes/catppuccin/widgets/pack.json" => Some(include_bytes!(concat!(
-                crate::resource!("themes/catppuccin/widgets/pack.json")
-            ))),
-            "themes/gruvbox/theme.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/gruvbox/theme.json"
-            )))),
-            "themes/gruvbox/widgets/pack.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/gruvbox/widgets/pack.json"
-            )))),
-            "themes/nord/theme.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/nord/theme.json"
-            )))),
-            "themes/nord/widgets/pack.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/nord/widgets/pack.json"
-            )))),
-            "themes/prism/theme.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/prism/theme.json"
-            )))),
-            "themes/prism/widgets/pack.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/prism/widgets/pack.json"
-            )))),
-            "themes/prism/LICENSE" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/prism/LICENSE"
-            )))),
-            "themes/prism/README.md" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/prism/README.md"
-            )))),
-            "themes/solarized/theme.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/solarized/theme.json"
-            )))),
-            "themes/solarized/widgets/pack.json" => Some(include_bytes!(concat!(
-                crate::resource!("themes/solarized/widgets/pack.json")
-            ))),
-            "themes/tokyo-night/theme.json" => Some(include_bytes!(concat!(crate::resource!(
-                "themes/tokyo-night/theme.json"
-            )))),
-            "themes/tokyo-night/widgets/pack.json" => Some(include_bytes!(concat!(
-                crate::resource!("themes/tokyo-night/widgets/pack.json")
-            ))),
-            _ => None,
-        };
+        let bytes: Option<&'static [u8]> = EMBEDDED_ASSETS
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, bytes)| *bytes);
         Ok(bytes.map(Cow::Borrowed))
     }
 

@@ -672,8 +672,13 @@ mod imp {
             };
 
             if self.surface_key != Some(key) {
-                let _ = self.rebuild_geometry_surfaces(rw, rh, rr, dpi);
-                self.surface_key = Some(key);
+                // Only mark the geometry as installed when it actually rebuilt:
+                // a transient surface/mask failure must be retried next tick.
+                if self.rebuild_geometry_surfaces(rw, rh, rr, dpi).is_ok() {
+                    self.surface_key = Some(key);
+                } else {
+                    self.surface_key = None;
+                }
                 self.brush_dirty = true;
             }
 
@@ -896,135 +901,139 @@ mod imp {
             let is_dark = self.config.is_dark;
             let edge_scale = (self.config.edge_glow / 0.88).clamp(0.0, 1.35);
 
-            unsafe {
-                dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+            // EndDraw must run even if a gradient/brush creation fails below,
+            // otherwise the surface stays locked and every later repaint fails.
+            crate::design::d2d::with_surface_draw(
+                || unsafe {
+                    dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
 
-                if edge_scale > 0.01 {
-                    let top_shift = if self.config.top_flush { -r } else { 0.0 };
-                    // Subtle whisper of top atmospheric glass sheen.
-                    let sheen_stops = [
-                        D2D1_GRADIENT_STOP {
-                            position: 0.0,
-                            color: rgba_f(
-                                255,
-                                255,
-                                255,
-                                if is_dark { 0.055 } else { 0.18 } * edge_scale,
-                            ),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 0.34,
-                            color: rgba_f(255, 255, 255, 0.0),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 1.0,
-                            color: rgba_f(0, 0, 0, 0.0),
-                        },
-                    ];
-                    let sheen_coll = dc.CreateGradientStopCollection(
-                        &sheen_stops,
-                        D2D1_COLOR_SPACE_SRGB,
-                        D2D1_COLOR_SPACE_SRGB,
-                        D2D1_BUFFER_PRECISION_8BPC_UNORM,
-                        D2D1_EXTEND_MODE_CLAMP,
-                        D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-                    )?;
-                    let sheen_brush = dc.CreateLinearGradientBrush(
-                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                            startPoint: Vector2 { X: ox, Y: oy },
-                            endPoint: Vector2 { X: ox, Y: oy + h },
-                        },
-                        None,
-                        &sheen_coll,
-                    )?;
-                    let body_rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: ox,
-                            top: oy + top_shift,
-                            right: ox + w,
-                            bottom: oy + h,
-                        },
-                        radiusX: r,
-                        radiusY: r,
-                    };
-                    dc.FillRoundedRectangle(&body_rr, &sheen_brush);
-
-                    // Razor-clean 1.0 px architectural glass cut.
-                    let rim_stops = [
-                        D2D1_GRADIENT_STOP {
-                            position: 0.0,
-                            color: rgba_f(
-                                255,
-                                255,
-                                255,
-                                if is_dark { 0.54 } else { 0.88 } * edge_scale,
-                            ),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 0.30,
-                            color: rgba_f(
-                                255,
-                                255,
-                                255,
-                                if is_dark { 0.18 } else { 0.42 } * edge_scale,
-                            ),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 0.65,
-                            color: rgba_f(
-                                255,
-                                255,
-                                255,
-                                if is_dark { 0.12 } else { 0.28 } * edge_scale,
-                            ),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 1.0,
-                            color: rgba_f(
-                                255,
-                                255,
-                                255,
-                                if is_dark { 0.32 } else { 0.64 } * edge_scale,
-                            ),
-                        },
-                    ];
-                    let rim_coll = dc.CreateGradientStopCollection(
-                        &rim_stops,
-                        D2D1_COLOR_SPACE_SRGB,
-                        D2D1_COLOR_SPACE_SRGB,
-                        D2D1_BUFFER_PRECISION_8BPC_UNORM,
-                        D2D1_EXTEND_MODE_CLAMP,
-                        D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-                    )?;
-                    let rim_brush = dc.CreateLinearGradientBrush(
-                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                            startPoint: Vector2 { X: ox, Y: oy },
-                            endPoint: Vector2 {
-                                X: ox + w * 0.45,
-                                Y: oy + h,
+                    if edge_scale > 0.01 {
+                        let top_shift = if self.config.top_flush { -r } else { 0.0 };
+                        // Subtle whisper of top atmospheric glass sheen.
+                        let sheen_stops = [
+                            D2D1_GRADIENT_STOP {
+                                position: 0.0,
+                                color: rgba_f(
+                                    255,
+                                    255,
+                                    255,
+                                    if is_dark { 0.055 } else { 0.18 } * edge_scale,
+                                ),
                             },
-                        },
-                        None,
-                        &rim_coll,
-                    )?;
-                    let stroke_w = (1.0 * dpi).max(1.0);
-                    let inset = stroke_w * 0.5;
-                    let rim_rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: ox + inset,
-                            top: oy + top_shift + inset,
-                            right: ox + w - inset,
-                            bottom: oy + h - inset,
-                        },
-                        radiusX: (r - inset).max(1.0),
-                        radiusY: (r - inset).max(1.0),
-                    };
-                    dc.DrawRoundedRectangle(&rim_rr, &rim_brush, stroke_w, None);
-                }
-                interop.EndDraw()?;
-            }
-            Ok(())
+                            D2D1_GRADIENT_STOP {
+                                position: 0.34,
+                                color: rgba_f(255, 255, 255, 0.0),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 1.0,
+                                color: rgba_f(0, 0, 0, 0.0),
+                            },
+                        ];
+                        let sheen_coll = dc.CreateGradientStopCollection(
+                            &sheen_stops,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                            D2D1_EXTEND_MODE_CLAMP,
+                            D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                        )?;
+                        let sheen_brush = dc.CreateLinearGradientBrush(
+                            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                startPoint: Vector2 { X: ox, Y: oy },
+                                endPoint: Vector2 { X: ox, Y: oy + h },
+                            },
+                            None,
+                            &sheen_coll,
+                        )?;
+                        let body_rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: ox,
+                                top: oy + top_shift,
+                                right: ox + w,
+                                bottom: oy + h,
+                            },
+                            radiusX: r,
+                            radiusY: r,
+                        };
+                        dc.FillRoundedRectangle(&body_rr, &sheen_brush);
+
+                        // Razor-clean 1.0 px architectural glass cut.
+                        let rim_stops = [
+                            D2D1_GRADIENT_STOP {
+                                position: 0.0,
+                                color: rgba_f(
+                                    255,
+                                    255,
+                                    255,
+                                    if is_dark { 0.54 } else { 0.88 } * edge_scale,
+                                ),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 0.30,
+                                color: rgba_f(
+                                    255,
+                                    255,
+                                    255,
+                                    if is_dark { 0.18 } else { 0.42 } * edge_scale,
+                                ),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 0.65,
+                                color: rgba_f(
+                                    255,
+                                    255,
+                                    255,
+                                    if is_dark { 0.12 } else { 0.28 } * edge_scale,
+                                ),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 1.0,
+                                color: rgba_f(
+                                    255,
+                                    255,
+                                    255,
+                                    if is_dark { 0.32 } else { 0.64 } * edge_scale,
+                                ),
+                            },
+                        ];
+                        let rim_coll = dc.CreateGradientStopCollection(
+                            &rim_stops,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                            D2D1_EXTEND_MODE_CLAMP,
+                            D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                        )?;
+                        let rim_brush = dc.CreateLinearGradientBrush(
+                            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                startPoint: Vector2 { X: ox, Y: oy },
+                                endPoint: Vector2 {
+                                    X: ox + w * 0.45,
+                                    Y: oy + h,
+                                },
+                            },
+                            None,
+                            &rim_coll,
+                        )?;
+                        let stroke_w = (1.0 * dpi).max(1.0);
+                        let inset = stroke_w * 0.5;
+                        let rim_rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: ox + inset,
+                                top: oy + top_shift + inset,
+                                right: ox + w - inset,
+                                bottom: oy + h - inset,
+                            },
+                            radiusX: (r - inset).max(1.0),
+                            radiusY: (r - inset).max(1.0),
+                        };
+                        dc.DrawRoundedRectangle(&rim_rr, &rim_brush, stroke_w, None);
+                    }
+                    Ok(())
+                },
+                || unsafe { interop.EndDraw() },
+            )
         }
     }
 
@@ -1041,24 +1050,26 @@ mod imp {
         let ox = offset.x as f32;
         let oy = offset.y as f32;
         let top_shift = if top_flush { -radius_px } else { 0.0 };
-        unsafe {
-            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
-            let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
-            let rr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: ox,
-                    top: oy + top_shift,
-                    right: ox + w_px,
-                    bottom: oy + h_px,
-                },
-                radiusX: radius_px,
-                radiusY: radius_px,
-            };
-            dc.FillRoundedRectangle(&rr, &white);
-            interop.EndDraw()?;
-        }
-        Ok(())
+        crate::design::d2d::with_surface_draw(
+            || unsafe {
+                dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+                let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: ox,
+                        top: oy + top_shift,
+                        right: ox + w_px,
+                        bottom: oy + h_px,
+                    },
+                    radiusX: radius_px,
+                    radiusY: radius_px,
+                };
+                dc.FillRoundedRectangle(&rr, &white);
+                Ok(())
+            },
+            || unsafe { interop.EndDraw() },
+        )
     }
 
     fn upload_razor_rim_mask(
@@ -1077,24 +1088,26 @@ mod imp {
         let stroke_w = (1.35 * dpi).max(1.25);
         let inset = stroke_w * 0.5;
         let top_shift = if top_flush { -radius_px } else { 0.0 };
-        unsafe {
-            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
-            let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
-            let rr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: ox + inset,
-                    top: oy + top_shift + inset,
-                    right: ox + w_px - inset,
-                    bottom: oy + h_px - inset,
-                },
-                radiusX: (radius_px - inset).max(1.0),
-                radiusY: (radius_px - inset).max(1.0),
-            };
-            dc.DrawRoundedRectangle(&rr, &white, stroke_w, None);
-            interop.EndDraw()?;
-        }
-        Ok(())
+        crate::design::d2d::with_surface_draw(
+            || unsafe {
+                dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+                let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: ox + inset,
+                        top: oy + top_shift + inset,
+                        right: ox + w_px - inset,
+                        bottom: oy + h_px - inset,
+                    },
+                    radiusX: (radius_px - inset).max(1.0),
+                    radiusY: (radius_px - inset).max(1.0),
+                };
+                dc.DrawRoundedRectangle(&rr, &white, stroke_w, None);
+                Ok(())
+            },
+            || unsafe { interop.EndDraw() },
+        )
     }
 
     /// Configures a `WS_EX_NOREDIRECTIONBITMAP` HWND so `HostBackdropBrush` samples the live

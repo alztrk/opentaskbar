@@ -2,7 +2,8 @@
 //! the widget-pack resolver. Mirrors the UI types (`Brush`, `Color`, `CornerRadius`,
 //! `Thickness`, `double`, `FontFamily`) used by `WidgetPack.Convert`.
 
-#![allow(dead_code)] // Public C5/C4 API surface; consumed by other workstreams after merge.
+// Public token/API surface shared by the theme resolver, widget packs and dock renderer.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -28,34 +29,23 @@ impl Rgba {
     /// (case-insensitive, leading `#` optional) or a named colour such as `Transparent`.
     pub fn from_hex(text: &str) -> Option<Self> {
         let value = text.trim().trim_start_matches('#');
-        let parse = |s: &str| u8::from_str_radix(s, 16).ok();
-        let nibble = |c: u8| -> Option<u8> {
-            let digit = (c as char).to_digit(16)? as u8;
+        // All slicing happens on the byte buffer: a multi-byte character can never
+        // be split at a non-char boundary (which would panic with `&value[..]`).
+        // Non-ASCII bytes simply fail to parse and yield `None`.
+        let bytes = value.as_bytes();
+        let pair = |i: usize| -> Option<u8> {
+            let digits = std::str::from_utf8(bytes.get(i..i + 2)?).ok()?;
+            u8::from_str_radix(digits, 16).ok()
+        };
+        let nibble = |i: usize| -> Option<u8> {
+            let digit = (bytes.get(i).copied()? as char).to_digit(16)? as u8;
             Some(digit * 17)
         };
-        match value.len() {
-            3 => Some(Self::from_rgb(
-                nibble(value.as_bytes()[0])?,
-                nibble(value.as_bytes()[1])?,
-                nibble(value.as_bytes()[2])?,
-            )),
-            4 => Some(Self::new(
-                nibble(value.as_bytes()[1])?,
-                nibble(value.as_bytes()[2])?,
-                nibble(value.as_bytes()[3])?,
-                nibble(value.as_bytes()[0])?,
-            )),
-            6 => Some(Self::from_rgb(
-                parse(&value[0..2])?,
-                parse(&value[2..4])?,
-                parse(&value[4..6])?,
-            )),
-            8 => Some(Self::new(
-                parse(&value[2..4])?,
-                parse(&value[4..6])?,
-                parse(&value[6..8])?,
-                parse(&value[0..2])?,
-            )),
+        match bytes.len() {
+            3 => Some(Self::from_rgb(nibble(0)?, nibble(1)?, nibble(2)?)),
+            4 => Some(Self::new(nibble(1)?, nibble(2)?, nibble(3)?, nibble(0)?)),
+            6 => Some(Self::from_rgb(pair(0)?, pair(2)?, pair(4)?)),
+            8 => Some(Self::new(pair(2)?, pair(4)?, pair(6)?, pair(0)?)),
             _ => named_color(text.trim()),
         }
     }
@@ -127,6 +117,20 @@ impl Rgba {
     pub fn darken(self, amount: f64) -> Self {
         self.mix(Self::from_rgb(0, 0, 0), amount)
     }
+}
+
+/// Clamps an opacity into `0.0..=1.0`; non-finite values mean "no surface".
+pub fn clamp_opacity(opacity: f64) -> f64 {
+    if !opacity.is_finite() {
+        return 0.0;
+    }
+    opacity.clamp(0.0, 1.0)
+}
+
+/// Converts an opacity to an 8-bit alpha byte (one rule shared by glass, theme
+/// materials and the dock renderer).
+pub fn alpha_from_opacity(opacity: f64) -> u8 {
+    (clamp_opacity(opacity) * 255.0).round() as u8
 }
 
 /// Named colours accepted by `ColorConverter` (the subset used by reference themes).
@@ -247,6 +251,9 @@ pub struct GradientStop {
     /// 0.0 ..= 1.0.
     pub position: f64,
 }
+
+/// Shared cap for parsed/authored gradients (brush specs and theme packs).
+pub const MAX_GRADIENT_STOPS: usize = 16;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Gradient {
@@ -973,6 +980,32 @@ mod tests {
             Some(Rgba::from_rgb(112, 128, 144))
         );
         assert_eq!(Rgba::from_hex("#12"), None);
+    }
+
+    #[test]
+    fn unicode_and_non_ascii_hex_input_returns_none_without_panicking() {
+        // Regression: `from_hex` used byte-length dispatch but sliced `&str` at
+        // byte offsets, panicking on multi-byte input inside the UI thread.
+        assert_eq!(Rgba::from_hex("aééa"), None); // 6 bytes, split mid-character.
+        assert_eq!(Rgba::from_hex("éééé"), None); // 8 bytes, non-ASCII nibbles.
+        assert_eq!(Rgba::from_hex("#éé"), None);
+        assert_eq!(Rgba::from_hex(" café "), None);
+        assert_eq!(Rgba::from_hex("😀😀"), None);
+        // Valid input is unaffected.
+        assert_eq!(
+            Rgba::from_hex("#A1B2C3"),
+            Some(Rgba::new(0xA1, 0xB2, 0xC3, 0xFF))
+        );
+    }
+
+    #[test]
+    fn opacity_helpers_share_one_non_finite_rule() {
+        assert_eq!(clamp_opacity(f64::NAN), 0.0);
+        assert_eq!(clamp_opacity(f64::INFINITY), 0.0); // non-finite = no surface
+        assert_eq!(clamp_opacity(-2.0), 0.0);
+        assert_eq!(alpha_from_opacity(f64::NAN), 0);
+        assert_eq!(alpha_from_opacity(0.5), 128);
+        assert_eq!(Rgba::from_rgb(1, 2, 3).scaled_alpha(f64::NAN).a, 0);
     }
 
     #[test]

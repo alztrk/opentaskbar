@@ -12,15 +12,12 @@
 //! edge trigger all follow `DockEdge`. The DirectComposition visual tree is still laid out
 //! along X, so a full 90-degree visual rotation of the pill contents remains a follow-up.
 //!
-//! Cross-WS integration notes (APIs not present in this worktree):
-//! - WS-10 `window_picker::show(...)`: must be called from the app-click, group-member
-//!   and secondary-mirror activation paths (marked `WS-10` at each call site).
-//! - WS-1 cfg: `settings::{effective_width(&settings, monitor_w),
-//!   effective_height(&settings), effective_top_gap(&settings),
-//!   effective_bottom_gap(&settings), widget_density_for(&settings, id)}` are
-//!   called by `EffectiveMetrics::for_monitor`. WS-1's canonical free functions
-//!   take `&DockSettings` as their first argument; the dock passes its current
-//!   settings snapshot so no per-mouse re-read of disk state is needed.
+//! Integration notes:
+//! - `window_picker::show(...)` is opened from app-click, group-member and
+//!   secondary-mirror activation paths.
+//! - `settings::{effective_width, effective_height, effective_top_gap,
+//!   effective_bottom_gap, widget_density_for}` are resolved once per settings
+//!   load into `EffectiveMetrics` so the mouse hot path never re-reads disk.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -113,7 +110,7 @@ use crate::platform::win32::{
 use crate::ui::flyout::{FlyoutBlock, FlyoutSpec};
 use crate::ui::menu::{self, BorderStyle, MenuEntry};
 use crate::ui::settings as settings_ui;
-use crate::widgets::{self, HOVER_INTENT_MS, HoverChange, HoverPhase, WidgetRuntime};
+use crate::widgets::{self, HOVER_INTENT_MS, HoverChange, HoverPhase, WidgetRuntime, registry};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 36.0;
@@ -165,14 +162,9 @@ const HOTKEY_DOCK_ID: i32 = 0x4F02;
 /// can never be mistaken for a dock context action.
 const NATIVE_APP_MENU_ID_BASE: u32 = 7000;
 const GROUP_FLYOUT_ROW_ID_BASE: u32 = 100;
-/// How long a standalone Windows-key press keeps an auto-hidden dock revealed.
-/// 1500 ms kept the dock pinned across ordinary keyboard shortcuts; 600 ms matches
-/// the Win-key grace window and `WinKeyRevealMonitor`.
-const WINKEY_REVEAL_MS: u64 = 600;
-
 /// Runtime-resolved settings applied once per settings load (never on the mouse
-/// hot path). WS-1 owns the canonical `effective_*` resolution; the dock caches
-/// its answers here so a 1000 Hz mouse stream never re-reads settings from disk.
+/// hot path). The core `effective_*` functions own the resolution; the dock
+/// caches their answers so a 1000 Hz mouse stream never re-reads disk.
 #[derive(Clone, Debug, Default)]
 struct EffectiveMetrics {
     width_dips: Option<f32>,
@@ -281,6 +273,16 @@ const START_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 fn anchor_is_valid(anchor: (i32, i32, i32, i32)) -> bool {
     anchor.2 > anchor.0 && anchor.3 > anchor.1
+}
+
+/// Hover must agree with the island's case-insensitive flyout lookup: legacy
+/// ids (`Clock`, `AiUsageClaude`, `CUSTOM:Usd-Try`) are valid settings keys but
+/// the registry's `widget_has_flyout` lookup is case-sensitive.
+fn widget_has_flyout_ci(id: &str) -> bool {
+    let canonical = registry::canonical_widget_id(id);
+    widgets::widget_has_flyout(canonical)
+        || registry::widget_descriptor(canonical).is_some_and(|widget| widget.has_flyout)
+        || widgets::widget_has_flyout(&id.to_ascii_lowercase())
 }
 
 fn first_valid_anchor(anchors: &[AnchorEntry], kind: FlyoutKind) -> (i32, i32, i32, i32) {
@@ -903,8 +905,6 @@ struct DockState {
     /// from a mouse event or the 200 ms revealed-guard tick. Even then the 1 s
     /// `last_overlap_scan` throttle applies.
     overlap_dirty: bool,
-    /// Standalone Win-key press keeps the dock revealed for a short grace window.
-    win_key_grace_until: Option<Instant>,
     last_overlap_scan: Option<Instant>,
     cached_overlap: bool,
     /// Cached result of the throttled fullscreen scan used to hide a secondary
@@ -932,7 +932,9 @@ struct DockState {
     /// Auto-hide smooth animation (`0.0` = fully shown, `1.0` = slid off bottom edge).
     hide_progress: f32,
     target_hidden: bool,
-    /// A standalone Win-key press suppresses auto-hide for a short window (#164).
+    /// Single Win-key grace deadline shared by the low-level hook, keyboard
+    /// navigation and direct Win32 key paths (#164). Always armed through
+    /// `arm_win_key_reveal` so the setting gate cannot be bypassed.
     win_key_reveal_until: Option<Instant>,
     last_frame: Option<Instant>,
     last_window_rect: Option<(i32, i32, i32, i32)>,
@@ -1886,7 +1888,6 @@ impl DockState {
             shell_velocities: [0.0; 3],
             drag_hover_started: None,
             overlap_dirty: true,
-            win_key_grace_until: None,
             last_overlap_scan: None,
             cached_overlap: false,
             last_fullscreen_scan: None,
@@ -2311,6 +2312,19 @@ impl DockState {
         }
     }
 
+    /// Arms the one Win-key grace window. Every producer (low-level hook, direct
+    /// Win32 key path, keyboard navigation) goes through this gate, so the
+    /// `reveal_dock_on_win_key` / auto-hide settings can never be bypassed.
+    fn arm_win_key_reveal(&mut self) {
+        if win_key_reveal_enabled(
+            self.settings.reveal_dock_on_win_key,
+            self.settings.auto_hide,
+        ) {
+            self.win_key_reveal_until =
+                Some(Instant::now() + Duration::from_millis(layout::WIN_KEY_GRACE_MS));
+        }
+    }
+
     fn evaluate_auto_hide_inner(&mut self, allow_cross_process: bool) {
         let now = Instant::now();
         if allow_cross_process {
@@ -2323,10 +2337,12 @@ impl DockState {
                 .as_deref()
                 .is_some_and(|p| p.is_visible() || p.is_pointer_inside());
 
-        let win_key_hold = self.settings.reveal_dock_on_win_key
-            && self
-                .win_key_reveal_until
-                .is_some_and(|until| Instant::now() < until);
+        let win_key_hold = win_key_reveal_enabled(
+            self.settings.reveal_dock_on_win_key,
+            self.settings.auto_hide,
+        ) && self
+            .win_key_reveal_until
+            .is_some_and(|until| Instant::now() < until);
         let edge = effective_edge(&self.settings);
         let mut pt = POINT { x: 0, y: 0 };
         let at_edge = unsafe { GetCursorPos(&mut pt) != 0 }
@@ -2354,10 +2370,6 @@ impl DockState {
         } else {
             false
         };
-        let win_key_grace = win_key_hold
-            || self
-                .win_key_grace_until
-                .is_some_and(|until| Instant::now() < until);
         // Cached state only: `is_open_now()` walks windows and is reserved for
         // the WinEvent hook, where it does not block the UI thread.
         let start_menu_open = crate::platform::start_menu_state::is_open();
@@ -2390,7 +2402,7 @@ impl DockState {
                 overlap,
                 start_menu_open,
                 self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some(),
-                win_key_grace,
+                win_key_hold,
             );
 
         if self.target_hidden != should_hide {
@@ -2505,27 +2517,57 @@ impl DockState {
         let is_dark = self.is_dark;
         let base = layout::size_profile(&self.settings).cell;
         let pill_h = pill_height_dips(&self.settings);
-        let radius = self.settings.corner_radius_dips();
 
-        let pal = design::palette(is_dark);
-        let (pill_rgb, bd_rgb, hover_rgb, press_rgb, div_rgb, dot_run_rgb, dot_act_rgb) = if is_dark
-        {
+        // The DComp dock used to ignore `ThemeManager` entirely: editor/pack changes
+        // to DockMaterial, DockBorderMaterial, WidgetCard(Hover/Pressed), DockHighlight
+        // and DockRadius were invisible here. Resolve those materials now while
+        // keeping the stock dock look until a token actually diverges from default.
+        let materials = design::theme::ThemeManager::materials(design::theme::SurfaceKind::Dock);
+        let tokens = &materials.tokens;
+        let themed_rgb = |key: &str, legacy: design::Rgb| -> design::Rgb {
+            tokens
+                .get(key)
+                .filter(|value| !design::theme::is_default_token(key, is_dark, value))
+                .and_then(design::theme::token_rgba)
+                .map(|color| (color.r, color.g, color.b))
+                .unwrap_or(legacy)
+        };
+        let radius = if self.settings.dock_corner_radius.is_some() {
+            self.settings.corner_radius_dips()
+        } else {
+            materials
+                .radii
+                .get("DockRadius")
+                .map(|corner| corner.top_left as f32)
+                .filter(|value| (*value - 20.0).abs() > 0.5) // stock reference radius
+                .unwrap_or_else(|| self.settings.corner_radius_dips())
+        };
+        let glass_fill = design::glass::glass_surface_color_for(
+            design::theme::SurfaceKind::Dock,
+            is_dark,
+            self.settings.dock_opacity,
+        );
+        let pill_rgb = design::theme::token_rgba(&materials.fill)
+            .map(|color| (color.r, color.g, color.b))
+            .unwrap_or_else(|| {
+                themed_rgb("DockMaterial", (glass_fill.r, glass_fill.g, glass_fill.b))
+            });
+        let rgba = |rgb: design::Rgb, alpha: f32| (rgb.0, rgb.1, rgb.2, alpha);
+        let (bd_rgb, hover_rgb, press_rgb, div_rgb, dot_run_rgb, dot_act_rgb) = if is_dark {
             (
-                pal.dock_pill,
-                (0xff, 0xff, 0xff, 0.11),
-                (0xff, 0xff, 0xff, 0.10),
-                (0xff, 0xff, 0xff, 0.16),
-                (0xff, 0xff, 0xff, 0.14),
+                rgba(themed_rgb("DockBorderMaterial", (0xff, 0xff, 0xff)), 0.11),
+                rgba(themed_rgb("WidgetCardHover", (0xff, 0xff, 0xff)), 0.10),
+                rgba(themed_rgb("WidgetCardPressed", (0xff, 0xff, 0xff)), 0.16),
+                rgba(themed_rgb("DockHighlight", (0xff, 0xff, 0xff)), 0.14),
                 (0xd4, 0xd4, 0xd8, 0.85),
                 (0xff, 0xff, 0xff, 1.0),
             )
         } else {
             (
-                pal.dock_pill,
-                (0x18, 0x18, 0x1b, 0.11),
-                (0x18, 0x18, 0x1b, 0.07),
-                (0x18, 0x18, 0x1b, 0.13),
-                (0x18, 0x18, 0x1b, 0.14),
+                rgba(themed_rgb("DockBorderMaterial", (0x18, 0x18, 0x1b)), 0.11),
+                rgba(themed_rgb("WidgetCardHover", (0x18, 0x18, 0x1b)), 0.07),
+                rgba(themed_rgb("WidgetCardPressed", (0x18, 0x18, 0x1b)), 0.13),
+                rgba(themed_rgb("DockHighlight", (0x18, 0x18, 0x1b)), 0.14),
                 (0x52, 0x52, 0x5b, 0.85),
                 (0x18, 0x18, 0x1b, 0.95),
             )
@@ -2549,11 +2591,21 @@ impl DockState {
             || (self.settings.dock_border_thickness - 1.0).abs() > 0.05;
 
         let true_black = self.settings.dock_background == SurfaceBackground::TrueBlack;
+        // Use the same opacity→mode decision as the theme/material layer so the
+        // generated materials and the DComp pill can never disagree.
+        let effective_background = design::theme::background_for_opacity(
+            self.settings.dock_background,
+            self.settings.dock_opacity,
+        );
         let bg_alpha = match self.settings.dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
             SurfaceBackground::Glass if glass_host_active => 0.0_f32,
-            SurfaceBackground::Glass => (self.settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
+            SurfaceBackground::Glass => match effective_background {
+                SurfaceBackground::None => 0.0_f32,
+                SurfaceBackground::Solid => 0.98_f32,
+                _ => (self.settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
+            },
             SurfaceBackground::TrueBlack => 1.0_f32,
         };
         let bd_alpha = if self.settings.dock_background == SurfaceBackground::None
@@ -5042,7 +5094,7 @@ impl DockState {
             self.cancel_widget_hover();
             return;
         };
-        if !widgets::widget_has_flyout(id) {
+        if !widget_has_flyout_ci(id) {
             self.cancel_widget_hover();
             return;
         }
@@ -5110,7 +5162,7 @@ impl DockState {
         let Some(id) = self.widget_runtime.hover.expanded_id().map(str::to_owned) else {
             return;
         };
-        if !widgets::widget_has_flyout(&id) {
+        if !widget_has_flyout_ci(&id) {
             return;
         }
         if let (Some(rect), Some(cursor)) = (self.widget_phys_rect(&id), self.screen_cursor())
@@ -6597,8 +6649,7 @@ impl DockState {
         self.hover_mouse_x = Some(self.live_slot_center_x(idx));
         self.update_hovered_index_from_mouse();
         self.sync_preview_hover();
-        self.win_key_grace_until =
-            Some(Instant::now() + Duration::from_millis(layout::WIN_KEY_GRACE_MS));
+        self.arm_win_key_reveal();
         self.ensure_animation();
         self.evaluate_auto_hide();
         self.update_visuals();
@@ -6630,14 +6681,12 @@ impl DockState {
     fn handle_key_down(&mut self, vk: u16) {
         match vk {
             VK_LWIN | VK_RWIN => {
-                // Same gate as the low-level reveal hook: no grace when the
-                // option is off or auto-hide is disabled.
+                // `arm_win_key_reveal` applies the same gate as the low-level hook.
+                self.arm_win_key_reveal();
                 if win_key_reveal_enabled(
                     self.settings.reveal_dock_on_win_key,
                     self.settings.auto_hide,
                 ) {
-                    self.win_key_grace_until =
-                        Some(Instant::now() + Duration::from_millis(layout::WIN_KEY_GRACE_MS));
                     self.target_hidden = false;
                     self.ensure_animation();
                 }
@@ -6738,7 +6787,7 @@ impl DockState {
         self.hover_mouse_x = None;
         self.hovered_idx = None;
         self.last_mouse_move = None;
-        self.win_key_grace_until = None;
+        self.win_key_reveal_until = None;
         // Session switch/lock is a genuine shell change: request a rescan, still
         // subject to the 1 s minimum interval.
         self.overlap_dirty = true;
@@ -7335,8 +7384,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_WINKEY_REVEAL => {
             if WIN_KEY_REVEAL_GATE.load(Ordering::Relaxed) {
-                state.win_key_reveal_until =
-                    Some(Instant::now() + Duration::from_millis(WINKEY_REVEAL_MS));
+                state.arm_win_key_reveal();
             }
             state.evaluate_auto_hide();
             0
@@ -7870,6 +7918,14 @@ pub fn run(settings: DockSettings) {
 mod tests {
     use super::*;
     use crate::ui::menu::MenuIcon;
+
+    #[test]
+    fn hover_flyout_gate_accepts_legacy_casing_and_custom_ids() {
+        assert!(widget_has_flyout_ci("clock"));
+        assert!(widget_has_flyout_ci("Clock"));
+        assert!(widget_has_flyout_ci("AiUsageClaude"));
+        assert!(!widget_has_flyout_ci("no_such_widget"));
+    }
 
     #[test]
     fn multi_monitor_anchor_selects_the_dock_on_the_flyout_monitor() {

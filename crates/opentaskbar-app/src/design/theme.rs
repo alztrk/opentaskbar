@@ -372,10 +372,8 @@ impl ThemeState {
 }
 
 fn scaled_alpha(opacity: f64) -> u8 {
-    if !opacity.is_finite() {
-        return 255;
-    }
-    (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+    // Non-finite opacity means "no surface" everywhere (glass helper + tokens).
+    super::tokens::alpha_from_opacity(opacity)
 }
 
 fn transparent() -> TokenValue {
@@ -384,10 +382,26 @@ fn transparent() -> TokenValue {
 
 /// Clamps an opacity into `0.0..=1.0`; non-finite values mean "no surface".
 pub fn clamp_opacity(opacity: f64) -> f64 {
-    if !opacity.is_finite() {
-        return 0.0;
+    super::tokens::clamp_opacity(opacity)
+}
+
+/// First concrete colour carried by a token value: a solid/colour value itself,
+/// or the leading stop of a (possibly themed) gradient. Used by the DComp dock
+/// renderer, which can only draw solid RGBA tuples.
+pub fn token_rgba(value: &TokenValue) -> Option<Rgba> {
+    match value {
+        TokenValue::Solid(color) | TokenValue::Color(color) => Some(*color),
+        TokenValue::Gradient(gradient) => gradient.stops.first().map(|stop| stop.color),
+        TokenValue::RadialGradient(gradient) => gradient.stops.first().map(|stop| stop.color),
+        _ => None,
     }
-    opacity.clamp(0.0, 1.0)
+}
+
+/// True while `value` is still the stock palette value for `key` (i.e. no
+/// theme pack or editor override). Dock-specific legacy colours are kept as
+/// the visual default until a token actually diverges from this baseline.
+pub fn is_default_token(key: &str, is_dark: bool, value: &TokenValue) -> bool {
+    default_palette(is_dark).get(key) == Some(value)
 }
 
 /// Decides Glass / Solid / None / TrueBlack from the effective per-surface opacity.
@@ -538,12 +552,10 @@ fn add_reference_editor_defaults(map: &mut TokenMap, dark: bool) {
     };
     let color = |d: &'static str, l: &'static str| -> &'static str { if dark { d } else { l } };
 
-    solid(map, "TextPrimary", color("#FFF3F4F6", "#FF1B1B1B"));
-    solid(map, "TextSecondary", color("#FFAAB2C0", "#FF61666E"));
-    solid(map, "AccentBrush", color("#FF38BDF8", "#FF0369A1"));
-    solid(map, "AccentText", color("#FF05070B", "#FFFFFFFF"));
+    // Keys already seeded by `default_palette` (text/accent/focus) keep the
+    // `palette()` values so the stock dock look is unchanged; `entry().or_insert`
+    // below only fills genuinely missing reference keys.
     solid(map, "StrokeSubtle", color("#FF3A4352", "#FFE5E5E5"));
-    solid(map, "StrokeFocus", color("#FF38BDF8", "#FF0369A1"));
     solid(map, "SurfaceSelected", color("#14FFFFFF", "#0D000000"));
     solid(map, "SurfaceHover", color("#18FFFFFF", "#12162038"));
     solid(map, "SurfacePressed", color("#22FFFFFF", "#16000000"));
@@ -1333,6 +1345,25 @@ pub(crate) fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dock_material_token_helpers_distinguish_defaults_from_overrides() {
+        let default = default_palette(true);
+        let dock_material = default.get("DockMaterial").expect("dock material token");
+        assert!(is_default_token("DockMaterial", true, dock_material));
+        // Gradient tokens resolve to their leading (pill) stop.
+        assert_eq!(
+            token_rgba(dock_material),
+            Some(Rgba::from_rgb(0x16, 0x16, 0x1a))
+        );
+        let override_value = TokenValue::Solid(Rgba::from_rgb(0x12, 0x34, 0x56));
+        assert!(!is_default_token("DockMaterial", true, &override_value));
+        assert_eq!(
+            token_rgba(&override_value),
+            Some(Rgba::from_rgb(0x12, 0x34, 0x56))
+        );
+        assert_eq!(token_rgba(&TokenValue::Double(1.0)), None);
+    }
 
     #[test]
     fn glass_solid_none_alpha_behaviour() {

@@ -319,7 +319,12 @@ pub fn parse_stream_geometry(data: &str) -> (bool, Vec<PathOp>, usize) {
 }
 
 unsafe fn build_path_geometry(factory: &ID2D1Factory1, data: &str) -> Result<ID2D1PathGeometry> {
-    let (winding, ops, _) = parse_stream_geometry(data);
+    let (winding, ops, consumed) = parse_stream_geometry(data);
+    // Never silently draw a truncated icon: user-supplied `WidgetIcon::PathData`
+    // goes through this path, and partial parsing used to draw half a shape.
+    if consumed != data.len() {
+        return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+    }
     unsafe {
         let geom = factory.CreatePathGeometry()?;
         let sink = geom.Open()?;
@@ -462,6 +467,8 @@ pub unsafe fn draw_path_data_logo(
             M32: local.M31 * prev.M12 + local.M32 * prev.M22 + prev.M32,
         };
         dc.SetTransform(&combined);
+        // Restore on every exit path, including the `?` on brush creation below.
+        let _restore = super::d2d::TransformGuard::new(&prev, |m: &Matrix3x2| dc.SetTransform(m));
         let brush = dc.CreateSolidColorBrush(
             &D2D1_COLOR_F {
                 r: f32::from(color.0) / 255.0,
@@ -472,7 +479,6 @@ pub unsafe fn draw_path_data_logo(
             None,
         )?;
         dc.FillGeometry(&geom, &brush, None);
-        dc.SetTransform(&prev);
         Ok(())
     }
 }
@@ -507,5 +513,21 @@ mod tests {
                 ops.len()
             );
         }
+    }
+
+    #[test]
+    fn malformed_path_data_is_rejected_instead_of_drawn_partially() {
+        // `build_path_geometry` now refuses input the parser could not fully
+        // consume. These all stop early with a partially built op list.
+        for bad in ["M0 0 X10 10", "M0 0 L10 10 Z Q ? 1"] {
+            let (_, _, consumed) = parse_stream_geometry(bad);
+            assert!(
+                consumed != bad.len(),
+                "{bad:?} was fully consumed; expected malformed input"
+            );
+        }
+        // Valid input is still fully consumed.
+        let (_, _, consumed) = parse_stream_geometry("M0 0 L10 10 Z");
+        assert_eq!(consumed, "M0 0 L10 10 Z".len());
     }
 }

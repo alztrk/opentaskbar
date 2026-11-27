@@ -541,13 +541,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_flyout_enables_external_native_menu_retention() {
-        let src = include_str!("tray.rs");
-        assert!(src.contains("flyout::show_flyout_interactive_with_options("));
-        assert!(src.contains("FlyoutOptions::tray()"));
-        // Built at runtime so the assertion itself is not a source-level hit.
-        let retired = ["show_flyout_interactive", "_with_border("].concat();
-        assert!(!src.contains(&retired));
+    fn tray_flyout_options_arm_external_native_menu_retention() {
+        use crate::ui::flyout::FlyoutOptions;
+        let default = FlyoutOptions::default();
+        let tray = FlyoutOptions::tray();
+        assert!(!default.retain_for_external_context_menu);
+        assert!(tray.retain_for_external_context_menu);
+        assert!(!tray.stays_open);
     }
 
     #[test]
@@ -571,9 +571,11 @@ mod tests {
         };
         assert_eq!(id, NATIVE_MENU_COMMAND_BASE);
         assert!(id >= 5000);
-
-        let src = include_str!("tray.rs");
-        assert!(src.contains("menu::native_app_menu_entries(app.hwnd)"));
-        assert!(src.contains("menu::invoke_native_app_command(app.hwnd, *command)"));
+        // Native command ids must never collide with a widget row id (100..).
+        assert!(
+            items
+                .iter()
+                .all(|entry| !matches!(entry, MenuEntry::Item { id: 1..=99, .. }))
+        );
     }
 }

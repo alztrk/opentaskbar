@@ -76,6 +76,15 @@ impl NineKeys {
 /// Reference values supplied by a theme pack (key → radius at its own reference dock radius).
 pub type RadiusReferences = std::collections::BTreeMap<String, i32>;
 
+/// Design-time fallback from the single `NineKeys::REFERENCES` table.
+fn reference_default(key: &str) -> i32 {
+    NineKeys::REFERENCES
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| *value)
+        .unwrap_or(0)
+}
+
 /// Derives all nine radii plus the top-only sheen radius.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RadiusManager {
@@ -168,21 +177,24 @@ impl RadiusManager {
         self.references.get(key).copied().unwrap_or(fallback)
     }
 
-    /// Derives with this manager's theme-pack references.
+    /// Derives with this manager's theme-pack references. The user radius is
+    /// clamped once and reused for every concentric value, so an out-of-range
+    /// base can no longer produce `dock_radius = 48, dock_inner_radius = 99`.
     pub fn derive_for(&self, base: i32) -> NineKeys {
+        let base = base.clamp(0, 48);
         let r = self.reference_dock_radius;
         let d =
-            |key: &str, fallback: i32| Self::derive_value(base, r, self.reference(key, fallback));
+            |key: &str| Self::derive_value(base, r, self.reference(key, reference_default(key)));
         NineKeys {
-            dock_radius: base.clamp(0, 48),
-            dock_inner_radius: d("DockInnerRadius", 19),
-            control_radius: d("ControlRadius", 12),
-            popup_radius: d("PopupRadius", 12),
-            widget_radius: d("WidgetRadius", 12),
-            dock_widget_radius: d("DockWidgetRadius", 12),
-            dock_widget_action_radius: d("DockWidgetActionRadius", 5),
-            widget_field_radius: d("WidgetFieldRadius", 7),
-            widget_quick_action_radius: d("WidgetQuickActionRadius", 18),
+            dock_radius: base,
+            dock_inner_radius: d("DockInnerRadius"),
+            control_radius: d("ControlRadius"),
+            popup_radius: d("PopupRadius"),
+            widget_radius: d("WidgetRadius"),
+            dock_widget_radius: d("DockWidgetRadius"),
+            dock_widget_action_radius: d("DockWidgetActionRadius"),
+            widget_field_radius: d("WidgetFieldRadius"),
+            widget_quick_action_radius: d("WidgetQuickActionRadius"),
         }
     }
 
@@ -233,6 +245,16 @@ mod tests {
         assert_eq!(keys.dock_widget_action_radius, 9);
         assert_eq!(keys.get("PopupRadius"), Some(16));
         assert_eq!(keys.get("Unknown"), None);
+    }
+
+    #[test]
+    fn derive_clamps_the_base_once_for_every_concentric_value() {
+        let keys = RadiusManager::derive(100);
+        assert_eq!(keys.dock_radius, 48);
+        assert!(keys.dock_inner_radius <= keys.dock_radius);
+        assert!(keys.widget_quick_action_radius <= keys.dock_radius);
+        assert_eq!(reference_default("DockInnerRadius"), 19);
+        assert_eq!(reference_default("Nope"), 0);
     }
 
     #[test]

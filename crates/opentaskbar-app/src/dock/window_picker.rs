@@ -124,6 +124,10 @@ struct PickerState {
     /// Periodic snapshot replies from the worker (never blocks the modal loop).
     refresh_rx: mpsc::Receiver<(Vec<RunningWindow>, bool)>,
     refresh_cancel: Arc<AtomicBool>,
+    /// Dropping this sender wakes the sleeping refresh worker immediately so it
+    /// can be joined before the modal picker is torn down.
+    refresh_wake: Option<mpsc::Sender<()>>,
+    refresh_join: Option<thread::JoinHandle<()>>,
     geometry: PickerGeometry,
     /// Client rect `(0, 0, w, h)` used for card layout and pager hit-testing.
     work_area: RECT,
@@ -231,12 +235,7 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: f32::from(c.0) / 255.0,
-        g: f32::from(c.1) / 255.0,
-        b: f32::from(c.2) / 255.0,
-        a: a.clamp(0.0, 1.0),
-    }
+    design::d2d::d2d_color(c, a)
 }
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -1121,6 +1120,11 @@ unsafe extern "system" fn picker_wnd_proc(
 
 impl Drop for PickerState {
     fn drop(&mut self) {
+        self.refresh_cancel.store(true, Ordering::SeqCst);
+        let _ = self.refresh_wake.take();
+        if let Some(join) = self.refresh_join.take() {
+            let _ = join.join();
+        }
         release_thumbs(self);
         if !self.hwnd.is_null() && unsafe { IsWindow(self.hwnd) } != 0 {
             unsafe {
@@ -1252,14 +1256,19 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
     // A background worker keeps the live window list fresh without blocking
     // this nested modal loop. It also reports a fullscreen takeover (#179).
     let (refresh_tx, refresh_rx) = mpsc::channel();
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
     let refresh_cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&refresh_cancel);
     let worker_target = target.clone();
-    let _ = thread::Builder::new()
+    let refresh_join = thread::Builder::new()
         .name("opentaskbar-picker-refresh".into())
         .spawn(move || {
             while !worker_cancel.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(REFRESH_POLL_MS));
+                // Wakeable sleep: a closed picker must not wait the full 750 ms.
+                match wake_rx.recv_timeout(Duration::from_millis(REFRESH_POLL_MS)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {} // periodic tick
+                    Err(mpsc::RecvTimeoutError::Disconnected) | Ok(()) => break,
+                }
                 if worker_cancel.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1269,7 +1278,8 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
                     break;
                 }
             }
-        });
+        })
+        .ok();
 
     let state = Box::new(PickerState {
         hwnd,
@@ -1280,6 +1290,8 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         allowed,
         refresh_rx,
         refresh_cancel,
+        refresh_wake: Some(wake_tx),
+        refresh_join,
         geometry,
         // Layout coordinates are relative to the client area.
         work_area: RECT {
@@ -1361,7 +1373,14 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
 
     untrack(hwnd as usize);
     unsafe {
-        (*ptr).refresh_cancel.store(true, Ordering::SeqCst);
+        let state = &mut *ptr;
+        state.refresh_cancel.store(true, Ordering::SeqCst);
+        // Waking the worker (by dropping its wake sender) lets us join it instead
+        // of leaving a second refresh thread alive for up to `REFRESH_POLL_MS`.
+        let _ = state.refresh_wake.take();
+        if let Some(join) = state.refresh_join.take() {
+            let _ = join.join();
+        }
         let _ = unregister_session_notification(hwnd);
         drop(Box::from_raw(ptr));
         preview::deactivate_live_preview();
@@ -1375,8 +1394,7 @@ mod tests {
 
     #[test]
     fn page_label_formats_reference_placeholders() {
-        // The catalog key may still be missing in worktrees where WS-2 has not
-        // landed; `label` falls back to the English template in that case.
+        // `label` falls back to the English template when a locale omits the key.
         let text = page_label(2, 4);
         assert!(text.contains('3') && text.contains('4'), "{text}");
     }
@@ -1429,16 +1447,13 @@ mod tests {
     }
 
     #[test]
-    fn modal_picker_listens_for_close_and_session_signals() {
-        let src = include_str!("window_picker.rs");
-        assert!(src.contains("pub const PICKER_CLOSE_MSG: u32 = WM_APP + 9"));
-        assert!(src.contains("pub fn request_close_all()"));
-        assert!(src.contains("PICKER_CLOSE_MSG => {"));
-        assert!(src.contains("WM_WTSSESSION_CHANGE => {"));
-        assert!(src.contains("pub fn set_picker_enabled(enabled: bool)"));
-        assert!(src.contains("if fullscreen {"));
-        assert!(src.contains("fn refresh_windows("));
+    fn modal_picker_close_signal_is_a_harmless_no_op_without_a_picker() {
+        assert_ne!(PICKER_CLOSE_MSG, 0);
         // Posting to an empty registry must be a harmless no-op.
         request_close_all();
+        set_picker_enabled(false);
+        assert!(!enabled());
+        set_picker_enabled(true);
+        assert!(enabled());
     }
 }

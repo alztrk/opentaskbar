@@ -10,7 +10,7 @@ use super::tokens::{
 };
 
 /// Maximum number of gradient stops exposed by the picker (`GradientStopCount`).
-pub const MAX_GRADIENT_STOPS: usize = 16;
+pub use super::tokens::MAX_GRADIENT_STOPS;
 
 /// Hue / saturation / value, with `h` in degrees and `s`, `v` in `0.0..=1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]

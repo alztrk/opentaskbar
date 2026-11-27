@@ -152,7 +152,6 @@ pub fn position_overlay_window(
 }
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
-const DWMWCP_ROUND: u32 = 2;
 const MAX_CARDS: usize = 6;
 /// `Design/Tokens/Layout.xaml`: PreviewWidth/Height = 228x154 DIP.
 /// The Large profile uses 250x180 (set by the dock at show time).
@@ -239,20 +238,11 @@ impl PreviewD2d {
 }
 
 fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: f32::from(c.0) / 255.0,
-        g: f32::from(c.1) / 255.0,
-        b: f32::from(c.2) / 255.0,
-        a: a.clamp(0.0, 1.0),
-    }
+    design::d2d::d2d_color(c, a)
 }
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
-}
-
-fn rgb(r: u8, g: u8, b: u8) -> u32 {
-    u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -346,17 +336,6 @@ impl PreviewPopup {
         if let Some(ref mut glass) = self.spatial_glass {
             glass.apply_config(config);
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_glass_mode(&mut self, glass_mode: bool, tint_alpha: f32) {
-        let mut cfg = if glass_mode {
-            SpatialGlassConfig::default_glass(self.is_dark, 0.9)
-        } else {
-            SpatialGlassConfig::disabled(self.is_dark)
-        };
-        cfg.tint_alpha = tint_alpha;
-        self.set_glass_config(cfg);
     }
 
     /// Applies the reference size-profile card dimensions (228x154 / 250x180 DIP).
@@ -734,13 +713,13 @@ impl PreviewPopup {
             let close_fmt = unsafe {
                 d2d.dwrite
                     .CreateTextFormat(
-                        &HSTRING::from("Segoe Fluent Icons"),
+                        &HSTRING::from(design::icons::icon_font_family()),
                         None,
                         DWRITE_FONT_WEIGHT_NORMAL,
                         DWRITE_FONT_STYLE_NORMAL,
                         DWRITE_FONT_STRETCH_NORMAL,
                         (10.5 * dpi).max(9.0),
-                        &HSTRING::from("en-US"),
+                        &HSTRING::from(design::fonts::ui_locale()),
                     )
                     .ok()
                     .inspect(|fmt| {
@@ -803,7 +782,7 @@ impl PreviewPopup {
                     }
                 }
 
-                // Anti-aliased Fluent close button (`\u{E711}`).
+                // Anti-aliased close button (semantic `AppIcon::Close` glyph).
                 if is_hovered || is_close_hovered {
                     let btn_fill = if is_close_hovered {
                         d2d_rgba(pal.danger, 1.0)
@@ -840,7 +819,10 @@ impl PreviewPopup {
                     if let Some(ref fmt) = close_fmt
                         && let Ok(xb) = unsafe { d2d.target.CreateSolidColorBrush(&x_col, None) }
                     {
-                        let glyph = [0xE711u16];
+                        let glyph: Vec<u16> =
+                            design::icons::glyph_for_icon(design::icons::AppIcon::Close)
+                                .encode_utf16()
+                                .collect();
                         let xrc = D2D_RECT_F {
                             left: card.close_rect.left as f32,
                             top: card.close_rect.top as f32,
@@ -928,6 +910,35 @@ impl PreviewPopup {
         (self.on_pointer_leave)();
     }
 
+    /// Closes a preview card and rebuilds the popup for the remaining windows.
+    /// Shared by the `X` button and middle-click so neither leaves a dead card
+    /// (and its DWM thumbnail) on screen.
+    fn close_card_and_reflow(&mut self, idx: usize) {
+        let target_hwnd = self.cards[idx].item.hwnd;
+        tracker::close_window(target_hwnd);
+        self.hovered_card = None;
+        self.hovered_close = None;
+        if self.cards.len() <= 1 {
+            self.hide();
+            return;
+        }
+        let remaining: Vec<PreviewItem> = self
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != idx)
+            .map(|(_, c)| c.item.clone())
+            .collect();
+        let key = self.owner_key.clone().unwrap_or_default();
+        let mut rc: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut rc);
+        }
+        let center_x = (rc.left + rc.right) / 2;
+        let bottom_y = rc.bottom;
+        self.show(&key, &remaining, center_x, bottom_y, self.is_dark);
+    }
+
     fn handle_lbutton_up(&mut self, x: i32, y: i32) {
         let Some(idx) = self
             .cards
@@ -936,29 +947,10 @@ impl PreviewPopup {
         else {
             return;
         };
-        let target_hwnd = self.cards[idx].item.hwnd;
         if pt_in_rect(&self.cards[idx].close_rect, x, y) {
-            tracker::close_window(target_hwnd);
-            if self.cards.len() <= 1 {
-                self.hide();
-            } else {
-                let remaining: Vec<PreviewItem> = self
-                    .cards
-                    .iter()
-                    .enumerate()
-                    .filter(|&(i, _)| i != idx)
-                    .map(|(_, c)| c.item.clone())
-                    .collect();
-                let key = self.owner_key.clone().unwrap_or_default();
-                let mut rc: RECT = unsafe { std::mem::zeroed() };
-                unsafe {
-                    windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut rc);
-                }
-                let center_x = (rc.left + rc.right) / 2;
-                let bottom_y = rc.bottom;
-                self.show(&key, &remaining, center_x, bottom_y, self.is_dark);
-            }
+            self.close_card_and_reflow(idx);
         } else {
+            let target_hwnd = self.cards[idx].item.hwnd;
             self.hide();
             tracker::activate_window(target_hwnd);
         }
@@ -972,11 +964,7 @@ impl PreviewPopup {
         else {
             return;
         };
-        let target_hwnd = self.cards[idx].item.hwnd;
-        tracker::close_window(target_hwnd);
-        if self.cards.len() <= 1 {
-            self.hide();
-        }
+        self.close_card_and_reflow(idx);
     }
 }
 
