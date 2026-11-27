@@ -487,18 +487,6 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
         SettingsSearchEntry::new(
             SettingsPage::Preferences,
-            "FjordFiles",
-            &loc::t("SectionSystem"),
-            "fjord files explorer open panel",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "FjordBarShow",
-            &loc::t("SectionSystem"),
-            "fjord bar show hide toolbar",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
             "Language",
             &loc::t("Preferences"),
             "locale culture language translation",
@@ -741,8 +729,6 @@ mod tests {
             "FocusSessions",
             "AiUsageRingLabel",
             "WindowPickerTitle",
-            "FjordFiles",
-            "FjordBarShow",
         ] {
             assert!(
                 catalog.iter().any(|entry| entry.row_id == row_id),
@@ -1166,20 +1152,6 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
             "WindowPickerPrevious",
             "WindowPickerNext",
         ],
-    ),
-    (
-        "Preferences",
-        "System",
-        "Fjord Files",
-        "FjordFilesEnabled",
-        &["FjordFilesOpen", "explorer"],
-    ),
-    (
-        "Preferences",
-        "System",
-        "Fjord Bar",
-        "FjordBarVisible",
-        &["FjordBarShow", "FjordBarHide"],
     ),
     // Preferences
     (

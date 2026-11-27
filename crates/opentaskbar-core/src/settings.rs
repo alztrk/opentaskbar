@@ -976,10 +976,6 @@ pub struct DockSettings {
     pub wireless_battery_listen_only: bool,
     pub weather_unit: TemperatureUnit,
     pub mirror_main_dock: bool,
-    /// `show_fjord_files_button`: dock visibility of the Fjord Files button. The dock host
-    /// consumes this key in a separate workstream; the schema and Settings UI already own it.
-    #[serde(default)]
-    pub show_fjord_files_button: bool,
 
     // Hotkeys are needed by `validate()` (`IsValid` rejects launcher/dock conflicts).
     pub launcher_hotkey: HotkeyChoice,
@@ -1149,7 +1145,6 @@ impl Default for DockSettings {
             wireless_battery_listen_only: false,
             weather_unit: TemperatureUnit::Celsius,
             mirror_main_dock: false,
-            show_fjord_files_button: false,
 
             launcher_hotkey: HotkeyChoice::AltSpace,
             dock_hotkey: HotkeyChoice::CtrlAltD,
@@ -3642,8 +3637,7 @@ mod tests {
                 "DynamicIslandBackgroundColor": "#102030",
                 "DynamicIslandOpacity": 0.65,
                 "DynamicIslandUseTheme": false,
-                "DynamicIslandWidgetOrders": { "\\\\.\\DISPLAY1": ["media", "clock"] },
-                "ShowFjordFilesButton": true
+                "DynamicIslandWidgetOrders": { "\\\\.\\DISPLAY1": ["media", "clock"] }
             }"##,
         )
         .unwrap();
@@ -3663,7 +3657,6 @@ mod tests {
         assert_eq!(loaded.dynamic_island_background_hex(), Some("#102030"));
         assert!((loaded.dynamic_island_opacity - 0.65).abs() < f64::EPSILON);
         assert!(!loaded.dynamic_island_use_theme);
-        assert!(loaded.show_fjord_files_button);
         assert_eq!(
             loaded
                 .dynamic_island_placements
@@ -3693,14 +3686,12 @@ mod tests {
             "\"DynamicIslandOpacity\"",
             "\"DynamicIslandUseTheme\"",
             "\"DynamicIslandWidgetOrders\"",
-            "\"ShowFjordFilesButton\"",
         ] {
             assert!(raw.contains(key), "missing {key} in {raw}");
         }
         let reloaded = load_from(&path);
         assert!(!reloaded.dynamic_island_enable);
         assert_eq!(reloaded.dynamic_island_background_hex(), Some("#102030"));
-        assert!(reloaded.show_fjord_files_button);
         let _ = fs::remove_dir_all(&dir);
     }
 

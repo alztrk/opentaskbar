@@ -10,7 +10,7 @@ Denetim kaynakları: 4 salt-okunur ajan (reference veri yolları, Rust yolları,
 
 **`DockSettingsStore.Save` bilinmeyen anahtarları SİLER** (`JsonExtensionData` yok). Rust `#[serde(flatten)] extra` ile korur. Yani ortak `settings.json` kullanıldığında reference bir kez kaydettiğinde şu alanlar **kalıcı olarak yok olur**:
 
-`ThemeTokens`, `AnimationFps`, `UiFontFamily/Size`, `FisheyeIntensity`, `MiddleClickAction`, `WidgetFlyoutTrigger`, `MagnificationExpandsDock`, `DockCustomWidthDips`, `Glass*`, `ShowStartButton`, `UserPinnedApps/UnpinnedApps`, `ShowFjordFilesButton`, `DynamicIslandEnable/AutoHide/Background/BackgroundColor/Opacity/UseTheme`.
+`ThemeTokens`, `AnimationFps`, `UiFontFamily/Size`, `FisheyeIntensity`, `MiddleClickAction`, `WidgetFlyoutTrigger`, `MagnificationExpandsDock`, `DockCustomWidthDips`, `Glass*`, `ShowStartButton`, `UserPinnedApps/UnpinnedApps`, `DynamicIslandEnable/AutoHide/Background/BackgroundColor/Opacity/UseTheme`.
 
 Bu olmadan ortak dosya planı **başlatılamaz**. İlk iş referans tarafına `[JsonExtensionData]` eklemektir.
 

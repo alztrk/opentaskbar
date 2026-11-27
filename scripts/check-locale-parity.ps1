@@ -12,35 +12,28 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
-# Hard gate numbers after the shared-folder integration union and the removal
-# of the retired AI-provider labels: 14 frozen reference catalogs x 1046 keys
-# and 14 Rust catalogs x 1423 keys. The reference union keeps master's 994 baseline plus the
-# Dynamic Island / window-picker / Fjord / Wi-Fi / preview labels and the 17
-# OLED/display-care keys carried by both families; the five provider-specific
-# labels (two widget title/description, one group selector and two model-group
-# names) were removed from every catalog. The 372 extra Rust keys are
-# port-only feature keys (DI/calendar/font, C3 widget features, 207 UI
-# localization keys, 27 picker/Fjord/Wi-Fi/settings labels — three of which
-# already shipped — the 3 keys replacing the last English literals, the 3
-# searchable-location keys and the 40 Fjord/Wi-Fi/preview labels).
+# Hard gate numbers after the shared-folder integration union, the removal of
+# the retired AI-provider labels and the file-manager/top-bar/Wi-Fi panel cleanup: 14 frozen
+# reference catalogs x 1046 keys and 14 Rust catalogs x 1373 keys. Rust keeps
+# port-only feature keys (DI/calendar/font, C3 widget features, UI localization,
+# window-picker/magnification/settings, OLED/display care and searchable
+# location labels); the 50 file-manager/top-bar/Wi-Fi-panel keys were
+# removed from all Rust catalogs.
 #
 # Each family must stay identical across languages. These numbers are a hard
 # gate, not just a display string.
 $expectedLanguages = 14
 $expectedCsKeys = 1046
-$expectedRustKeys = 1423
+$expectedRustKeys = 1373
 # The legacy source tree was removed in the Rust-only cleanup; these 14 catalogs
 # are the frozen reference snapshot of the last legacy release, kept for key parity.
 $csDir = Join-Path $RepoRoot 'tests\reference\locales'
 $rustDir = Join-Path $RepoRoot 'crates\opentaskbar-core\locales'
 
 $required = @(
-    # Window picker, magnification and Fjord labels.
+    # Window picker and magnification labels.
     'WindowPickerTitle','WindowPickerPrevious','WindowPickerNext','WindowPickerPage',
     'MagnificationExpandsDock','MagnificationExpandsDockDescription',
-    'FjordFiles','FjordFilesOpen','FjordBarShow','FjordBarHide',
-    # Wi-Fi flyout labels.
-    'WifiScan','WifiConnect','WifiDisconnect','WifiPassword','WifiNoNetworks','WifiConnectFailed',
     # Search, alignment, preview, focus and widget labels.
     'SearchNoResults','ContentAlignStart','ContentAlignCenter','ContentAlignEnd',
     'PreviewDisabledHint','FocusMinutesLabel','FocusBreakMinutesLabel','FocusSessionsLabel',
@@ -63,9 +56,7 @@ $required = @(
     'BurnInShift','BurnInShiftHelp','BurnInShiftInterval',
     'OledAutoTrigger','OledAutoTriggerHelp','OledLowBatteryThreshold',
     'OledAutoOnNightLight','OledAutoOnNightLightHelp',
-    'AmbientMode','AmbientModeHelp','AnimationFpsCap','AnimationFpsCapHelp','FpsUnlimited',
-    # Fjord / Wi-Fi labels consumed by the ported UI.
-    'Connected','Copied','CopyFailed','ConnectionEstablished','FjordFilesComputer','FjordFilesCopyPath','FjordFilesCount','FjordFilesDesktop','FjordFilesDocuments','FjordFilesDownloads','FjordFilesFilteredCount','FjordFilesFolder','FjordFilesHome','FjordFilesMusic','FjordFilesPictures','FjordFilesPreview','FjordFilesReveal','FjordFilesSearch','FjordFilesVideos','FjordFilesVolumes','Loading','LocationDenied','Missing','OpenItemFailed','OpenNetwork','PdfPages','PreviewFailed','Revealed','Saved','SecuredNetwork','SelectPreview','TextLimit','UnsupportedPreview','WindowsError','WifiNetworks','WifiOff','WlanStopped','Wpa2Personal','Wpa3Personal','WpaPersonal'
+    'AmbientMode','AmbientModeHelp','AnimationFpsCap','AnimationFpsCapHelp','FpsUnlimited'
 )
 
 function Get-Catalog([string]$Path) {

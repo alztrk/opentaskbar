@@ -30,7 +30,6 @@ pub mod toast;
 pub mod tray_host;
 pub mod tray_icon_host;
 pub mod update;
-pub mod wifi;
 pub mod win32;
 #[allow(dead_code)]
 pub mod win32_ex;

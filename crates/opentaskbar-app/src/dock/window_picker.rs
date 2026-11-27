@@ -90,6 +90,8 @@ use crate::window_picker::{
 
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
+/// Live-window refresh cadence for the background worker (750 ms).
+const REFRESH_POLL_MS: u64 = 750;
 
 /// Header band inside the frame (reference title row + its 14px bottom margin).
 const HEADER_DIPS: f32 = 58.0;
@@ -1257,7 +1259,7 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         .name("opentaskbar-picker-refresh".into())
         .spawn(move || {
             while !worker_cancel.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(crate::fjord::POLL_MS));
+                std::thread::sleep(Duration::from_millis(REFRESH_POLL_MS));
                 if worker_cancel.load(Ordering::SeqCst) {
                     break;
                 }

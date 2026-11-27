@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn all_catalogs_share_one_identical_key_set() {
         let reference = keys(DEFAULT_LANGUAGE);
-        assert_eq!(reference.len(), 1423);
+        assert_eq!(reference.len(), 1373);
         for (tag, _) in LANGUAGES {
             assert_eq!(key_count(tag), reference.len(), "{tag} key count differs");
             assert_eq!(keys(tag), reference, "{tag} key set differs");
@@ -323,24 +323,13 @@ mod tests {
     #[test]
     fn contract_keys_resolve_in_every_catalog() {
         const NEW_KEYS: &[&str] = &[
-            // Window picker, magnification and Fjord labels.
+            // Window picker and magnification labels.
             "WindowPickerTitle",
             "WindowPickerPrevious",
             "WindowPickerNext",
             "WindowPickerPage",
             "MagnificationExpandsDock",
             "MagnificationExpandsDockDescription",
-            "FjordFiles",
-            "FjordFilesOpen",
-            "FjordBarShow",
-            "FjordBarHide",
-            // Wi-Fi flyout labels.
-            "WifiScan",
-            "WifiConnect",
-            "WifiDisconnect",
-            "WifiPassword",
-            "WifiNoNetworks",
-            "WifiConnectFailed",
             // Settings, focus and widget labels.
             "SearchNoResults",
             "ContentAlignStart",
@@ -394,47 +383,6 @@ mod tests {
             "DropdownSearchPlaceholder",
             "DropdownNoResults",
             "WeatherLocationUsed",
-            // Fjord / Wi-Fi / preview labels consumed by the ported UI.
-            "Connected",
-            "Copied",
-            "CopyFailed",
-            "ConnectionEstablished",
-            "FjordFilesComputer",
-            "FjordFilesCopyPath",
-            "FjordFilesCount",
-            "FjordFilesDesktop",
-            "FjordFilesDocuments",
-            "FjordFilesDownloads",
-            "FjordFilesFilteredCount",
-            "FjordFilesFolder",
-            "FjordFilesHome",
-            "FjordFilesMusic",
-            "FjordFilesPictures",
-            "FjordFilesPreview",
-            "FjordFilesReveal",
-            "FjordFilesSearch",
-            "FjordFilesVideos",
-            "FjordFilesVolumes",
-            "Loading",
-            "LocationDenied",
-            "Missing",
-            "OpenItemFailed",
-            "OpenNetwork",
-            "PdfPages",
-            "PreviewFailed",
-            "Revealed",
-            "Saved",
-            "SecuredNetwork",
-            "SelectPreview",
-            "TextLimit",
-            "UnsupportedPreview",
-            "WindowsError",
-            "WifiNetworks",
-            "WifiOff",
-            "WlanStopped",
-            "Wpa2Personal",
-            "Wpa3Personal",
-            "WpaPersonal",
         ];
         for (tag, _) in LANGUAGES {
             for key in NEW_KEYS {

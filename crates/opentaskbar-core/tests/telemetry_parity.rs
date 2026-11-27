@@ -49,24 +49,13 @@ const FEATURE_KEYS: &[&str] = &[
     "DropdownSearchPlaceholder",
     "DropdownNoResults",
     "WeatherLocationUsed",
-    // Window picker, magnification and Fjord labels.
+    // Window picker and magnification labels.
     "WindowPickerTitle",
     "WindowPickerPrevious",
     "WindowPickerNext",
     "WindowPickerPage",
     "MagnificationExpandsDock",
     "MagnificationExpandsDockDescription",
-    "FjordFiles",
-    "FjordFilesOpen",
-    "FjordBarShow",
-    "FjordBarHide",
-    // Wi-Fi flyout labels.
-    "WifiScan",
-    "WifiConnect",
-    "WifiDisconnect",
-    "WifiPassword",
-    "WifiNoNetworks",
-    "WifiConnectFailed",
     // Search, alignment, preview, focus and widget labels.
     "SearchNoResults",
     "ContentAlignStart",
@@ -79,47 +68,6 @@ const FEATURE_KEYS: &[&str] = &[
     "WidgetDensityCompact",
     "WidgetDensityFull",
     "AiUsageRingLabel",
-    // Fjord / Wi-Fi / preview labels consumed by the ported UI.
-    "Connected",
-    "Copied",
-    "CopyFailed",
-    "ConnectionEstablished",
-    "FjordFilesComputer",
-    "FjordFilesCopyPath",
-    "FjordFilesCount",
-    "FjordFilesDesktop",
-    "FjordFilesDocuments",
-    "FjordFilesDownloads",
-    "FjordFilesFilteredCount",
-    "FjordFilesFolder",
-    "FjordFilesHome",
-    "FjordFilesMusic",
-    "FjordFilesPictures",
-    "FjordFilesPreview",
-    "FjordFilesReveal",
-    "FjordFilesSearch",
-    "FjordFilesVideos",
-    "FjordFilesVolumes",
-    "Loading",
-    "LocationDenied",
-    "Missing",
-    "OpenItemFailed",
-    "OpenNetwork",
-    "PdfPages",
-    "PreviewFailed",
-    "Revealed",
-    "Saved",
-    "SecuredNetwork",
-    "SelectPreview",
-    "TextLimit",
-    "UnsupportedPreview",
-    "WindowsError",
-    "WifiNetworks",
-    "WifiOff",
-    "WlanStopped",
-    "Wpa2Personal",
-    "Wpa3Personal",
-    "WpaPersonal",
 ];
 
 #[test]
@@ -153,7 +101,7 @@ fn formatted_labels_keep_their_placeholders_replaceable() {
 #[test]
 fn locale_key_counts_stay_at_the_contract_value() {
     for tag in LANGS {
-        assert_eq!(i18n::key_count(tag), 1423, "{tag} key count drifted");
+        assert_eq!(i18n::key_count(tag), 1373, "{tag} key count drifted");
     }
 }
 

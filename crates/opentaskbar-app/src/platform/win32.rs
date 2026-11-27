@@ -1020,9 +1020,9 @@ pub fn show_dock_context_menu(
 }
 
 /// Same dock menu with extra entries appended. The raw chosen id is returned
-/// alongside the mapped action so integration layers (Fjord `BarCommand`,
-/// native window commands) can dispatch their own ids without colliding with
-/// the dock's reserved `MENU_*` range.
+/// alongside the mapped action so integration layers (native window commands)
+/// can dispatch their own ids without colliding with the dock's reserved
+/// `MENU_*` range.
 pub fn show_dock_context_menu_with_entries(
     hwnd: usize,
     is_dark: bool,
