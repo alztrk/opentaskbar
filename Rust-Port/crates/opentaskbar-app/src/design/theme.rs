@@ -1299,18 +1299,20 @@ impl ThemeState {
     }
 }
 
+/// ThemeManager is process-global; tests that mutate the live palette (in this module or in
+/// the Settings tests) must hold this guard so one test's overrides cannot change another
+/// test's expectations while it asserts.
+#[cfg(test)]
+pub(crate) fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static THEME_TEST_LOCK: Mutex<()> = Mutex::new(());
+    THEME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ThemeManager is process-global; serialize tests that mutate it so a live
-    // preview from one test cannot change another test's opacity mid-assertion.
-    static THEME_TEST_LOCK: Mutex<()> = Mutex::new(());
-    fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        THEME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     #[test]
     fn glass_solid_none_alpha_behaviour() {

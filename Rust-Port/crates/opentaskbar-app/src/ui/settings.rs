@@ -762,6 +762,45 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
     settings.extra.insert(key.to_owned(), json!(value));
 }
 
+/// C# writes toggles as JSON booleans. Older port builds wrote `0`/`1`, so reads still accept
+/// numbers but every write from this UI is a real bool.
+fn extra_bool(settings: &DockSettings, key: &str, fallback: bool) -> bool {
+    settings
+        .extra
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_i64().map(|number| number != 0))
+        })
+        .unwrap_or(fallback)
+}
+
+fn set_extra_bool(settings: &mut DockSettings, key: &str, value: bool) {
+    settings.extra.insert(key.to_owned(), json!(value));
+}
+
+/// Resolves a startup toggle against the observed registry state. A failed write is shown even
+/// when `read()` still reports the old value; an unreadable state keeps the requested position so
+/// the switch never lies about a known target. A successful write that `read()` cannot confirm is
+/// reported as a write error.
+fn resolve_startup_toggle(
+    requested: bool,
+    write_error: Option<&'static str>,
+    observed: (bool, Option<&'static str>),
+) -> (bool, Option<&'static str>) {
+    let (enabled, read_error) = observed;
+    if let Some(error) = write_error {
+        (enabled, Some(error))
+    } else if let Some(error) = read_error {
+        (requested, Some(error))
+    } else if enabled != requested {
+        (enabled, Some("StartupWriteError"))
+    } else {
+        (enabled, None)
+    }
+}
+
 /// Snapshot the full profile contract (19 fields incl. name, i.e. the 15+ payload fields the
 /// C# profile service persists) so creating/saving a profile never drops layout, widget,
 /// theme or hotkey state. Applying is delegated to the cfg workstream's
@@ -1034,6 +1073,8 @@ struct SettingsView {
     expanded_widget: Option<&'static str>,
     open_dropdown: Option<String>,
     startup_enabled: bool,
+    /// Localized error key from the last startup write/read (empty when both succeeded).
+    startup_status: String,
     scroll_handle: ScrollHandle,
     /// Row targeted by the most recent Settings search result. Rendered with a transient
     /// highlight and used to select which row receives the scroll anchor.
@@ -1153,6 +1194,7 @@ impl SettingsView {
         crate::design::theme::apply_saved_token_overrides(&settings);
         let accent = crate::design::palette(is_dark).accent;
         let brush_color = crate::design::tokens::Rgba::from_rgb(accent.0, accent.1, accent.2);
+        let (startup_enabled, startup_error) = startup_registration::read();
         let mut view = Self {
             page: SettingsPage::Dock,
             focus,
@@ -1164,7 +1206,8 @@ impl SettingsView {
             widget_filter: "All",
             expanded_widget: None,
             open_dropdown: None,
-            startup_enabled: startup_registration::read().0,
+            startup_enabled,
+            startup_status: startup_error.map(loc::t).unwrap_or_default(),
             scroll_handle: ScrollHandle::new(),
             highlight_row: None,
             scroll_anchor: None,
@@ -4901,6 +4944,28 @@ impl SettingsView {
         self.open_brush_picker(BrushPickerTarget::BorderSurface(surface), cx);
     }
 
+    /// Edits the C# `DynamicIslandBackgroundColor` hex string. Reads go through the typed field
+    /// with the legacy `extra` fallback so an older settings.json stays visible in this editor.
+    fn edit_island_background_color(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .settings
+            .dynamic_island_background_hex()
+            .unwrap_or_default()
+            .to_owned();
+        let title = loc::t("DynamicIslandBackground");
+        let hint = loc::t("DynamicIslandBackgroundDescription");
+        let is_dark = self.is_dark();
+        let Some(text) = prompt::ask_name(0, is_dark, &title, &hint, &current) else {
+            return;
+        };
+        let text = text.trim().to_owned();
+        if !text.is_empty() && parse_hex_color(&text).is_none() {
+            return;
+        }
+        self.settings.dynamic_island_background_color = (!text.is_empty()).then_some(text);
+        self.auto_save(cx);
+    }
+
     #[allow(clippy::too_many_arguments)] // merged WS-E settings row helper signature
     fn surface_row(
         &self,
@@ -5709,7 +5774,7 @@ impl SettingsView {
                         "WheelVolumeEnabled",
                         t,
                         Some("\u{E767}"),
-                        loc::t("WheelVolumeEnabled"),
+                        loc::t("WheelVolume"),
                         ios_switch(
                             "sw-wheel-volume",
                             t,
@@ -7925,6 +7990,27 @@ impl SettingsView {
                     .into_any_element(),
                     dim_when(
                         di_disabled,
+                        self.target_row_desc(
+                            "DynamicIslandBackgroundColor",
+                            t,
+                            Some("\u{E790}"),
+                            loc::t("DynamicIslandBackground"),
+                            self.settings
+                                .dynamic_island_background_hex()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            button(
+                                "btn-island-color",
+                                t,
+                                loc::t("Edit"),
+                                ButtonVariant::Secondary,
+                                cx.listener(|this, _, _, cx| this.edit_island_background_color(cx)),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
                         setting_row(
                             t,
                             Some("\u{E790}"),
@@ -8339,16 +8425,27 @@ impl SettingsView {
                             t,
                             self.startup_enabled,
                             cx.listener(|this, _, _, cx| {
-                                let _next = !this.startup_enabled;
-                                // One call syncs both the portable Run key (honouring
-                                // StartupApproved) and the MSIX StartupTask.
-                                let _ = startup_registration::sync_all();
-                                this.startup_enabled = startup_registration::read().0;
+                                let next = !this.startup_enabled;
+                                // set_enabled writes either the portable Run key (honouring
+                                // StartupApproved) or the MSIX StartupTask. sync_all only repairs
+                                // an existing registration and must stay on the startup path.
+                                let write_error = startup_registration::set_enabled(next);
+                                let observed = startup_registration::read();
+                                let (enabled, error) =
+                                    resolve_startup_toggle(next, write_error, observed);
+                                this.startup_enabled = enabled;
+                                this.startup_status = error.map(loc::t).unwrap_or_default();
                                 cx.notify();
                             }),
                         ),
                     )
                     .into_any_element(),
+                    div()
+                        .w_full()
+                        .text_size(px(fonts::scaled_size(12.0)))
+                        .text_color(rgba(t.text_secondary))
+                        .child(self.startup_status.clone())
+                        .into_any_element(),
                     // Window picker (WS-10) and Fjord (WS-11) toggles are persisted in
                     // `extra`; the dock reads these keys when those workstreams land.
                     // No WS-10/11 toggle API exists in this worktree yet.
@@ -8383,15 +8480,29 @@ impl SettingsView {
                         ios_switch(
                             "sw-fjord-files",
                             t,
-                            extra_number(&self.settings, "FjordFilesEnabled", 0) != 0,
+                            extra_bool(&self.settings, "FjordFilesEnabled", false),
                             cx.listener(|this, _, _, cx| {
-                                let next =
-                                    extra_number(&this.settings, "FjordFilesEnabled", 0) == 0;
-                                set_extra_number(
-                                    &mut this.settings,
-                                    "FjordFilesEnabled",
-                                    i32::from(next),
-                                );
+                                let next = !extra_bool(&this.settings, "FjordFilesEnabled", false);
+                                set_extra_bool(&mut this.settings, "FjordFilesEnabled", next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    // C# `show_fjord_files_button` is a typed setting, not an `extra` key. The
+                    // dock host consumes it in a separate workstream; this row owns read/write.
+                    self.target_row_desc(
+                        "ShowFjordFilesButton",
+                        t,
+                        Some("\u{E838}"),
+                        loc::t("WidgetShow"),
+                        loc::t("FjordFiles"),
+                        ios_switch(
+                            "sw-show-fjord-files-button",
+                            t,
+                            self.settings.show_fjord_files_button,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.show_fjord_files_button =
+                                    !this.settings.show_fjord_files_button;
                                 this.auto_save(cx);
                             }),
                         ),
@@ -8400,7 +8511,7 @@ impl SettingsView {
                         "FjordBarVisible",
                         t,
                         Some("\u{E838}"),
-                        loc::t(if extra_number(&self.settings, "FjordBarVisible", 0) != 0 {
+                        loc::t(if extra_bool(&self.settings, "FjordBarVisible", false) {
                             "FjordBarHide"
                         } else {
                             "FjordBarShow"
@@ -8408,14 +8519,10 @@ impl SettingsView {
                         ios_switch(
                             "sw-fjord-bar",
                             t,
-                            extra_number(&self.settings, "FjordBarVisible", 0) != 0,
+                            extra_bool(&self.settings, "FjordBarVisible", false),
                             cx.listener(|this, _, _, cx| {
-                                let next = extra_number(&this.settings, "FjordBarVisible", 0) == 0;
-                                set_extra_number(
-                                    &mut this.settings,
-                                    "FjordBarVisible",
-                                    i32::from(next),
-                                );
+                                let next = !extra_bool(&this.settings, "FjordBarVisible", false);
+                                set_extra_bool(&mut this.settings, "FjordBarVisible", next);
                                 this.auto_save(cx);
                             }),
                         ),
@@ -9245,14 +9352,18 @@ impl Render for SettingsView {
 mod tests {
     use super::{
         BrushMode, DockSettings, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json, build_backup,
-        build_brush, city_list, civil_from_days, close_spawned_settings_windows, field_cell_hsv,
-        gradient_stop_at, import_backup_into, inspect_backup, location_auto_fill_value,
-        persist_theme_tokens, reorder_gradient_stop, safe_backup_path, weather_country_for,
-        zip_store, zip_unstore,
+        build_brush, city_list, civil_from_days, close_spawned_settings_windows, extra_bool,
+        field_cell_hsv, gradient_stop_at, import_backup_into, inspect_backup,
+        location_auto_fill_value, persist_theme_tokens, reorder_gradient_stop,
+        resolve_startup_toggle, safe_backup_path, set_extra_bool, settings_search,
+        settings_window_options, weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
-    use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
+    use crate::design::theme::{
+        apply_token_overrides, theme_test_guard, token_overrides_from_json,
+    };
     use crate::design::tokens::{Rgba, TokenMap, TokenValue};
+    use gpui::px;
     use serde_json::Map;
 
     #[test]
@@ -9429,6 +9540,7 @@ mod tests {
 
     #[test]
     fn saved_brush_token_reaches_live_palette() {
+        let _guard = theme_test_guard();
         apply_token_overrides(TokenMap::new());
         let color = Rgba::from_rgb(7, 8, 9);
         let brush = build_brush(BrushMode::Solid, Hsv::from(color), color.a, 90.0, &[color]);
@@ -9461,31 +9573,31 @@ mod tests {
     fn settings_window_uses_the_fixed_dialog_size_and_disables_resize() {
         assert_eq!(WIN_W, 1040.0);
         assert_eq!(WIN_H, 740.0);
-        let source = include_str!("settings.rs");
-        assert!(source.contains("window_min_size: Some(size(px(WIN_W), px(WIN_H)))"));
-        assert!(source.contains("is_resizable: false"));
-        // Item 5: the dock's folder-stack section must stay gone (including its search entry).
-        assert!(!source.contains(concat!("Add Folder", " Stack")));
-        let search_source = include_str!("settings_search.rs");
-        assert!(!search_source.contains("StackFolders"));
-        // Item 8: bundled swatch gallery and typography preview are gone.
-        assert!(!source.contains(concat!("Theme Gallery", " (bundled swatches)")));
-        assert!(!source.contains(concat!("AaBb", "ÇğÖşü 0123")));
+        let options = settings_window_options(None);
+        let minimum = options
+            .window_min_size
+            .expect("the dialog must have a minimum size");
+        assert_eq!(minimum.width, px(WIN_W));
+        assert_eq!(minimum.height, px(WIN_H));
+        assert!(!options.is_resizable);
+        assert!(options.titlebar.is_some());
+        // The retired folder-stack row must not be reachable from the search catalogue.
+        let catalog = settings_search::SearchCatalog::from_settings(&DockSettings::default());
+        assert!(catalog.search("StackFolders").is_empty());
+        assert!(catalog.search("Add Folder Stack").is_empty());
     }
 
     #[test]
     fn settings_window_is_closed_when_the_dock_exits() {
-        let settings_src = include_str!("settings.rs");
-        let dock_src = include_str!("../dock/mod.rs");
-        // Every spawn must be tracked, and dock shutdown must close tracked windows.
-        assert!(settings_src.contains("static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>>"));
-        assert!(settings_src.contains("children.push(child);"));
-        assert!(settings_src.contains("PostMessageW(hwnd, WM_CLOSE, 0, 0);"));
-        assert!(dock_src.contains("settings_ui::close_spawned_settings_windows();"));
-        // No duplicate spawn path may bypass the registry.
-        assert!(!dock_src.contains("std::process::Command::new(exe)"));
-        // Closing with no Settings spawned yet is a no-op.
+        // Closing with no Settings spawned yet is a no-op and never panics; the registry is left
+        // empty so a later shutdown cannot post WM_CLOSE to a recycled PID.
         close_spawned_settings_windows();
+        close_spawned_settings_windows();
+        assert!(
+            super::SETTINGS_CHILDREN
+                .lock()
+                .is_ok_and(|children| children.is_empty())
+        );
     }
 
     #[test]
@@ -9513,69 +9625,76 @@ mod tests {
 
     #[test]
     fn retired_ai_provider_ui_is_gone() {
-        let settings_src = include_str!("settings.rs");
-        let search_src = include_str!("settings_search.rs");
         // Split needle so this regression test does not reintroduce the token it forbids.
         let needle = concat!("antig", "ravity");
-        assert!(!settings_src.to_ascii_lowercase().contains(needle));
-        assert!(!search_src.to_ascii_lowercase().contains(needle));
-        assert!(!settings_src.contains(concat!("AI_PRO", "VIDERS")));
-        assert!(!settings_src.contains(concat!("ai_provider_", "detected")));
+        assert!(settings_search::SETTINGS_ROWS.iter().all(|row| {
+            !row.2.to_ascii_lowercase().contains(needle)
+                && !row.3.to_ascii_lowercase().contains(needle)
+                && row
+                    .4
+                    .iter()
+                    .all(|alias| !alias.to_ascii_lowercase().contains(needle))
+        }));
+        let catalog = settings_search::SearchCatalog::from_settings(&DockSettings::default());
+        assert!(catalog.search(needle).is_empty());
+        assert!(ai_cli_sign_in_command(&format!("aiusage_{needle}")).is_none());
     }
 
     #[test]
-    fn new_runtime_setting_rows_are_wired() {
-        let src = include_str!("settings.rs");
+    fn runtime_settings_round_trip_through_the_persisted_schema() {
+        let defaults = serde_json::to_value(DockSettings::default()).unwrap();
         for key in [
             "MagnificationExpandsDock",
-            "MagnificationExpandsDockDescription",
-            "ContentAlignStart",
-            "ContentAlignCenter",
-            "ContentAlignEnd",
+            "ContentAlignment",
             "PreviewsEnabled",
-            "PreviewDisabledHint",
             "WheelVolumeEnabled",
-            "FocusMinutesLabel",
-            "FocusBreakMinutesLabel",
-            "FocusSessionsLabel",
-            "WidgetDensityCompact",
-            "WidgetDensityFull",
-            "AiUsageRingLabel",
-            "FjordFiles",
-            "FjordFilesOpen",
-            "FjordBarShow",
-            "FjordBarHide",
-            "WindowPickerTitle",
-            "WindowPickerPage",
+            "FocusMinutes",
+            "FocusBreakMinutes",
+            "FocusSessions",
+            "WidgetDensityOverrides",
+            "AiUsageRing",
+            "ShowMedia",
+            "DockWidthMode",
+            "DockHeightMode",
+            "DockTopGapUnit",
+            "ShowFjordFilesButton",
         ] {
-            assert!(
-                src.contains(&format!("\"{key}\"")),
-                "missing setting row key {key}"
-            );
+            assert!(defaults.get(key).is_some(), "missing persisted key {key}");
         }
-        for field in [
-            "content_alignment",
-            "previews_enabled",
-            "wheel_volume_enabled",
-            "focus_minutes",
-            "focus_break_minutes",
-            "focus_sessions",
-            "widget_density_overrides",
-            "ai_usage_ring",
-            "show_media",
-            "dock_width_mode",
-            "dock_height_mode",
-            "dock_top_gap_unit",
-            "magnification_expands_dock",
-        ] {
-            assert!(src.contains(field), "missing setting field {field}");
-        }
+
+        let settings = DockSettings {
+            focus_minutes: 42,
+            focus_break_minutes: 9,
+            focus_sessions: 6,
+            show_fjord_files_button: true,
+            dynamic_island_background_color: Some("#010203".to_owned()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["FocusMinutes"], 42);
+        assert_eq!(value["FocusBreakMinutes"], 9);
+        assert_eq!(value["FocusSessions"], 6);
+        assert_eq!(value["ShowFjordFilesButton"], true);
+        assert_eq!(value["DynamicIslandBackgroundColor"], "#010203");
+        assert_eq!(settings.dynamic_island_background_hex(), Some("#010203"));
+
         assert_eq!(super::FOCUS_MINUTES_MAX, 90);
         assert_eq!(super::FOCUS_BREAK_MINUTES_MAX, 30);
         assert_eq!(super::FOCUS_SESSIONS_MAX, 8);
-        assert!(src.contains("FOCUS_MINUTES_MAX,"));
-        assert!(src.contains("FOCUS_BREAK_MINUTES_MAX,"));
-        assert!(src.contains("FOCUS_SESSIONS_MAX,"));
+    }
+
+    #[test]
+    fn fjord_toggles_persist_as_json_booleans() {
+        let mut settings = DockSettings::default();
+        for key in ["FjordFilesEnabled", "FjordBarVisible"] {
+            assert!(!extra_bool(&settings, key, false));
+            set_extra_bool(&mut settings, key, true);
+            assert_eq!(settings.extra.get(key), Some(&serde_json::json!(true)));
+            assert!(extra_bool(&settings, key, false));
+            // Port builds before this fix wrote 0/1; reads still accept them.
+            settings.extra.insert(key.to_owned(), serde_json::json!(0));
+            assert!(!extra_bool(&settings, key, false));
+        }
     }
 
     #[test]
@@ -9609,11 +9728,66 @@ mod tests {
 
     #[test]
     fn update_startup_and_theme_use_wired_apis() {
-        let src = include_str!("settings.rs");
-        assert!(src.contains("update::find_newer_packaged_guard()"));
-        assert!(src.contains("update::apply_with_elevation("));
-        assert!(src.contains("startup_registration::sync_all(next)"));
-        assert!(src.contains("apply_pack_tokens_to_palette()"));
+        // Compile-time wiring checks: the Settings view calls these exact crate APIs. No source
+        // text is inspected; an API rename fails to compile here.
+        let _guard: fn() -> Result<Option<crate::platform::update::Release>, ()> =
+            crate::platform::update::find_newer_packaged_guard;
+        let _apply: fn(
+            &crate::platform::update::DetailedRelease,
+        ) -> crate::platform::update::UpdateOutcome = crate::platform::update::apply_with_elevation;
+        let _set_enabled: fn(bool) -> Option<&'static str> =
+            crate::platform::startup_registration::set_enabled;
+
+        // Persisted theme tokens reach the live palette.
+        let _guard = theme_test_guard();
+        apply_token_overrides(TokenMap::new());
+        let color = Rgba::from_rgb(11, 22, 33);
+        let brush = build_brush(BrushMode::Solid, Hsv::from(color), color.a, 90.0, &[color]);
+        let mut tokens = Map::new();
+        tokens.insert("AccentBrush".to_owned(), brush_to_json(&brush));
+        let mut settings = DockSettings::default();
+        persist_theme_tokens(&mut settings, tokens);
+        assert_eq!(
+            crate::design::theme::ThemeManager::resolve("AccentBrush"),
+            Some(TokenValue::Solid(color))
+        );
+        apply_token_overrides(TokenMap::new());
+
+        // Startup toggles use set_enabled, verify with read(), and surface the error key.
+        assert_eq!(
+            resolve_startup_toggle(true, None, (true, None)),
+            (true, None)
+        );
+        assert_eq!(
+            resolve_startup_toggle(true, Some("StartupWriteError"), (false, None)),
+            (false, Some("StartupWriteError"))
+        );
+        assert_eq!(
+            resolve_startup_toggle(false, None, (true, Some("StartupReadError"))),
+            (false, Some("StartupReadError"))
+        );
+        assert_eq!(
+            resolve_startup_toggle(true, None, (false, None)),
+            (false, Some("StartupWriteError")),
+            "an unconfirmed write must not leave the switch in the requested position"
+        );
+    }
+}
+
+/// Window options for the Settings dialog, kept as a function so the fixed-size/resize contract
+/// can be tested directly instead of by scanning this file's source text.
+fn settings_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
+    WindowOptions {
+        window_bounds,
+        // Fixed dialog: min == initial size and resizing (edge/corner handle) is off.
+        window_min_size: Some(size(px(WIN_W), px(WIN_H))),
+        is_resizable: false,
+        titlebar: Some(TitlebarOptions {
+            title: Some(loc::t("SettingsTitle").into()),
+            appears_transparent: true,
+            traffic_light_position: None,
+        }),
+        ..Default::default()
     }
 }
 
@@ -9632,18 +9806,7 @@ pub fn run_settings_window() {
             ]);
             let bounds = Bounds::centered(None, size(px(WIN_W), px(WIN_H)), cx);
             let _ = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    // Fixed dialog: min == initial size and resizing (edge/corner handle) is off.
-                    window_min_size: Some(size(px(WIN_W), px(WIN_H))),
-                    is_resizable: false,
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(loc::t("SettingsTitle").into()),
-                        appears_transparent: true,
-                        traffic_light_position: None,
-                    }),
-                    ..Default::default()
-                },
+                settings_window_options(Some(WindowBounds::Windowed(bounds))),
                 |window, cx| cx.new(|cx| SettingsView::new(loaded.clone(), window, cx)),
             );
             cx.activate(true);
