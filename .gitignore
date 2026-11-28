@@ -7,6 +7,7 @@ obj/
 artifacts/
 dist/
 release/
+release-ui-review/
 tmp/
 .reports/
 .local/
