@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockContentAlignment, DockHeightMode, DockSettings,
+    self, AppTheme, AutoHideMode, DockContentAlignment, DockEdge, DockHeightMode, DockSettings,
     DockWidthMode, MiddleClickAction, StartButtonAction, StartButtonPlacement, SurfaceBackground,
 };
 use opentaskbar_shell::flyout_reposition::FlyoutKind;
@@ -169,6 +169,10 @@ const STACK_FLYOUT_ROW_ID_BASE: u32 = 100;
 /// The pill must include both insets or a dock that fits on screen reports a
 /// bogus 2 DIP overflow (and a right scroll chevron) at rest.
 const VIEWPORT_INSET_DIPS: f32 = 1.0;
+
+fn full_width_active(settings: &DockSettings) -> bool {
+    settings.full_width && settings.dock_width_mode == DockWidthMode::Auto
+}
 /// `FILE_ATTRIBUTE_HIDDEN` / `FILE_ATTRIBUTE_SYSTEM` for folder-stack filtering.
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
@@ -189,7 +193,7 @@ struct EffectiveMetrics {
 }
 
 impl EffectiveMetrics {
-    fn for_monitor(settings: &DockSettings, mon_w_dips: f32) -> Self {
+    fn for_monitor(settings: &DockSettings, mon_w_dips: f32, dpi_scale: f32) -> Self {
         let positive = |v: f32| (v.is_finite() && v > 0.0).then_some(v);
         let mut widget_densities = HashMap::new();
         for wd in widgets::active_widgets(settings) {
@@ -210,13 +214,28 @@ impl EffectiveMetrics {
             DockHeightMode::Pixels | DockHeightMode::Percent => {
                 positive(settings::effective_height(settings))
             }
-            DockHeightMode::Auto | DockHeightMode::Fill => None,
+            DockHeightMode::Auto => None,
+            DockHeightMode::Fill if settings.edge == DockEdge::Bottom && dpi_scale > 0.0 => {
+                positive(
+                    opentaskbar_shell::taskbar::native_bottom_taskbar_height_px() as f32
+                        / dpi_scale,
+                )
+            }
+            DockHeightMode::Fill => None,
         };
         Self {
             width_dips,
             height_dips,
-            top_gap_dips: Some(settings::effective_top_gap(settings)),
-            bottom_gap_dips: Some(settings::effective_bottom_gap(settings)),
+            top_gap_dips: Some(if settings.dock_height_mode == DockHeightMode::Fill {
+                0
+            } else {
+                settings::effective_top_gap(settings)
+            }),
+            bottom_gap_dips: Some(if settings.dock_height_mode == DockHeightMode::Fill {
+                0
+            } else {
+                settings::effective_bottom_gap(settings)
+            }),
             widget_densities,
             live_rest_content_dips: None,
         }
@@ -695,7 +714,7 @@ fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
 }
 
 fn base_trail_width(settings: &DockSettings) -> f32 {
-    base_trail_width_for(settings, stack_folder_count(settings))
+    base_trail_width_for(settings)
 }
 
 /// Folder stacks rendered as individual dock icons (one per non-empty path).
@@ -707,9 +726,22 @@ fn stack_folder_count(settings: &DockSettings) -> usize {
         .count()
 }
 
-/// Trailing group `| [Folder...] [PinnedTray...] [Tray] [Bin]` without the
-/// pinned tray icons: every folder stack, Tray and Bin is one `base x base` cell.
-fn base_trail_width_for(settings: &DockSettings, stack_count: usize) -> f32 {
+fn app_strip_width(settings: &DockSettings, slot_count: usize) -> f32 {
+    let base = layout::size_profile(settings).cell;
+    let apps = section_width(base, slot_gap(settings), slot_count);
+    let folders = stack_folder_count(settings);
+    if folders == 0 {
+        return apps;
+    }
+    apps + folders as f32 * (base + widget_gap(settings))
+        - if slot_count == 0 {
+            widget_gap(settings)
+        } else {
+            0.0
+        }
+}
+
+fn base_trail_width_for(settings: &DockSettings) -> f32 {
     let mut w = 0.0;
     let base = layout::size_profile(settings).cell;
     if settings.show_tray_button {
@@ -718,7 +750,6 @@ fn base_trail_width_for(settings: &DockSettings, stack_count: usize) -> f32 {
     if settings.show_recycle_bin {
         w += base + widget_gap(settings);
     }
-    w += stack_count as f32 * (base + widget_gap(settings));
     if w > 0.0 {
         w + 13.0 // left TrayGroupDivider + breathing room
     } else {
@@ -735,7 +766,8 @@ fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips
         return 0;
     }
     let base = layout::size_profile(settings).cell;
-    let apps = section_width(base, slot_gap(settings), slot_count);
+    let apps = app_strip_width(settings, slot_count);
+    let has_app_items = slot_count > 0 || stack_folder_count(settings) > 0;
     let magnification = if slot_count > 0 && fisheye_enabled(settings) {
         base * (1.0 + settings.fisheye_intensity.peak())
     } else {
@@ -744,7 +776,7 @@ fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips
     let available = mon_w_dips
         - 16.0
         - shell_section_width(settings)
-        - widgets_strip_width(settings, slot_count > 0)
+        - widgets_strip_width(settings, has_app_items)
         - base_trail_width(settings)
         - apps
         - magnification
@@ -754,7 +786,7 @@ fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips
 }
 
 fn widgets_section_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
-    widgets_strip_width(settings, slot_count > 0)
+    widgets_strip_width(settings, slot_count > 0 || stack_folder_count(settings) > 0)
         + base_trail_width(settings)
         + visible_tray_pin_count(settings, slot_count, mon_w_dips) as f32
             * tray_pin_cell(layout::size_profile(settings).cell)
@@ -1588,8 +1620,7 @@ fn pill_height_dips(settings: &DockSettings) -> f32 {
 }
 
 fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
-    let profile = layout::size_profile(settings);
-    let icons_w = section_width(profile.cell, slot_gap(settings), slot_count);
+    let icons_w = app_strip_width(settings, slot_count);
     pill_width_for_content(content_strip_width(
         shell_section_width(settings),
         icons_w,
@@ -1600,7 +1631,7 @@ fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips
 
 fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
     let max_w = (mon_w_dips - 16.0).max(200.0);
-    if settings.full_width {
+    if full_width_active(settings) {
         return max_w;
     }
     let natural_w = content_min_pill_width(settings, slot_count, mon_w_dips);
@@ -1623,7 +1654,7 @@ fn compute_window_dips_with(
     // WS-1 `effective_width` overrides Auto/Pixels/Percent width modes.
     if let Some(width) = effective.width_dips {
         resting_w = width.min((mon_w_dips - 16.0).max(200.0));
-    } else if !settings.full_width
+    } else if !full_width_active(settings)
         && settings.dock_custom_width_dips.is_none()
         && let Some(live) = effective.live_rest_content_dips
     {
@@ -1637,7 +1668,7 @@ fn compute_window_dips_with(
     // needs no horizontal room. Only an expanding dock reserves a full arch so
     // a hover can never pop scroll chevrons or clip the Tray/Recycle Bin.
     let mag_extra =
-        if fisheye_enabled(settings) && !settings.full_width && expands && slot_count > 0 {
+        if fisheye_enabled(settings) && !full_width_active(settings) && expands && slot_count > 0 {
             layout::fisheye_expansion_reserve_dips(base + slot_gap(settings), peak) + 8.0
         } else {
             0.0
@@ -1653,10 +1684,9 @@ fn compute_window_dips_with(
     let width_dips = (resting_w + mag_extra + 24.0)
         .clamp(160.0, mon_w_dips)
         .ceil();
-    let mut pill_h = pill_height_dips(settings);
-    if let Some(h) = effective.height_dips {
-        pill_h = h;
-    }
+    let pill_h = effective
+        .height_dips
+        .unwrap_or_else(|| pill_height_dips(settings));
     let bottom_inset = effective.bottom_inset_dips();
     let height_dips = (pill_h + TOOLTIP_HEADROOM + mag_headroom + bottom_inset).ceil();
     (width_dips, height_dips)
@@ -1724,7 +1754,7 @@ fn compute_window_rect_with(
             side_h,
             cross,
             margin_px,
-            settings.full_width,
+            full_width_active(settings),
         );
     }
     let monitor_top = monitor.top;
@@ -2100,7 +2130,7 @@ impl DockState {
             initial_fps,
         );
         let target_fps = Arc::new(AtomicU32::new(initial_fps));
-        let effective = EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi);
+        let effective = EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi, dpi);
         let mut state = Self {
             hwnd,
             monitor,
@@ -2568,7 +2598,7 @@ impl DockState {
     /// not fit the available pill width compact lowest-priority first (`ShrinkPriority`
     /// bias), before the dock falls back to scroll chevrons. Returns `true` on change.
     fn update_widget_shrink(&mut self) -> bool {
-        let next = if self.widget_visuals.is_empty() || self.settings.full_width {
+        let next = if self.widget_visuals.is_empty() || full_width_active(&self.settings) {
             HashMap::new()
         } else {
             let full: Vec<(&'static str, f32)> = self
@@ -2666,7 +2696,11 @@ impl DockState {
         self.update_widget_shrink();
         let mut changed = false;
         let mut width_changed = false;
-        let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
+        let widget_h = design::widget_height_dips(
+            self.effective
+                .height_dips
+                .unwrap_or_else(|| pill_height_dips(&self.settings)),
+        );
         let mut key_scratch = String::with_capacity(256);
         let live_widths: Vec<f32> = self
             .widget_visuals
@@ -3058,7 +3092,10 @@ impl DockState {
         let dpi = self.dpi;
         let is_dark = self.is_dark;
         let base = layout::size_profile(&self.settings).cell;
-        let pill_h = pill_height_dips(&self.settings);
+        let pill_h = self
+            .effective
+            .height_dips
+            .unwrap_or_else(|| pill_height_dips(&self.settings));
 
         // The DComp dock used to ignore `ThemeManager` entirely: editor/pack changes
         // to DockMaterial, DockBorderMaterial, WidgetCard(Hover/Pressed), DockHighlight
@@ -3384,7 +3421,7 @@ impl DockState {
         let next = settings::load_from(&settings::settings_path());
         // Re-resolve WS-1 effective geometry/density for this monitor before any
         // rebuild; the cached values feed every subsequent hot-path frame.
-        self.effective = EffectiveMetrics::for_monitor(&next, self.mon_w_dips());
+        self.effective = EffectiveMetrics::for_monitor(&next, self.mon_w_dips(), self.dpi);
         self.settings = next;
         window_picker::set_picker_enabled(self.settings.previews_enabled);
         set_win_key_reveal_gate(&self.settings);
@@ -3450,8 +3487,15 @@ impl DockState {
         self.tooltip_cache = None;
         self.rebuild_theme_surfaces();
         if let Some(ref corner) = self.show_desktop_corner {
-            let corner_h = pill_height_dips(&self.settings)
-                + self.settings.dock_bottom_gap_pixels.max(0) as f32;
+            let corner_h = self
+                .effective
+                .height_dips
+                .unwrap_or_else(|| pill_height_dips(&self.settings))
+                + if self.settings.dock_height_mode == DockHeightMode::Fill {
+                    0.0
+                } else {
+                    self.settings.dock_bottom_gap_pixels.max(0) as f32
+                };
             corner.update_for_edge(
                 effective_edge(&self.settings),
                 self.monitor.clone(),
@@ -3462,9 +3506,16 @@ impl DockState {
         }
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
-            let desired_total_dips = pill_height_dips(&self.settings)
+            let desired_total_dips = self
+                .effective
+                .height_dips
+                .unwrap_or_else(|| pill_height_dips(&self.settings))
                 + self.effective.bottom_inset_dips()
-                + VERTICAL_EDGE_GAP;
+                + if self.settings.dock_height_mode == DockHeightMode::Fill {
+                    0.0
+                } else {
+                    VERTICAL_EDGE_GAP
+                };
             let desired_total_px = (desired_total_dips * self.dpi).ceil() as i32;
             opentaskbar_shell::taskbar::update_appbar_height(
                 self.hwnd,
@@ -3713,8 +3764,7 @@ impl DockState {
     }
 
     fn live_trail_section_width(&self) -> f32 {
-        let stacks = self.stack_visuals.len();
-        let base_w = base_trail_width_for(&self.settings, stacks);
+        let base_w = base_trail_width_for(&self.settings);
         if base_w > 0.0 {
             let pins = if self.settings.show_tray_button {
                 self.tray_pin_visuals.len()
@@ -3722,14 +3772,7 @@ impl DockState {
                 0
             };
             let pins_w = pins as f32 * tray_pin_cell(layout::size_profile(&self.settings).cell);
-            // Pinned tray icons carry no trailing gap of their own; a folder stack
-            // to their left needs one.
-            let pins_gap = if pins > 0 && stacks > 0 {
-                widget_gap(&self.settings)
-            } else {
-                0.0
-            };
-            base_w + pins_w + pins_gap
+            base_w + pins_w
         } else {
             0.0
         }
@@ -3742,7 +3785,7 @@ impl DockState {
         } else {
             0.0
         };
-        self.live_widgets_strip_width(!self.slots.is_empty())
+        self.live_widgets_strip_width(!self.slots.is_empty() || !self.stack_visuals.is_empty())
             + self.live_trail_section_width()
             + match group {
                 layout::StartStripGroup::Head => 0.0,
@@ -3769,7 +3812,7 @@ impl DockState {
     fn rest_content_width_at(&self, now: Instant) -> f32 {
         pill_width_for_content(content_strip_width(
             shell_lead_width(&self.settings),
-            self.rest_apps_width_at(now),
+            self.app_strip_width_at(now, true),
             self.live_widgets_section_width(),
             0.0,
         ))
@@ -3780,7 +3823,7 @@ impl DockState {
         let (win_w, win_h) =
             compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
         let max_w = (mon_w - 16.0).max(200.0);
-        let pill_w = if self.settings.full_width {
+        let pill_w = if full_width_active(&self.settings) {
             max_w
         } else if let Some(fixed_w) = self.effective.width_dips {
             fixed_w.min(win_w).min(max_w)
@@ -3789,9 +3832,9 @@ impl DockState {
             // (+ both viewport insets) so a dock that fits on the monitor never
             // triggers false scroll overflow chevrons.
             let icons_w = if resting {
-                self.rest_apps_width_at(now)
+                self.app_strip_width_at(now, true)
             } else {
-                self.live_apps_width_dips_at(now)
+                self.app_strip_width_at(now, false)
             };
             let live_content = pill_width_for_content(content_strip_width(
                 shell_lead_width(&self.settings),
@@ -3856,6 +3899,21 @@ impl DockState {
         self.apps_width_from(&widths, now)
     }
 
+    fn app_strip_width_at(&self, now: Instant, resting: bool) -> f32 {
+        let apps = if resting {
+            self.rest_apps_width_at(now)
+        } else {
+            self.live_apps_width_dips_at(now)
+        };
+        let folders = self.stack_visuals.len();
+        if folders == 0 {
+            return apps;
+        }
+        let gap = widget_gap(&self.settings);
+        let base = layout::size_profile(&self.settings).cell;
+        apps + folders as f32 * (base + gap) - if apps == 0.0 { gap } else { 0.0 }
+    }
+
     /// Horizontal growth available to a hover arch (P0-1/P0-2).
     ///
     /// Fixed-width docks magnify in place (`0`). Expanding docks may grow up to
@@ -3873,7 +3931,7 @@ impl DockState {
             compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
         let max_w = (mon_w - 16.0).max(200.0);
         let rest_content = self.rest_content_width_at(now);
-        let content_driven = !self.settings.full_width
+        let content_driven = !full_width_active(&self.settings)
             && self.effective.width_dips.is_none()
             && self.settings.dock_custom_width_dips.is_none();
         let max_extent = if content_driven {
@@ -3924,7 +3982,11 @@ impl DockState {
     fn slot_lift(&self, slot: &DockSlot) -> f32 {
         let profile = layout::size_profile(&self.settings);
         let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
-        let headroom = (pill_height_dips(&self.settings) - profile.icon - 4.0).max(0.0);
+        let pill_h = self
+            .effective
+            .height_dips
+            .unwrap_or_else(|| pill_height_dips(&self.settings));
+        let headroom = (pill_h - profile.icon - 4.0).max(0.0);
         compute_safe_lift(slot.scale, max_scale, profile.icon, headroom)
             + bounce_offset_dips(slot.bounce_started).unwrap_or(0.0)
     }
@@ -3952,11 +4014,7 @@ impl DockState {
     ) -> ScrollMetrics {
         // Flush with the outer rounded edges of the dock pill (matching `MainWindow.xaml`).
         let (vp_left, vp_right) = pill_viewport(pill_left, pill_w);
-        let apps_w = if resting {
-            self.rest_apps_width_at(now)
-        } else {
-            self.live_apps_width_dips_at(now)
-        };
+        let apps_w = self.app_strip_width_at(now, resting);
         let mut widgets_w = self.live_widgets_strip_width(apps_w > 0.0);
         let mut trail_w = self.live_trail_section_width();
         let group = layout::start_strip_group(&self.settings);
@@ -4070,7 +4128,7 @@ impl DockState {
     }
 
     fn hit_resize_edge(&self, mx: f32, my: f32) -> Option<ResizeEdge> {
-        if self.settings.full_width {
+        if full_width_active(&self.settings) {
             return None;
         }
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
@@ -4119,7 +4177,7 @@ impl DockState {
     /// places Start immediately before the trailing tray/bin group; `InWidgets`
     /// inserts it at `StartWidgetIndex` inside the widget strip.
     fn shell_center_x_in(&self, kind: ShellButton, sm: &ScrollMetrics) -> f32 {
-        self.shell_center_x_with(kind, sm, self.live_apps_width_dips())
+        self.shell_center_x_with(kind, sm, self.app_strip_width_at(Instant::now(), false))
     }
 
     /// Same as `shell_center_x_in` for an explicit apps width (resting layouts
@@ -4174,7 +4232,7 @@ impl DockState {
         let sm = self.live_scroll_metrics();
         // Widgets live in the same main strip right after the apps (matching `RebuildDockOrder`),
         // while Background Apps (`tray`) and Recycle Bin (`bin`) stay pinned to the trailing edge.
-        let apps_w = self.live_apps_width_dips();
+        let apps_w = self.app_strip_width_at(Instant::now(), false);
         let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
         let start_in_widgets = layout::start_strip_group(&self.settings)
             == layout::StartStripGroup::InWidgets
@@ -4233,26 +4291,19 @@ impl DockState {
         }
         let base = layout::size_profile(&self.settings).cell;
         let gap = widget_gap(&self.settings);
-        let mut right_cursor = sm.right_anchor_x;
-        if self.settings.show_recycle_bin {
-            right_cursor -= base + gap;
+        let mut left_cursor = sm.apps_start_x + self.live_apps_width_dips();
+        if !self.slots.is_empty() {
+            left_cursor += gap;
         }
-        if self.settings.show_tray_button {
-            right_cursor -= base + gap;
-            let pins = self.tray_pin_visuals.len();
-            if pins > 0 {
-                right_cursor -= tray_pin_cell(base) * pins as f32 + gap;
-            }
-        }
-        let mut rects = vec![(0.0, 0.0, 0.0, 0.0); count];
-        for index in (0..count).rev() {
-            rects[index] = (
-                right_cursor - base,
+        let mut rects = Vec::with_capacity(count);
+        for _ in 0..count {
+            rects.push((
+                left_cursor,
                 pill_top + 6.0,
-                right_cursor,
+                left_cursor + base,
                 pill_top + pill_h - 6.0,
-            );
-            right_cursor -= base + gap;
+            ));
+            left_cursor += base + gap;
         }
         rects
     }
@@ -4286,7 +4337,7 @@ impl DockState {
         let (pill_left, pill_top, pill_w, pill_h) = self.rest_pill_geometry_at(now);
         let rest_sm = self.rest_scroll_metrics();
         let center_x = self
-            .shell_center_x_with(kind, &rest_sm, self.rest_apps_width_at(now))
+            .shell_center_x_with(kind, &rest_sm, self.app_strip_width_at(now, true))
             .clamp(
                 pill_left + 1.0,
                 (pill_left + pill_w - 1.0).max(pill_left + 1.0),
@@ -4512,7 +4563,7 @@ impl DockState {
         // Fitts's law: the strip between the pill and the screen edge (bottom
         // inset) still belongs to the app icons above it, so slamming the
         // pointer to the edge keeps the app under it hoverable and clickable.
-        let apps_w = self.live_apps_width_dips();
+        let apps_w = self.app_strip_width_at(Instant::now(), false);
         if !layout::is_vertical(effective_edge(&self.settings))
             && apps_w > 0.0
             && my > pill_top + pill_h
@@ -4795,7 +4846,7 @@ impl DockState {
         // Shell buttons get the very same raised-cosine target + spring as app
         // slots, evaluated on the resting layout. A Start button outside the lead
         // group (`AfterApps` / `InWidgets`) sits in a non-magnified zone (P1-6).
-        let rest_apps_w = self.rest_apps_width_at(now);
+        let rest_apps_w = self.app_strip_width_at(now, true);
         let shell_targets = ShellButton::ALL.map(|kind| {
             if kind == ShellButton::Start
                 && layout::start_strip_group(&self.settings) != layout::StartStripGroup::Head
@@ -4811,6 +4862,8 @@ impl DockState {
             shell_targets,
             dt,
             max_scale,
+            stiffness,
+            damping,
         );
 
         // Folder stacks magnify in place (fixed cells, no-overlap peak).
@@ -5493,10 +5546,13 @@ impl DockState {
             cursor_x += (slot_w + gap) * self.slots[idx].layout_fraction(now);
         }
 
-        // 4. Widgets inline right after apps (same main strip as `RebuildDockOrder`).
+        let stack_rects = self.stack_rects_in(&sm, pill_top, pill_h);
+        self.update_stack_visuals(&stack_rects, shell_top, icon_base_bottom, icon_size);
+
+        // 4. Widgets inline right after apps and folder shortcuts.
         let widget_h = design::widget_height_dips(pill_h);
         let widget_top = pill_top + (pill_h - widget_h) * 0.5;
-        let apps_w = self.live_apps_width_dips_at(now);
+        let apps_w = self.app_strip_width_at(now, false);
         let wg = widget_gap(&self.settings);
         let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
         for wv in &self.widget_visuals {
@@ -5580,14 +5636,6 @@ impl DockState {
                 self.tray_node.hide();
             }
 
-            // `[Folder1] [Folder2] ...` left of the pinned tray icons, each its own
-            // native folder icon, bottom-anchored like app icons.
-            let stack_rects = self.stack_rects_in(&sm, pill_top, pill_h);
-            if let Some(&(first_left, ..)) = stack_rects.first() {
-                right_cursor = first_left - wg;
-            }
-            self.update_stack_visuals(&stack_rects, shell_top, icon_base_bottom, icon_size);
-
             let wdiv_x = right_cursor - 5.0;
             self.widget_divider.set_transform(
                 1.0,
@@ -5601,10 +5649,6 @@ impl DockState {
             self.tray_node.hide();
             self.bin_bg.hide();
             self.bin_node.hide();
-            for sv in &self.stack_visuals {
-                sv.bg.hide();
-                sv.icon.hide();
-            }
         }
 
         // 4b. Scroll edge scrim + chevron overlays (only visible when dock content overflows).
@@ -6831,12 +6875,12 @@ impl DockState {
             let w = (rc.2 - rc.0).max(1.0);
             match id {
                 "media" => {
-                    let controls_l = w - 116.0;
+                    let controls_l = w - 88.0;
                     if rel_x < controls_l {
                         None
                     } else if rel_x < controls_l + 26.0 {
                         Some(0)
-                    } else if rel_x < controls_l + 55.0 {
+                    } else if rel_x < controls_l + 56.0 {
                         Some(1)
                     } else if rel_x < controls_l + 82.0 {
                         Some(2)
@@ -6883,7 +6927,7 @@ impl DockState {
         let apps_left = sm.vp_left;
         let apps_right = sm
             .vp_right
-            .min(sm.apps_start_x + self.live_apps_width_dips() + 8.0);
+            .min(sm.apps_start_x + self.app_strip_width_at(Instant::now(), false) + 8.0);
         if mx >= apps_left && mx <= apps_right && !self.slots.is_empty() {
             if self.hovered_shell.is_some() {
                 self.hovered_shell = None;
@@ -9430,7 +9474,7 @@ pub fn run(settings: DockSettings) {
         let light_strip = dock_layout == layout::SecondaryLayout::LightStrip;
         let initial_count = if light_strip { 0 } else { initial_slots.len() };
         let monitor_effective =
-            EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi_scale);
+            EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi_scale, dpi_scale);
         let rect = compute_window_rect_with(
             &settings,
             initial_count,
@@ -9457,6 +9501,7 @@ pub fn run(settings: DockSettings) {
             continue;
         }
         let hwnd_val = hwnd as usize;
+        let monitor_width_dips = monitor.width() as f32 / dpi_scale;
         win32::configure_native_dock_hwnd(hwnd_val);
         unsafe {
             DragAcceptFiles(hwnd, 1);
@@ -9541,9 +9586,15 @@ pub fn run(settings: DockSettings) {
                 }
                 created.push((hwnd, ptr));
                 if is_primary {
-                    let desired_total_dips = pill_height_dips(&settings)
-                        + (settings::effective_bottom_gap(&settings).max(0) as f32)
-                        + VERTICAL_EDGE_GAP;
+                    let desired_total_dips = if settings.dock_height_mode == DockHeightMode::Fill {
+                        EffectiveMetrics::for_monitor(&settings, monitor_width_dips, dpi_scale)
+                            .height_dips
+                            .unwrap_or_else(|| pill_height_dips(&settings))
+                    } else {
+                        pill_height_dips(&settings)
+                            + settings::effective_bottom_gap(&settings).max(0) as f32
+                            + VERTICAL_EDGE_GAP
+                    };
                     let desired_total_px = (desired_total_dips * dpi_scale).ceil() as i32;
                     opentaskbar_shell::taskbar::begin_replacement(
                         hwnd_val,
@@ -9658,7 +9709,8 @@ mod tests {
     fn hover_flyout_gate_accepts_legacy_casing_and_custom_ids() {
         assert!(widget_has_flyout_ci("clock"));
         assert!(widget_has_flyout_ci("Clock"));
-        assert!(widget_has_flyout_ci("AiUsageClaude"));
+        assert!(widget_has_flyout_ci("SystemStats"));
+        assert!(!widget_has_flyout_ci("AiUsageClaude"));
         assert!(!widget_has_flyout_ci("no_such_widget"));
     }
 
@@ -10373,7 +10425,7 @@ mod tests {
     #[test]
     fn auto_width_mode_does_not_clamp_dock_to_min_surface_width() {
         let settings = DockSettings::default();
-        let eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        let eff = EffectiveMetrics::for_monitor(&settings, 1920.0, 1.0);
         assert!(
             eff.width_dips.is_none(),
             "Auto width mode must let the dock size to its icons/widgets"
@@ -10550,14 +10602,15 @@ mod tests {
     }
 
     #[test]
-    fn folder_stacks_are_counted_in_the_trailing_group() {
+    fn folder_stacks_are_counted_in_the_app_strip() {
         let mut settings = DockSettings {
             show_tray_button: true,
             show_recycle_bin: true,
             ..DockSettings::default()
         };
         let base = layout::size_profile(&settings).cell;
-        let without = base_trail_width(&settings);
+        let without = app_strip_width(&settings, 0);
+        let trailing_without = base_trail_width(&settings);
         settings.stack_folders = vec![
             r"C:\Users\Public\Downloads".to_owned(),
             "   ".to_owned(),
@@ -10568,17 +10621,19 @@ mod tests {
             2,
             "blank entries are skipped"
         );
-        let with = base_trail_width(&settings);
-        assert!((with - without - 2.0 * (base + widget_gap(&settings))).abs() < 1e-4);
-        // Stacks alone still form a trailing group (with its divider room).
+        let with = app_strip_width(&settings, 0);
+        assert!((with - without - 2.0 * base - widget_gap(&settings)).abs() < 1e-4);
+        assert_eq!(base_trail_width(&settings), trailing_without);
+        // Stacks alone occupy the app strip without creating a trailing group.
         let stacks_only = DockSettings {
             show_tray_button: false,
             show_recycle_bin: false,
             stack_folders: vec![r"C:\Projects".to_owned()],
             ..DockSettings::default()
         };
-        assert!(base_trail_width(&stacks_only) > base);
-        assert_eq!(base_trail_width_for(&stacks_only, 0), 0.0);
+        assert_eq!(app_strip_width(&stacks_only, 0), base);
+        assert_eq!(base_trail_width(&stacks_only), 0.0);
+        assert_eq!(base_trail_width_for(&stacks_only), 0.0);
     }
 
     #[test]
@@ -10716,7 +10771,7 @@ mod tests {
             settings.set_widget_enabled(id, true);
         }
         settings.stack_folders = vec![r"C:\Users\Public\Downloads".to_owned()];
-        let mut eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        let mut eff = EffectiveMetrics::for_monitor(&settings, 1920.0, 1.0);
         assert!(eff.width_dips.is_none());
         let live_content = 1500.0;
         eff.live_rest_content_dips = Some(live_content);

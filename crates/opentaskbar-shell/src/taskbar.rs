@@ -99,7 +99,7 @@ pub fn set_taskbar_state(state: u32) {
 }
 
 /// Returns Explorer's currently reserved bottom taskbar strip height in physical pixels.
-fn native_bottom_taskbar_height_px() -> i32 {
+pub fn native_bottom_taskbar_height_px() -> i32 {
     let mut data = appbar::create_data(0);
     // SAFETY: properly sized APPBARDATA for ABM_GETTASKBARPOS through the
     // hung-probe choke point.

@@ -9,6 +9,7 @@
 
 # Other local and temporary data
 dist/
+release-ui-review/
 tmp/
 .reports/
 .local/

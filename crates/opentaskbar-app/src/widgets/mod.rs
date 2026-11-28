@@ -156,6 +156,7 @@ pub(crate) struct MediaChipHint {
     pub playing: bool,
     pub progress: f32,
     pub cover_path: Option<String>,
+    pub cover_pixels: Option<Arc<(u32, u32, Vec<u8>)>>,
     pub has_media: bool,
 }
 
@@ -2642,7 +2643,7 @@ impl WidgetRuntime {
                 telemetry::refresh_media_session(&self.media_session, true);
                 true
             }
-            ("media" | "audio", "mute") => {
+            ("audio", "mute") => {
                 toggle_audio_mute();
                 (self.audio_vol, self.audio_muted) = get_audio_state();
                 self.tooltip_text = None;
@@ -3166,6 +3167,7 @@ impl WidgetRuntime {
                     } else {
                         None
                     },
+                    cover_pixels: snap.cover_pixels,
                     has_media,
                 });
                 let title = if has_media {
@@ -3176,7 +3178,6 @@ impl WidgetRuntime {
                 WidgetChipSpec::Media {
                     title,
                     artist: snap.artist,
-                    muted: self.audio_muted,
                 }
             }
             "audio" => WidgetChipSpec::Audio {
@@ -3326,7 +3327,7 @@ impl WidgetRuntime {
                 let has_media = !self.media_snapshot().title.is_empty();
                 if !has_media {
                     match sub {
-                        Some(3) => loc::t("MediaPlay").to_owned(),
+                        Some(2 | 3) => loc::t("MediaPlay").to_owned(),
                         _ => loc::t("DynamicIslandShortMedia").to_owned(),
                     }
                 } else {
@@ -3334,12 +3335,6 @@ impl WidgetRuntime {
                         Some(0) => loc::t("MediaPrevious").to_owned(),
                         Some(1) => loc::t("MediaPlayPause").to_owned(),
                         Some(2) => loc::t("MediaNext").to_owned(),
-                        Some(3) => if self.audio_muted {
-                            loc::t("AudioUnmute")
-                        } else {
-                            loc::t("AudioMute")
-                        }
-                        .to_owned(),
                         _ => loc::t("DynamicIslandShortMedia").to_owned(),
                     }
                 }
@@ -3539,29 +3534,18 @@ impl WidgetRuntime {
                     let play_l = (width_dips - 38.0).max(0.0);
                     if rel_x_dips >= play_l {
                         telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
-                        DirectClickOutcome::Handled
-                    } else {
-                        DirectClickOutcome::OpenFlyout
                     }
+                    DirectClickOutcome::Handled
                 } else {
-                    let controls_l = (width_dips - 116.0).max(0.0);
-                    if rel_x_dips < controls_l {
-                        DirectClickOutcome::OpenFlyout
-                    } else if rel_x_dips < controls_l + 26.0 {
+                    let controls_l = (width_dips - 88.0).max(0.0);
+                    if rel_x_dips >= controls_l && rel_x_dips < controls_l + 26.0 {
                         telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
-                        DirectClickOutcome::Handled
-                    } else if rel_x_dips < controls_l + 55.0 {
+                    } else if rel_x_dips >= controls_l + 27.0 && rel_x_dips < controls_l + 55.0 {
                         telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
-                        DirectClickOutcome::Handled
-                    } else if rel_x_dips < controls_l + 82.0 {
+                    } else if rel_x_dips >= controls_l + 56.0 && rel_x_dips < controls_l + 82.0 {
                         telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
-                        DirectClickOutcome::Handled
-                    } else {
-                        toggle_audio_mute();
-                        (self.audio_vol, self.audio_muted) = get_audio_state();
-                        self.tooltip_text = None;
-                        DirectClickOutcome::Handled
                     }
+                    DirectClickOutcome::Handled
                 }
             }
             "quicksettings" => {
@@ -5222,78 +5206,6 @@ impl WidgetRuntime {
                     _ => LiveOutcome::Update(self.live_spec("countdown", settings, is_dark)),
                 });
             }
-            // `MediaWidget` live flyout: seek anchor + per-app mixer (WS-E).
-            "media" => {
-                telemetry::refresh_media_session(&self.media_session, true);
-                let build = |runtime: &Self| {
-                    let snap = runtime.media_snapshot();
-                    let details =
-                        media_ext::get_details(&snap, runtime.audio_vol, runtime.audio_muted);
-                    let sessions = media_ext::list_app_sessions();
-                    let mut spec = media_ext::build_media_flyout(&details, &sessions, settings);
-                    spec.blocks.push(FlyoutBlock::Separator);
-                    spec.blocks.push(FlyoutBlock::ButtonBar(vec![(
-                        4,
-                        loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]),
-                        false,
-                    )]));
-                    spec
-                };
-                let init = build(self);
-                show_live!("media", init, |ev| match ev {
-                    LiveEvent::Click(btn @ 1..=3) => {
-                        let vk = match btn {
-                            1 => VK_MEDIA_PREV_TRACK,
-                            2 => VK_MEDIA_PLAY_PAUSE,
-                            _ => VK_MEDIA_NEXT_TRACK,
-                        };
-                        telemetry::send_media_vk(vk);
-                        telemetry::refresh_media_session(&self.media_session, true);
-                        LiveOutcome::Update(build(self))
-                    }
-                    LiveEvent::Click(4) => {
-                        pins::launch("ms-settings:sound".to_owned());
-                        LiveOutcome::Close
-                    }
-                    LiveEvent::Click(60) => {
-                        toggle_audio_mute();
-                        (self.audio_vol, self.audio_muted) = get_audio_state();
-                        LiveOutcome::Update(build(self))
-                    }
-                    // C2 LiveEvent::Seek — C4 `telemetry::media_seek(secs)`.
-                    LiveEvent::Seek { id: 50, ratio } => {
-                        let dur = self
-                            .media_session
-                            .lock()
-                            .ok()
-                            .map_or(0, |g| g.duration_secs);
-                        let target = media_ext::seek_position(ratio, dur);
-                        if telemetry::media_seek(target) {
-                            // Anchor locally at once; a stale SMTC echo of the old position
-                            // must not rewind the slider until the provider catches up.
-                            let now = self.now_secs();
-                            confirm_seek(&mut self.media_timeline, target as f64, now);
-                        }
-                        telemetry::refresh_media_session(&self.media_session, true);
-                        LiveOutcome::Update(build(self))
-                    }
-                    LiveEvent::Slider { id: 51, ratio } => {
-                        set_audio_volume((ratio * 100.0).round() as u32);
-                        (self.audio_vol, self.audio_muted) = get_audio_state();
-                        LiveOutcome::Update(build(self))
-                    }
-                    // Per-app mixer rows (ids 120..=131) from `media_ext::list_app_sessions`.
-                    LiveEvent::Click(id) if (120..132).contains(&id) && id % 2 == 0 => {
-                        toggle_app_mute(((id - 120) / 2) as usize);
-                        LiveOutcome::Update(build(self))
-                    }
-                    LiveEvent::Slider { id, ratio } if (121..132).contains(&id) && id % 2 == 1 => {
-                        set_app_vol(((id - 121) / 2) as usize, ratio);
-                        LiveOutcome::Update(build(self))
-                    }
-                    _ => LiveOutcome::Close,
-                });
-            }
             "quicksettings" => {
                 let mut settings_changed = false;
                 let build_qs_spec = |runtime: &Self, settings: &DockSettings| {
@@ -5583,7 +5495,11 @@ mod tests {
             assert_eq!(widget_has_flyout(&w.id.to_uppercase()), w.has_flyout);
         }
         for ai in telemetry::AI_PROVIDERS {
-            assert!(widget_has_flyout(ai.id), "{} should have a flyout", ai.id);
+            assert!(
+                !widget_has_flyout(ai.id),
+                "{} should not have a flyout",
+                ai.id
+            );
         }
         assert!(widget_has_flyout("CUSTOM:demo"));
         for disabled in ["battery", "unknown"] {
@@ -5971,10 +5887,10 @@ mod tests {
                 "{id} should open its flyout on direct click"
             );
         }
-        // Media title area opens flyout; QuickSettings 4th zone opens Control Center flyout.
+        // Media body is inert; QuickSettings 4th zone opens Control Center flyout.
         assert_eq!(
             runtime.handle_direct_click("media", 20.0, 244.0, &mut settings),
-            DirectClickOutcome::OpenFlyout
+            DirectClickOutcome::Handled
         );
         assert_eq!(
             runtime.handle_direct_click("quicksettings", 120.0, 138.0, &mut settings),

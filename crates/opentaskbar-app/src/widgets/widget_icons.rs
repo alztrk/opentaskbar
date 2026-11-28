@@ -253,6 +253,26 @@ pub fn load_bgra(path: &Path) -> Option<Arc<(u32, u32, Vec<u8>)>> {
     Some(decoded)
 }
 
+/// Decodes in-memory artwork into premultiplied BGRA32 pixels for Direct2D.
+pub fn decode_bgra_bytes(bytes: &[u8]) -> Option<Arc<(u32, u32, Vec<u8>)>> {
+    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 || w > MAX_ICON_DIMENSION || h > MAX_ICON_DIMENSION {
+        return None;
+    }
+    let mut bgra = Vec::with_capacity(w as usize * h as usize * 4);
+    for pixel in image.pixels() {
+        let [r, g, b, a] = pixel.0;
+        bgra.extend_from_slice(&[
+            (u16::from(b) * u16::from(a) / 255) as u8,
+            (u16::from(g) * u16::from(a) / 255) as u8,
+            (u16::from(r) * u16::from(a) / 255) as u8,
+            a,
+        ]);
+    }
+    Some(Arc::new((w, h, bgra)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

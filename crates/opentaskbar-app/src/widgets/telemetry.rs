@@ -155,6 +155,7 @@ pub struct MediaSessionSnapshot {
     pub playing: bool,
     pub position_secs: u64,
     pub duration_secs: u64,
+    pub cover_pixels: Option<Arc<(u32, u32, Vec<u8>)>>,
     pub fetched_at: Option<Instant>,
     pub in_flight: bool,
 }
@@ -183,13 +184,15 @@ pub fn refresh_media_session(cache: &Arc<Mutex<MediaSessionSnapshot>>, force: bo
         .spawn(move || {
             let next = query_smtc_session();
             if let Ok(mut guard) = cache_clone.lock() {
-                if let Some((title, artist, source_app_id, playing, pos, dur)) = next {
+                if let Some((title, artist, source_app_id, playing, pos, dur, cover_pixels)) = next
+                {
                     guard.title = title;
                     guard.artist = artist;
                     guard.source_app_id = source_app_id.clone();
                     guard.playing = playing;
                     guard.position_secs = pos;
                     guard.duration_secs = dur;
+                    guard.cover_pixels = cover_pixels;
                     // LibreWolf often publishes a frozen SMTC timeline. The real UIA reader is
                     // the authoritative source for its progress bar (WS-6 contract).
                     if !guard.title.is_empty()
@@ -206,6 +209,7 @@ pub fn refresh_media_session(cache: &Arc<Mutex<MediaSessionSnapshot>>, force: bo
                     guard.playing = false;
                     guard.position_secs = 0;
                     guard.duration_secs = 0;
+                    guard.cover_pixels = None;
                 }
                 guard.fetched_at = Some(Instant::now());
                 guard.in_flight = false;
@@ -214,7 +218,18 @@ pub fn refresh_media_session(cache: &Arc<Mutex<MediaSessionSnapshot>>, force: bo
         .ok();
 }
 
-fn query_smtc_session() -> Option<(String, String, String, bool, u64, u64)> {
+type SmtcCoverPixels = Arc<(u32, u32, Vec<u8>)>;
+type SmtcSessionTuple = (
+    String,
+    String,
+    String,
+    bool,
+    u64,
+    u64,
+    Option<SmtcCoverPixels>,
+);
+
+fn query_smtc_session() -> Option<SmtcSessionTuple> {
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSessionManager,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus,
@@ -230,6 +245,23 @@ fn query_smtc_session() -> Option<(String, String, String, bool, u64, u64)> {
     if title.is_empty() && artist.is_empty() {
         return None;
     }
+    let cover_pixels = props
+        .Thumbnail()
+        .ok()
+        .and_then(|reference| reference.OpenReadAsync().ok()?.join().ok())
+        .and_then(|stream| {
+            use windows::Storage::Streams::DataReader;
+            let size = stream.Size().ok()?;
+            if size == 0 || size > 5 * 1024 * 1024 {
+                return None;
+            }
+            let input = stream.GetInputStreamAt(0).ok()?;
+            let reader = DataReader::CreateDataReader(&input).ok()?;
+            reader.LoadAsync(size as u32).ok()?.join().ok()?;
+            let mut bytes = vec![0; size as usize];
+            reader.ReadBytes(&mut bytes).ok()?;
+            super::widget_icons::decode_bgra_bytes(&bytes)
+        });
     let source_app_id = session
         .SourceAppUserModelId()
         .map(|s| s.to_string())
@@ -254,7 +286,15 @@ fn query_smtc_session() -> Option<(String, String, String, bool, u64, u64)> {
             (pos.min(end), end)
         })
         .unwrap_or((0, 0));
-    Some((title, artist, source_app_id, playing, pos_secs, dur_secs))
+    Some((
+        title,
+        artist,
+        source_app_id,
+        playing,
+        pos_secs,
+        dur_secs,
+        cover_pixels,
+    ))
 }
 
 fn ft_to_u64(ft: FILETIME) -> u64 {

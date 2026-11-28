@@ -3400,24 +3400,30 @@ mod tests {
         }
         for id in [
             "stats",
-            "keyboard",
             "quicksettings",
-            "aiusage_claude",
-            "aiusage_codex",
-            "aiusage_opencode",
-            "aiusage_copilot",
-            "aiusage_deepseek",
-            "aiusage_openrouter",
-            "aiusage_cursor",
-            "aiusage_all",
+            "clock",
+            "weather",
+            "audio",
             // Legacy PascalCase spellings resolve to the same widget.
             "SystemStats",
-            "KeyboardLayout",
-            "AiUsageClaude",
+            "QuickSettings",
             "custom:demo",
             "Custom:Other",
         ] {
             assert!(has_real_widget_flyout(id), "{id} must open its flyout");
+        }
+        for id in [
+            "keyboard",
+            "KeyboardLayout",
+            "media",
+            "aiusage_claude",
+            "AiUsageClaude",
+            "aiusage_all",
+        ] {
+            assert!(
+                !has_real_widget_flyout(id),
+                "{id} must not open a flyout after inline-only update"
+            );
         }
         assert!(!has_real_widget_flyout(""));
         assert!(!has_real_widget_flyout("custom:"));

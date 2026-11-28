@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use opentaskbar_core::dynamic_island::geometry as island_geo;
 use opentaskbar_core::i18n as loc;
@@ -106,6 +106,7 @@ struct ThemedChipCard {
 struct ChipCardStyle {
     chrome: ChipChrome,
     themed: Option<ThemedChipCard>,
+    surface: design::theme::SurfaceStyle,
 }
 
 impl ChipCardStyle {
@@ -127,7 +128,11 @@ impl ChipCardStyle {
         } else {
             None
         };
-        Self { chrome, themed }
+        Self {
+            chrome,
+            themed,
+            surface: design::theme::ThemeManager::get_surface(design::theme::SurfaceKind::Widget),
+        }
     }
 }
 
@@ -253,12 +258,8 @@ pub enum WidgetChipSpec {
     },
     /// `StorageWidget.cs`: `"C: 213 / 476 GB | D: 1.2 / 1.8 TB"` (clean typographic, no bars)
     Storage { drives: Vec<(String, String)> },
-    /// `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next] [Volume]`
-    Media {
-        title: String,
-        artist: String,
-        muted: bool,
-    },
+    /// `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next]`
+    Media { title: String, artist: String },
     /// `AudioWidget.xaml`: `[Speaker 16px] [12.5px SemiBold 67%]` (scroll adjusts, click opens mixer)
     Audio { volume: u32, muted: bool },
     /// `QuickSettingsWidget.xaml`: 3 compact `27x27` toggle pills (`Wi-Fi`, `Bluetooth`, `Night Light/Focus`)
@@ -335,11 +336,14 @@ impl WidgetChipSpec {
                 let hint = crate::widgets::chip_media_hint();
                 let _ = write!(
                     out,
-                    "|m={}:{}:{}:{}",
+                    "|m={}:{}:{}:{}:{}",
                     hint.playing,
                     (hint.progress * 100.0).round() as u32,
                     hint.has_media,
-                    hint.cover_path.as_deref().unwrap_or("")
+                    hint.cover_path.as_deref().unwrap_or(""),
+                    hint.cover_pixels
+                        .as_ref()
+                        .map_or(0, |pixels| Arc::as_ptr(pixels) as usize)
                 );
             }
             Self::Storage { drives } => {
@@ -455,21 +459,9 @@ impl WidgetChipSpec {
                 .iter()
                 .map(|(name, usage)| line(name, usage.clone()))
                 .collect(),
-            Self::Media {
-                title,
-                artist,
-                muted,
-            } => vec![
+            Self::Media { title, artist } => vec![
                 line("WidgetDetailTitle", title.clone()),
                 line("WidgetDetailArtist", artist.clone()),
-                line(
-                    "LauncherSound",
-                    if *muted {
-                        loc::t("WidgetDetailMuted")
-                    } else {
-                        loc::t("WidgetDetailOn")
-                    },
-                ),
             ],
             Self::Audio { volume, muted } => vec![
                 line("Volume", crate::widgets::format_percent(*volume)),
@@ -2404,24 +2396,17 @@ impl DcompEngine {
                             }
                             let used_ratio = crate::widgets::chip_storage_ratio(letter);
                             let bar_col = match used_ratio {
-                                Some(r) if r >= 0.95 => pal.danger,
-                                Some(r) if r >= 0.85 => pal.warning,
+                                Some(r) if r >= 0.90 => pal.danger,
+                                Some(r) if r >= 0.75 => pal.warning,
                                 _ => pal.accent,
                             };
-                            draw_glyph(
-                                "\u{EDA2}",
-                                rect(sx, cy - 8.5, sx + 14.0, cy + 5.5),
-                                12.5,
-                                if used_ratio.is_some_and(|r| r >= 0.85) { bar_col } else { pal.text_secondary },
-                                0.92,
-                            )?;
-                            let tx = sx + 16.0;
-                            let top_label = match used_ratio {
-                                Some(r) => format!("{letter} {}", crate::widgets::format_percent((r * 100.0).round() as u32)),
-                                None => letter.clone(),
-                            };
-                            draw_text(&top_label, &fmt_10_b_l, rect(tx, 3.0, sx + seg_w, 15.0), &p_brush);
-                            draw_text(pair, &fmt_10_l, rect(tx, 14.0, sx + seg_w, bar_y - 1.0), &s_brush);
+                            let percent_label = used_ratio.map_or_else(
+                                || "—".to_owned(),
+                                |r| crate::widgets::format_percent((r * 100.0).round() as u32),
+                            );
+                            draw_text(letter, &fmt_11_b_l, rect(sx, 3.0, sx + (seg_w * 0.55), 16.0), &p_brush);
+                            draw_text(&percent_label, &fmt_11_b_r, rect(sx + (seg_w * 0.45), 3.0, sx + seg_w, 16.0), &s_brush);
+                            draw_text(pair, &fmt_10_l, rect(sx, 15.0, sx + seg_w, bar_y - 1.0), &s_brush);
                             if let Some(ratio) = used_ratio {
                                 draw_bar(dc, sx, bar_y, seg_w, 2.0, 1.0, ratio, 1.5, &tr_brush, bar_col, 0.95)?;
                             }
@@ -2431,7 +2416,6 @@ impl DcompEngine {
                 WidgetChipSpec::Media {
                     title,
                     artist,
-                    muted,
                 } => {
                     draw_card(border_rgb)?;
                     let hint = crate::widgets::chip_media_hint();
@@ -2439,11 +2423,13 @@ impl DcompEngine {
                     let art_y = cy - art_sz * 0.5;
                     let art_rect = rect(7.0, art_y, 7.0 + art_sz, art_y + art_sz);
                     let art_rr = D2D1_ROUNDED_RECT { rect: art_rect, radiusX: 7.0, radiusY: 7.0 };
-                    let mut drew_cover = false;
-                    if let Some(ref path) = hint.cover_path
-                        && let Some(decoded) =
+                    let decoded_cover = hint.cover_pixels.clone().or_else(|| {
+                        hint.cover_path.as_ref().and_then(|path| {
                             crate::widgets::widget_icons::load_bgra(std::path::Path::new(path))
-                    {
+                        })
+                    });
+                    let mut drew_cover = false;
+                    if let Some(decoded) = decoded_cover {
                         let (bw, bh, pixels) = &*decoded;
                         let props = D2D1_BITMAP_PROPERTIES1 {
                             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -2498,7 +2484,6 @@ impl DcompEngine {
                             &[(0.0, g0), (1.0, g1)],
                         )?;
                         dc.FillRoundedRectangle(&art_rr, &grad);
-                        draw_glyph("\u{E8D6}", art_rect, 13.5, (0xff, 0xff, 0xff), 0.94)?;
                     }
 
                     let info_l = 7.0 + art_sz + 8.0;
@@ -2518,7 +2503,7 @@ impl DcompEngine {
                         draw_text(title, idle_fmt, rect(info_l, 0.0, play_x - 6.0, height_dips), &s_brush);
                         let play_rect = rect(play_x, by, play_x + play_w, by + bh);
                         let play_rr = D2D1_ROUNDED_RECT { rect: play_rect, radiusX: 7.0, radiusY: 7.0 };
-                        let play_hov = active_sub == Some(3);
+                        let play_hov = matches!(active_sub, Some(2 | 3));
                         if play_hov {
                             let hb = dc.CreateSolidColorBrush(
                                 &if is_dark { color_rgba(0xff, 0xff, 0xff, 0.16) } else { color_rgba(0x00, 0x00, 0x00, 0.11) },
@@ -2536,7 +2521,7 @@ impl DcompEngine {
                             0.90,
                         )?;
                     } else {
-                        let controls_l = (width_dips - 114.0).max(info_l + 24.0);
+                        let controls_l = (width_dips - 88.0).max(info_l + 24.0);
                         let mid = height_dips * 0.50;
                         if artist.is_empty() {
                             draw_text(title, &fmt_11_b_l, rect(info_l, 0.0, controls_l - 4.0, height_dips), &p_brush);
@@ -2545,12 +2530,12 @@ impl DcompEngine {
                             draw_text(artist, &fmt_10_l, rect(info_l, mid - 0.5, controls_l - 4.0, (mid + 12.5).min(height_dips - 4.0)), &s_brush);
                         }
 
+                        // 3 sub-buttons: 0=Prev, 1=Play/Pause (dynamic glyph), 2=Next
                         let play_glyph = if hint.playing { "\u{E769}" } else { "\u{E768}" };
-                        let btns: [(f32, f32, &str, bool); 4] = [
+                        let btns: [(f32, f32, &str, bool); 3] = [
                             (controls_l, 25.0, "\u{E892}", false),
                             (controls_l + 27.0, 27.0, play_glyph, true),
                             (controls_l + 56.0, 25.0, "\u{E893}", false),
-                            (controls_l + 83.0, 25.0, if *muted { "\u{E74F}" } else { "\u{E767}" }, true),
                         ];
                         for (i, (bx, bw, glyph, has_base_bg)) in btns.iter().enumerate() {
                             let brc = rect(*bx, by, bx + bw, by + bh);
@@ -2569,12 +2554,10 @@ impl DcompEngine {
                             }
                             let glyph_col = if i == 1 && hint.playing {
                                 pal.selected_fg
-                            } else if i == 3 && *muted {
-                                pal.danger
                             } else {
                                 pal.text_primary
                             };
-                            draw_glyph(glyph, brc, if i == 1 || i == 3 { 12.0 } else { 10.5 }, glyph_col, 0.95)?;
+                            draw_glyph(glyph, brc, if i == 1 { 12.0 } else { 10.5 }, glyph_col, 0.95)?;
                         }
                         if hint.progress > 0.005 {
                             draw_chip_ratio(hint.progress, pal.accent)?;
@@ -2735,21 +2718,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::Keyboard { code } => {
                     draw_card(border_rgb)?;
-                    let cap_w = (width_dips - 16.0).clamp(28.0, 42.0);
-                    let cap_h = (height_dips - 14.0).clamp(20.0, 26.0);
-                    let cap_rect = rect((width_dips - cap_w) * 0.5, cy - cap_h * 0.5, (width_dips + cap_w) * 0.5, cy + cap_h * 0.5);
-                    let cap_rr = D2D1_ROUNDED_RECT { rect: cap_rect, radiusX: 6.0, radiusY: 6.0 };
-                    let cap_fill = dc.CreateSolidColorBrush(
-                        &if is_dark { color_rgba(0xff, 0xff, 0xff, 0.09) } else { color_rgba(0xff, 0xff, 0xff, 0.65) },
-                        None,
-                    )?;
-                    let cap_bd = dc.CreateSolidColorBrush(
-                        &if is_dark { color_rgba(0xff, 0xff, 0xff, 0.20) } else { color_rgba(0x18, 0x18, 0x1b, 0.16) },
-                        None,
-                    )?;
-                    dc.FillRoundedRectangle(&cap_rr, &cap_fill);
-                    dc.DrawRoundedRectangle(&cap_rr, &cap_bd, 1.0, None);
-                    draw_text(code, &fmt_11_b_c, cap_rect, &p_brush);
+                    draw_text(code, &fmt_11_b_c, rect(0.0, 0.0, width_dips, height_dips), &p_brush);
                 }
                 WidgetChipSpec::AiDual {
                     provider_id,
@@ -3579,6 +3548,51 @@ unsafe fn draw_chip_card(
         return Ok(());
     }
 
+    if style.surface.background == opentaskbar_core::settings::SurfaceBackground::None
+        && matches!(interaction, WidgetInteraction::Idle)
+        && border_rgb.is_none()
+    {
+        return Ok(());
+    }
+
+    if matches!(
+        style.surface.background,
+        opentaskbar_core::settings::SurfaceBackground::Solid
+            | opentaskbar_core::settings::SurfaceBackground::TrueBlack
+    ) {
+        let true_black =
+            style.surface.background == opentaskbar_core::settings::SurfaceBackground::TrueBlack;
+        let alpha = if true_black {
+            1.0
+        } else {
+            style.surface.opacity as f32
+        };
+        let (r, g, b) = if true_black {
+            (0, 0, 0)
+        } else if is_dark {
+            (24, 24, 27)
+        } else {
+            (255, 255, 255)
+        };
+        unsafe {
+            let brush = dc.CreateSolidColorBrush(&color_rgba(r, g, b, alpha), None)?;
+            dc.FillRoundedRectangle(&rounded(island_geo::CHIP_RADIUS_DIPS, 0.0), &brush);
+            if let Some(rgb) = border_rgb
+                && border_width_dips > 0.0
+            {
+                let border =
+                    dc.CreateSolidColorBrush(&color_rgba(rgb.0, rgb.1, rgb.2, 0.85), None)?;
+                dc.DrawRoundedRectangle(
+                    &rounded(island_geo::CHIP_RADIUS_DIPS, border_width_dips * 0.5),
+                    &border,
+                    border_width_dips,
+                    None,
+                );
+            }
+        }
+        return Ok(());
+    }
+
     // Theme pack / editor overrides: tint the card from `ThemeManager` tokens.
     if let Some(theme) = style.themed {
         let radius = theme
@@ -3595,12 +3609,15 @@ unsafe fn draw_chip_card(
         };
         unsafe {
             if let Some(fill) = theme.fill {
-                let brush = dc.CreateSolidColorBrush(&solid(fill, 1.0), None)?;
+                let brush =
+                    dc.CreateSolidColorBrush(&solid(fill, style.surface.opacity as f32), None)?;
                 dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
             } else {
                 let base_alpha = if is_dark { 0.08 } else { 0.06 };
-                let brush =
-                    dc.CreateSolidColorBrush(&color_rgba(ink, ink, ink, base_alpha), None)?;
+                let brush = dc.CreateSolidColorBrush(
+                    &color_rgba(ink, ink, ink, base_alpha * style.surface.opacity as f32),
+                    None,
+                )?;
                 dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
             }
             let overlay = match interaction {
@@ -3651,8 +3668,11 @@ unsafe fn draw_chip_card(
                 (0.0, 0.0),
                 (0.0, height_dips),
                 &[
-                    (0.0, color_rgba(c, c, c, top)),
-                    (1.0, color_rgba(c, c, c, bottom)),
+                    (0.0, color_rgba(c, c, c, top * style.surface.opacity as f32)),
+                    (
+                        1.0,
+                        color_rgba(c, c, c, bottom * style.surface.opacity as f32),
+                    ),
                 ],
             )
         }
@@ -4380,12 +4400,12 @@ mod tests {
         let media = WidgetChipSpec::Media {
             title: "Track".to_owned(),
             artist: "Artist".to_owned(),
-            muted: false,
         };
         crate::widgets::set_chip_media_hint(crate::widgets::MediaChipHint {
             playing: false,
             progress: 0.1,
             cover_path: None,
+            cover_pixels: None,
             has_media: true,
         });
         let mut k1 = String::new();
@@ -4395,6 +4415,7 @@ mod tests {
             playing: true,
             progress: 0.6,
             cover_path: None,
+            cover_pixels: None,
             has_media: true,
         });
         let mut k2 = String::new();

@@ -48,7 +48,7 @@ use crate::design::theme::{
 };
 use crate::design::tokens::{EDITOR_TOKENS, Rgba as TokenRgba, TokenKind};
 use crate::design::widget_pack::WidgetPackManifest;
-use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec, WidgetIcon};
+use crate::dock::dcomp::{WidgetChipSpec, WidgetIcon};
 use crate::platform::cursor_auth;
 use crate::platform::theme_packs::{self, ThemePackManifest, ThemePreviewSwatches};
 use crate::platform::{country_city, pins, startup_registration, toast, update, win32};
@@ -81,7 +81,7 @@ const FOCUS_BREAK_MINUTES_MAX: i32 = 30;
 const FOCUS_SESSIONS_MAX: i32 = 8;
 
 actions!(settings_navigation, [TabNext, TabPrevious]);
-actions!(settings_panels, [CloseWidgetPanel, ToggleFlyoutPreview]);
+actions!(settings_panels, [CloseWidgetPanel]);
 
 fn set_border_thickness(settings: &mut DockSettings, surface: usize, value: f64) {
     let value = value.clamp(0.0, 8.0);
@@ -1714,6 +1714,7 @@ struct SettingsView {
     /// timer flushes to disk + broadcasts reload.
     save_pending: bool,
     save_generation: u64,
+    saved_widget_state: (Vec<String>, Vec<String>, bool, bool, bool),
     update_status: String,
     update_release: Option<update::Release>,
     // Search (reference SettingsWindow.Search.cs parity)
@@ -1842,6 +1843,13 @@ impl SettingsView {
             String::new()
         };
         let initial_theme_name_len = initial_theme_name.encode_utf16().count();
+        let saved_widget_state = (
+            settings.enabled_widgets.clone(),
+            settings.installed_widgets.clone(),
+            settings.show_clock_widget,
+            settings.show_system_stats_widget,
+            settings.show_media,
+        );
         let mut view = Self {
             page: SettingsPage::Dock,
             focus,
@@ -1875,6 +1883,7 @@ impl SettingsView {
             theme_status: String::new(),
             save_pending: false,
             save_generation: 0,
+            saved_widget_state,
             update_status: String::new(),
             update_release: None,
             widget_panel: None,
@@ -2875,6 +2884,22 @@ impl SettingsView {
     }
 
     fn auto_save(&mut self, cx: &mut Context<Self>) {
+        let current_widget_state = (
+            self.settings.enabled_widgets.clone(),
+            self.settings.installed_widgets.clone(),
+            self.settings.show_clock_widget,
+            self.settings.show_system_stats_widget,
+            self.settings.show_media,
+        );
+        if current_widget_state == self.saved_widget_state
+            && let Ok(saved) = settings::try_load_from(&settings::settings_path())
+        {
+            self.settings.enabled_widgets = saved.enabled_widgets;
+            self.settings.installed_widgets = saved.installed_widgets;
+            self.settings.show_clock_widget = saved.show_clock_widget;
+            self.settings.show_system_stats_widget = saved.show_system_stats_widget;
+            self.settings.show_media = saved.show_media;
+        }
         self.widget_runtime.tick(&self.settings);
         self.save_pending = true;
         self.save_generation = self.save_generation.wrapping_add(1);
@@ -2967,7 +2992,6 @@ impl SettingsView {
     ) -> Option<AnyElement> {
         let id = self.widget_panel?;
         let accent = t.accent;
-        let hover = t.surface_hover;
         Some(
             div()
                 .id("widget-panel-host")
@@ -3019,30 +3043,6 @@ impl SettingsView {
                                 .text_size(px(fonts::scaled_size(12.0)))
                                 .text_color(rgba(t.text_secondary))
                                 .child(loc::t("WidgetPanelHint")),
-                        )
-                        .child(
-                            div()
-                                .id("panel-hover-region")
-                                .w_full()
-                                .h(px(64.0))
-                                .rounded(px(10.0))
-                                .bg(rgba(hover))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, _| {
-                                    this.preview_flyout(
-                                        this.widget_panel.unwrap_or("widget"),
-                                        Self::window_hwnd(window),
-                                    );
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(12.0)))
-                                        .text_color(rgba(t.text_primary))
-                                        .child(loc::t("WidgetPreviewFlyout")),
-                                ),
                         ),
                 )
                 .into_any_element(),
@@ -3697,144 +3697,6 @@ impl SettingsView {
         }
     }
 
-    fn render_theme_studio_preview(&self, t: &UiTheme, is_dark: bool) -> AnyElement {
-        let pal = crate::design::active_palette(is_dark);
-        let backdrop_top = if is_dark { 0x1018_28ff } else { 0xdbeafeff };
-        let backdrop_bot = if is_dark { 0x1e29_3bff } else { 0xe0e7_ffff };
-        let dock_alpha: u8 = match self.settings.dock_background {
-            SurfaceBackground::None => 0x18,
-            SurfaceBackground::TrueBlack | SurfaceBackground::Solid => 0xff,
-            SurfaceBackground::Glass => {
-                ((self.settings.dock_opacity.clamp(0.2, 1.0) * 215.0).round() as u8).max(0x38)
-            }
-        };
-        let dock_bg = match self.settings.dock_background {
-            SurfaceBackground::TrueBlack => 0x0000_00ff,
-            _ => crate::design::gpui_rgba(pal.dock_pill, dock_alpha),
-        };
-        let dock_border = self
-            .settings
-            .dock_border_color
-            .as_deref()
-            .and_then(parse_hex_color)
-            .unwrap_or_else(|| crate::design::gpui_rgba(pal.border_rgb, 0xcc));
-        let dock_radius = self.settings.dock_corner_radius.unwrap_or(14).clamp(0, 22) as f32;
-        let dock_border_w = self.settings.dock_border_thickness.clamp(0.0, 3.0) as f32;
-
-        div()
-            .w_full()
-            .h(px(120.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(rgba(t.border))
-            .bg(rgba(backdrop_top))
-            .overflow_hidden()
-            .relative()
-            .flex()
-            .flex_col()
-            .justify_between()
-            .p(px(12.0))
-            .child(
-                // Mini Settings Card preview
-                div()
-                    .w(px(230.0))
-                    .px(px(10.0))
-                    .py(px(7.0))
-                    .rounded(px(9.0))
-                    .bg(rgba(t.surface))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.text_primary))
-                                    .child(loc::t("SettingsTitle")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(9.0))
-                                    .text_color(rgba(t.text_secondary))
-                                    .child(loc::t("ThemeStudioSubtitle")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(5.0))
-                            .bg(rgba(t.accent))
-                            .text_size(px(9.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.accent_fg))
-                            .child(loc::t("Apply")),
-                    ),
-            )
-            .child(
-                // Mini Dock pill + widget chip preview
-                div().w_full().flex().justify_center().child(
-                    div()
-                        .h(px(34.0))
-                        .px(px(10.0))
-                        .rounded(px(dock_radius))
-                        .bg(rgba(dock_bg))
-                        .when(dock_border_w > 0.0, |pill| {
-                            pill.border(px(dock_border_w))
-                                .border_color(rgba(dock_border))
-                        })
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(div().size(px(16.0)).rounded(px(4.0)).bg(rgba(t.accent)))
-                        .child(div().size(px(16.0)).rounded(px(4.0)).bg(rgba(backdrop_bot)))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .size(px(16.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgba(t.surface_muted)),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(8.0))
-                                        .h(px(2.0))
-                                        .rounded(px(1.0))
-                                        .bg(rgba(t.accent)),
-                                ),
-                        )
-                        .child(div().w(px(1.0)).h(px(16.0)).bg(rgba(t.separator)))
-                        .child(
-                            div()
-                                .px(px(7.0))
-                                .py(px(3.0))
-                                .rounded(px(6.0))
-                                .bg(rgba(t.surface))
-                                .border_1()
-                                .border_color(rgba(t.border))
-                                .text_size(px(9.5))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgba(t.text_primary))
-                                .child("14:32 · 21°C"),
-                        ),
-                ),
-            )
-            .into_any_element()
-    }
-
     fn render_theme_studio(
         &self,
         t: &UiTheme,
@@ -3860,8 +3722,7 @@ impl SettingsView {
                             .text_size(px(fonts::scaled_size(12.0)))
                             .text_color(rgba(t.text_secondary))
                             .child(loc::t("ThemeStudioSubtitle")),
-                    )
-                    .child(self.render_theme_studio_preview(t, is_dark)),
+                    ),
             )
             .into_any_element(),
         );
@@ -3956,6 +3817,7 @@ impl SettingsView {
                 div()
                     .id(SharedString::from(format!("studio-accent-{slug}")))
                     .size(px(24.0))
+                    .flex_shrink_0()
                     .rounded(px(12.0))
                     .bg(rgba(color_u32))
                     .border_2()
@@ -3968,7 +3830,28 @@ impl SettingsView {
             );
         }
         body.push(
-            setting_row(t, Some("\u{E790}"), loc::t("ColorSwatchAccent"), swatch_bar)
+            div()
+                .w_full()
+                .px(px(16.0))
+                .py(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon_glyph("\u{E790}", 14.0, t.text_secondary))
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(13.0)))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgba(t.text_primary))
+                                .child(loc::t("ColorSwatchAccent")),
+                        ),
+                )
+                .child(swatch_bar)
                 .into_any_element(),
         );
 
@@ -5100,205 +4983,41 @@ impl SettingsView {
     fn render_widget_preview(&self, id: &str, t: &UiTheme, is_dark: bool) -> AnyElement {
         let pal = crate::design::palette(is_dark);
         let c_rgba = |c: (u8, u8, u8), a: u8| rgba(crate::design::gpui_rgba(c, a));
-        let chip_bg = if is_dark { 0xffffff10 } else { 0x00000008 };
+        let widget_surface = ThemeManager::get_surface(SurfaceKind::Widget);
+        let chip_height =
+            crate::design::widget_height_dips(settings::effective_height(&self.settings));
+        let chip_width = self
+            .widget_runtime
+            .widget_width_dips_with_settings(id, &self.settings)
+            .max(76.0);
+        let opacity = (widget_surface.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let glass_alpha = ((0x10u16 * u16::from(opacity)) / 255) as u8;
+        let chip_bg = match widget_surface.background {
+            SurfaceBackground::None => 0x00000000,
+            SurfaceBackground::TrueBlack => 0x000000ff,
+            SurfaceBackground::Solid if is_dark => crate::design::gpui_rgba((24, 24, 27), opacity),
+            SurfaceBackground::Solid => crate::design::gpui_rgba((255, 255, 255), opacity),
+            SurfaceBackground::Glass if is_dark => {
+                crate::design::gpui_rgba((255, 255, 255), glass_alpha)
+            }
+            SurfaceBackground::Glass => crate::design::gpui_rgba((0, 0, 0), glass_alpha / 2),
+        };
         let chip_bd = if is_dark { 0xffffff1c } else { 0x00000016 };
         let track_bg = if is_dark { 0xffffff1f } else { 0x00000018 };
-        let spec = match id {
-            "weather" => {
-                let (temp, range) = match self.settings.weather_unit {
-                    TemperatureUnit::Celsius => ("21°C", "24°C / 16°C"),
-                    TemperatureUnit::Fahrenheit => ("70°F", "75°F / 61°F"),
-                };
-                WidgetChipSpec::Weather {
-                    available: true,
-                    icon_color: pal.warning,
-                    is_rain: false,
-                    temp: temp.to_owned(),
-                    place: if self.settings.weather_city.is_empty() {
-                        weather_fallback_city().to_owned()
-                    } else {
-                        self.settings.weather_city.clone()
-                    },
-                    condition: loc::t("WeatherClear"),
-                    today_range: Some(range.to_owned()),
-                }
-            }
-            "stats" => {
-                let mut cols = Vec::with_capacity(4);
-                if self.settings.stats_meters & 1 != 0 {
-                    cols.push(SystemStatColumn {
-                        label: "CPU".to_owned(),
-                        value_text: "24%".to_owned(),
-                        ratio: 0.24,
-                        bar_color: pal.widget_blue,
-                        warm_text: false,
-                    });
-                }
-                if self.settings.stats_meters & 2 != 0 {
-                    cols.push(SystemStatColumn {
-                        label: "RAM".to_owned(),
-                        value_text: "58%".to_owned(),
-                        ratio: 0.58,
-                        bar_color: pal.widget_accent,
-                        warm_text: false,
-                    });
-                }
-                if self.settings.stats_meters & 16 != 0 {
-                    cols.push(SystemStatColumn {
-                        label: "GPU".to_owned(),
-                        value_text: "38%".to_owned(),
-                        ratio: 0.38,
-                        bar_color: pal.success,
-                        warm_text: false,
-                    });
-                }
-                if self.settings.stats_meters & 32 != 0 {
-                    let (lbl, val) = match self.settings.weather_unit {
-                        TemperatureUnit::Celsius => ("GPU °C", "64°C"),
-                        TemperatureUnit::Fahrenheit => ("GPU °F", "147°F"),
-                    };
-                    cols.push(SystemStatColumn {
-                        label: lbl.to_owned(),
-                        value_text: val.to_owned(),
-                        ratio: 0.64,
-                        bar_color: pal.warning,
-                        warm_text: true,
-                    });
-                }
-                WidgetChipSpec::SystemStats { columns: cols }
-            }
-            "netspeed" => WidgetChipSpec::NetSpeed {
-                down: "18.4 MB/s".to_owned(),
-                up: "3.2 MB/s".to_owned(),
-                down_history: vec![0.34, 0.48, 0.40, 0.62, 0.54, 0.73, 0.68, 0.80, 0.74, 0.78],
-                up_history: vec![0.14, 0.22, 0.18, 0.28, 0.24, 0.32, 0.29, 0.36, 0.31, 0.33],
-            },
-            "battery" => WidgetChipSpec::BatteryLiquid {
-                present: true,
-                percent: 84,
-                charging: true,
-                wave_phase: 0.35,
-            },
-            "bluetoothbattery" => WidgetChipSpec::Bluetooth {
-                devices: vec![
-                    (
-                        widgets::telemetry::BluetoothDeviceKind::Headphones,
-                        85,
-                        false,
-                        false,
-                    ),
-                    (
-                        widgets::telemetry::BluetoothDeviceKind::Mouse,
-                        64,
-                        false,
-                        false,
-                    ),
-                ],
-            },
-            "media" => WidgetChipSpec::Media {
-                title: "Midnight City".to_owned(),
-                artist: "M83".to_owned(),
-                muted: false,
-            },
-            "audio" => WidgetChipSpec::Audio {
-                volume: 68,
-                muted: false,
-            },
-            "stopwatch" => WidgetChipSpec::Timed {
-                is_focus: false,
-                running: true,
-                text: "04:18".to_owned(),
-            },
-            "countdown" => WidgetChipSpec::Timed {
-                is_focus: false,
-                running: false,
-                text: "12:30".to_owned(),
-            },
-            "focus" => WidgetChipSpec::Timed {
-                is_focus: true,
-                running: true,
-                text: "21:45".to_owned(),
-            },
-            "aiusage_claude" => WidgetChipSpec::AiDual {
-                provider_id: "aiusage_claude",
-                brand_color: Some((0xd9, 0x77, 0x57)),
-                rows: vec![
-                    ("5h".to_owned(), 0.42, pal.widget_accent, "2h".to_owned()),
-                    ("7d".to_owned(), 0.68, pal.widget_accent, "4d".to_owned()),
-                ],
-            },
-            "aiusage_codex" => WidgetChipSpec::AiDual {
-                provider_id: "aiusage_codex",
-                brand_color: Some((0x8d, 0x99, 0xff)),
-                rows: vec![
-                    ("5h".to_owned(), 0.28, pal.widget_accent, "3h".to_owned()),
-                    ("7d".to_owned(), 0.54, pal.widget_accent, "5d".to_owned()),
-                ],
-            },
-            "aiusage_cursor" => WidgetChipSpec::AiDual {
-                provider_id: "aiusage_cursor",
-                brand_color: None,
-                rows: vec![("30d".to_owned(), 0.61, pal.widget_accent, "12d".to_owned())],
-            },
-            "aiusage_opencode" => WidgetChipSpec::AiOpenCode {
-                columns: vec![
-                    (
-                        "1h".to_owned(),
-                        widgets::format_percent(18),
-                        0.18,
-                        pal.success,
-                        "42m".to_owned(),
-                    ),
-                    (
-                        "7d".to_owned(),
-                        widgets::format_percent(49),
-                        0.49,
-                        pal.success,
-                        "3d".to_owned(),
-                    ),
-                    (
-                        "30d".to_owned(),
-                        widgets::format_percent(64),
-                        0.64,
-                        pal.success,
-                        "11d".to_owned(),
-                    ),
-                ],
-            },
-            "aiusage_copilot" => {
-                let is_tr = loc::language().to_ascii_lowercase().starts_with("tr");
-                let days = if is_tr { "14g" } else { "14d" };
-                WidgetChipSpec::AiCopilot {
-                    value_text: widgets::format_percent(36),
-                    meta_text: loc::t_fmt("AiUsageBalanceLeft", &[days]),
-                    used: 0.36,
-                    bar_color: (0x9f, 0x9f, 0xf2),
-                }
-            }
-            "aiusage_deepseek" => WidgetChipSpec::AiBalance {
-                provider_id: "aiusage_deepseek",
-                brand_color: (0x4d, 0x6b, 0xfe),
-                name: "DeepSeek",
-                value_text: "$14.80".to_owned(),
-            },
-            "aiusage_openrouter" => WidgetChipSpec::AiBalance {
-                provider_id: "aiusage_openrouter",
-                brand_color: (0xb7, 0x9b, 0xf8),
-                name: "OpenRouter",
-                value_text: "$22.40".to_owned(),
-            },
-            _ => self.widget_runtime.chip_spec(id, &self.settings, is_dark),
-        };
+        let spec = self.widget_runtime.chip_spec(id, &self.settings, is_dark);
 
         let chip = |inner: gpui::Div| -> AnyElement {
             div()
-                .h(px(44.0))
-                .max_w_full()
-                .px(px(11.0))
+                .w(px(chip_width))
+                .h(px(chip_height))
+                .flex_shrink_0()
+                .px(px(8.0))
                 .rounded(px(12.0))
                 .bg(rgba(chip_bg))
-                .border_1()
-                .border_color(rgba(chip_bd))
+                .when(
+                    widget_surface.background != SurfaceBackground::None,
+                    |card| card.border_1().border_color(rgba(chip_bd)),
+                )
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -5322,6 +5041,23 @@ impl SettingsView {
                         .w(px(fill_w))
                         .h_full()
                         .rounded(px(2.0))
+                        .bg(c_rgba(col, 0xff)),
+                )
+        };
+
+        let storage_bar = |ratio: f32, col: (u8, u8, u8), bar_w: f32| {
+            let fill_w = (bar_w * ratio.clamp(0.0, 1.0)).round();
+            div()
+                .w(px(bar_w))
+                .h(px(2.0))
+                .rounded(px(1.0))
+                .bg(rgba(track_bg))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w(px(fill_w))
+                        .h_full()
+                        .rounded(px(1.0))
                         .bg(c_rgba(col, 0xff)),
                 )
         };
@@ -5680,57 +5416,73 @@ impl SettingsView {
                     )),
             ),
             WidgetChipSpec::Storage { drives } => {
-                let sampled = widgets::sample_drives();
-                let (drv, used_pct, free_text, used_ratio) =
-                    if let Some(d) = sampled.iter().find(|d| d.total_gb > 0.0) {
-                        let used = (d.total_gb - d.free_gb).max(0.0);
-                        let ratio = (used / d.total_gb).clamp(0.0, 1.0) as f32;
-                        let pct = (ratio * 100.0).round() as u32;
-                        let free = if d.total_gb >= 972.8 {
-                            format!(
-                                "{} TB",
-                                widgets::telemetry::culture_number(d.free_gb / 1024.0, 1)
-                            )
-                        } else {
-                            format!("{} GB", widgets::telemetry::culture_number(d.free_gb, 0))
-                        };
-                        (format!("{}:", d.letter), pct, free, ratio)
-                    } else if let Some((drv, cap)) = drives.first() {
-                        let free = cap.split(" / ").next().unwrap_or(cap).to_owned();
-                        (drv.clone(), 55, free, 0.55)
-                    } else {
-                        ("C:".to_owned(), 55, "213 GB".to_owned(), 0.55)
-                    };
-                let pct_text = loc::t_fmt("OpacityPercent", &[&used_pct.to_string()]);
-                let bar_col = if used_pct >= 90 {
-                    pal.danger
-                } else if used_pct >= 75 {
-                    pal.warning
+                let shown = drives.len().min(3);
+                if shown == 0 {
+                    chip(
+                        div()
+                            .text_size(px(fonts::scaled_size(10.0)))
+                            .text_color(rgba(t.dock_preview_sub))
+                            .child("—"),
+                    )
                 } else {
-                    pal.widget_blue
-                };
-                chip(
-                    hrow(7.0).child(icon_glyph("\u{EDA2}", 13.0, sub)).child(
-                        vcol(2.0)
-                            .child(
-                                hrow(5.0)
-                                    .child(txt_w(
-                                        10.0,
-                                        gpui::FontWeight::SEMIBOLD,
-                                        fg,
-                                        format!("{drv} {pct_text}"),
-                                    ))
-                                    .child(txt(9.0, sub, free_text)),
-                            )
-                            .child(mini_bar(used_ratio, bar_col, 72.0)),
-                    ),
-                )
+                    let gap = 9.0;
+                    let segment_width =
+                        ((chip_width - 16.0 - gap * (shown.saturating_sub(1) as f32))
+                            / shown as f32)
+                            .max(40.0);
+                    chip(div().h_full().flex().items_center().gap(px(0.0)).children(
+                        drives.into_iter().take(3).enumerate().map(
+                            |(index, (letter, capacity))| {
+                                let ratio = widgets::chip_storage_ratio(&letter);
+                                let pct = ratio.map(|r| (r * 100.0).round() as u32);
+                                let bar_color = match pct {
+                                    Some(used) if used >= 90 => pal.danger,
+                                    Some(used) if used >= 75 => pal.warning,
+                                    _ => pal.accent,
+                                };
+                                let pct_label =
+                                    pct.map_or_else(|| "—".to_owned(), widgets::format_percent);
+                                let mut segment = div()
+                                    .w(px(segment_width))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(txt_w(10.5, gpui::FontWeight::BOLD, fg, letter))
+                                            .child(txt_w(
+                                                9.5,
+                                                gpui::FontWeight::SEMIBOLD,
+                                                sub,
+                                                pct_label,
+                                            )),
+                                    )
+                                    .child(txt(9.0, sub, capacity).w_full().overflow_hidden());
+                                if let Some(ratio) = ratio {
+                                    segment = segment.child(storage_bar(
+                                        ratio,
+                                        bar_color,
+                                        (segment_width - 4.0).max(20.0),
+                                    ));
+                                }
+                                if index == 0 {
+                                    segment
+                                } else {
+                                    hrow(4.0).h_full().child(vdiv()).child(segment)
+                                }
+                            },
+                        ),
+                    ))
+                }
             }
-            WidgetChipSpec::Media {
-                title,
-                artist,
-                muted,
-            } => chip(
+            WidgetChipSpec::Media { title, artist } => chip(
                 hrow(7.0)
                     .child(
                         vcol(0.0)
@@ -5750,12 +5502,7 @@ impl SettingsView {
                     .child(vdiv())
                     .child(icon_glyph("\u{E892}", 10.0, fg))
                     .child(icon_glyph("\u{E768}", 11.0, fg))
-                    .child(icon_glyph("\u{E893}", 10.0, fg))
-                    .child(icon_glyph(
-                        if muted { "\u{E74F}" } else { "\u{E767}" },
-                        10.0,
-                        sub,
-                    )),
+                    .child(icon_glyph("\u{E893}", 10.0, fg)),
             ),
             WidgetChipSpec::Audio { volume, muted } => {
                 let silent = muted || volume == 0;
@@ -5814,11 +5561,13 @@ impl SettingsView {
                 }),
             )),
             WidgetChipSpec::Keyboard { code } => chip(
-                txt_w(12.0, gpui::FontWeight::BOLD, fg, code)
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .bg(rgba(track_bg)),
+                div()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(txt_w(12.0, gpui::FontWeight::BOLD, fg, code)),
             ),
             WidgetChipSpec::AiDual {
                 provider_id,
@@ -5988,6 +5737,13 @@ impl SettingsView {
         match settings::save_to(&settings::settings_path(), &self.settings) {
             Ok(()) => {
                 self.save_error = None;
+                self.saved_widget_state = (
+                    self.settings.enabled_widgets.clone(),
+                    self.settings.installed_widgets.clone(),
+                    self.settings.show_clock_widget,
+                    self.settings.show_system_stats_widget,
+                    self.settings.show_media,
+                );
                 notify_docks_reload();
             }
             Err(err) => {
@@ -6601,6 +6357,9 @@ impl SettingsView {
             self.settings.dock_width_mode,
             |this, value, cx| {
                 this.settings.dock_width_mode = value;
+                if value != DockWidthMode::Auto {
+                    this.settings.full_width = false;
+                }
                 this.auto_save(cx);
             },
             cx,
@@ -6890,19 +6649,6 @@ impl SettingsView {
                     cx,
                 ),
             ),
-            self.target_row(
-                "LayoutFullWidth",
-                t,
-                Some("\u{E740}"),
-                loc::t("LayoutFullWidth"),
-                self.bool_switch(
-                    "sw-fullw",
-                    t,
-                    self.settings.full_width,
-                    |s| &mut s.full_width,
-                    cx,
-                ),
-            ),
             setting_row(
                 t,
                 Some("\u{E72C}"),
@@ -6920,6 +6666,22 @@ impl SettingsView {
             )
             .into_any_element(),
         ]);
+
+        if self.settings.dock_width_mode == DockWidthMode::Auto {
+            layout_rows.push(self.target_row(
+                "LayoutFullWidth",
+                t,
+                Some("\u{E740}"),
+                loc::t("LayoutFullWidth"),
+                self.bool_switch(
+                    "sw-fullw",
+                    t,
+                    self.settings.full_width,
+                    |s| &mut s.full_width,
+                    cx,
+                ),
+            ));
+        }
 
         vec![
             section_card(t, loc::t("SectionDockLayout"), layout_rows).into_any_element(),
@@ -8617,25 +8379,6 @@ impl SettingsView {
             .into_any_element(),
         );
 
-        if widgets::widget_has_flyout(wid) {
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E8B0}"),
-                    loc::t("WidgetPreviewFlyout"),
-                    button(
-                        SharedString::from(format!("w-preview-flyout-{wid}")),
-                        t,
-                        loc::t("WidgetPreviewFlyout"),
-                        ButtonVariant::Secondary,
-                        cx.listener(move |this, _, window, _| {
-                            this.preview_widget_flyout(wid, Self::window_hwnd(window));
-                        }),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
         rows
     }
 
@@ -11584,10 +11327,6 @@ impl Render for SettingsView {
                     }
                 }),
             )
-            .on_action(cx.listener(|this, _: &ToggleFlyoutPreview, _, cx| {
-                this.flyout_preview = !this.flyout_preview;
-                cx.notify();
-            }))
             .relative()
             .w_full()
             .h_full()
@@ -12462,7 +12201,6 @@ pub fn run_settings_window() {
                 KeyBinding::new("tab", TabNext, None),
                 KeyBinding::new("shift-tab", TabPrevious, None),
                 KeyBinding::new("escape", CloseWidgetPanel, None),
-                KeyBinding::new("f9", ToggleFlyoutPreview, None),
             ]);
             // Fit the fixed dialog into the primary work area (high DPI on small screens) and
             // center it there instead of on the full display (which ignores the taskbar).
