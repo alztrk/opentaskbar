@@ -103,7 +103,7 @@ unsafe extern "system" fn prompt_wnd_proc(
             let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             if !hdc.is_null() {
-                let pal = design::palette(state.is_dark);
+                let pal = design::active_palette(state.is_dark);
                 let mut rc: RECT = unsafe { std::mem::zeroed() };
                 unsafe {
                     windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
@@ -131,7 +131,7 @@ unsafe extern "system" fn prompt_wnd_proc(
         }
         WM_DRAWITEM => {
             let dis = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
-            let pal = design::palette(state.is_dark);
+            let pal = design::active_palette(state.is_dark);
             let is_ok = dis.CtlID == ID_OK as u32;
             let pressed = (dis.itemState & ODS_SELECTED) != 0;
             let focused = (dis.itemState & ODS_FOCUS) != 0;
@@ -531,7 +531,7 @@ pub fn ask_name(
         return None;
     }
 
-    let pal = design::palette(is_dark);
+    let pal = design::active_palette(is_dark);
     let bg_rgb = pal.surface;
     let edit_rgb = pal.elevated;
     let bg_color = colorref(bg_rgb);

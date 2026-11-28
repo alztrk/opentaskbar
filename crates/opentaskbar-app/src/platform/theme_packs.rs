@@ -1142,6 +1142,131 @@ pub fn widgets_override(pack: &ThemePack, theme: opentaskbar_core::settings::App
     pack.resolve_widgets(theme).tokens
 }
 
+/// Five representative swatches extracted from a theme pack for settings cards and pickers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemePreviewSwatches {
+    pub surface: crate::design::tokens::Rgba,
+    pub card: crate::design::tokens::Rgba,
+    pub accent: crate::design::tokens::Rgba,
+    pub text: crate::design::tokens::Rgba,
+    pub border: crate::design::tokens::Rgba,
+}
+
+/// Resolves five representative preview swatches from `pack`'s widget tokens for `theme`,
+/// falling back cleanly to `design::palette` for any unset token.
+pub fn preview_swatches(
+    pack: &ThemePack,
+    theme: opentaskbar_core::settings::AppTheme,
+) -> ThemePreviewSwatches {
+    let effective = match theme {
+        opentaskbar_core::settings::AppTheme::Dark => opentaskbar_core::settings::AppTheme::Dark,
+        opentaskbar_core::settings::AppTheme::Light => opentaskbar_core::settings::AppTheme::Light,
+        opentaskbar_core::settings::AppTheme::System => {
+            if crate::design::windows_palette::system_is_dark() {
+                opentaskbar_core::settings::AppTheme::Dark
+            } else {
+                opentaskbar_core::settings::AppTheme::Light
+            }
+        }
+    };
+    let is_dark = effective == opentaskbar_core::settings::AppTheme::Dark;
+    let fallback = crate::design::palette(is_dark);
+    let tokens = widgets_override(pack, effective);
+    let pick = |keys: &[&str], default_rgb: crate::design::Rgb| -> TokenRgba {
+        keys.iter()
+            .find_map(|key| {
+                tokens
+                    .get(*key)
+                    .and_then(crate::design::theme::token_rgba)
+                    .filter(|color| color.a > 0)
+            })
+            .unwrap_or_else(|| TokenRgba::from_rgb(default_rgb.0, default_rgb.1, default_rgb.2))
+    };
+    ThemePreviewSwatches {
+        surface: pick(&["DockMaterial"], fallback.dock_pill),
+        card: pick(
+            &["SettingsControl", "WidgetCard", "SettingsBackground"],
+            fallback.elevated,
+        ),
+        accent: pick(&["AccentBrush", "WidgetAccent"], fallback.accent),
+        text: pick(&["TextPrimary"], fallback.text_primary),
+        border: pick(
+            &["DockBorderMaterial", "StrokeSubtle", "WidgetCardStroke"],
+            fallback.border_rgb,
+        ),
+    }
+}
+
+fn write_file_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "ErrorThemeInstall: missing parent directory".to_owned())?;
+    fs::create_dir_all(parent).map_err(|e| format!("ErrorThemeInstall: {e}"))?;
+    let temporary = temp_path(parent, "tmp");
+    fs::write(&temporary, contents).map_err(|e| format!("ErrorThemeInstall: {e}"))?;
+    if path.exists()
+        && let Err(error) = fs::remove_file(path)
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("ErrorThemeInstall: {error}"));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("ErrorThemeInstall: {error}"));
+    }
+    Ok(())
+}
+
+/// Creates or updates a user-authored custom theme pack under `root` with `theme.json`
+/// and `widgets/pack.json`. Rejects built-in theme IDs and unsafe folder slugs.
+pub fn save_custom_theme(
+    root: &Path,
+    id: Option<&str>,
+    manifest: &ThemePackManifest,
+    widgets: &WidgetPackManifest,
+) -> Result<ThemePack, String> {
+    if let Some(error) = validate_manifest(manifest) {
+        return Err(error.to_owned());
+    }
+    fs::create_dir_all(root).map_err(|e| format!("ErrorThemeInstall: {e}"))?;
+    let folder_id = if let Some(explicit) = id {
+        let trimmed = explicit.trim();
+        if !is_safe_id(trimmed) {
+            return Err("ErrorThemeInvalid: invalid theme id".to_owned());
+        }
+        if is_built_in_theme(trimmed) {
+            return Err(format!("Built-in theme '{trimmed}' cannot be overwritten."));
+        }
+        trimmed.to_owned()
+    } else {
+        let mut candidate = unique_id(root, manifest.name.as_deref());
+        if is_built_in_theme(&candidate) {
+            let custom_name = format!("{candidate}-custom");
+            candidate = unique_id(root, Some(&custom_name));
+        }
+        candidate
+    };
+    let Some(target) = theme_path(root, &folder_id) else {
+        return Err("ErrorThemeInvalid".to_owned());
+    };
+    let manifest_json = manifest.to_string_pretty()?;
+    let widgets_json =
+        serde_json::to_string_pretty(&widgets.to_value()).map_err(|e| e.to_string())?;
+    if widgets_json.len() as u64 > MAX_WIDGET_BYTES {
+        return Err("ErrorThemeInvalid: widgets/pack.json too large".to_owned());
+    }
+    fs::create_dir_all(target.join(WIDGET_FOLDER))
+        .map_err(|e| format!("ErrorThemeInstall: {e}"))?;
+    write_file_atomic(&target.join(MANIFEST_FILE_NAME), &manifest_json)?;
+    write_file_atomic(
+        &target
+            .join(WIDGET_FOLDER)
+            .join(crate::design::widget_pack::MANIFEST_FILE_NAME),
+        &widgets_json,
+    )?;
+    ThemePack::load(&target)
+}
+
 /// Cached native Windows logo bytes (`@WLOGO_96x96.png`), or `None` when unavailable.
 pub fn get_native_windows_logo() -> Option<Vec<u8>> {
     let windows = std::env::var_os("WINDIR")
@@ -1433,5 +1558,67 @@ mod parity_tests {
             tokens.get("DockMaterial"),
             Some(TokenValue::Gradient(_))
         ));
+    }
+
+    #[test]
+    fn save_custom_theme_validates_and_round_trips_swatches_export_import() {
+        let base = std::env::temp_dir().join(format!("ot-custom-theme-{}", unique_suffix()));
+        let root = base.join("themes");
+        let import_root = base.join("imported");
+        fs::create_dir_all(&root).expect("create root");
+
+        let manifest = ThemePackManifest {
+            name: Some("Midnight Berry".to_owned()),
+            author: Some("OpenTaskbar Test".to_owned()),
+            description: Some("Custom theme roundtrip".to_owned()),
+            preserve_original_icons: true,
+        };
+        let mut widgets = WidgetPackManifest {
+            name: Some("Midnight Berry Widgets".to_owned()),
+            ..WidgetPackManifest::default()
+        };
+        widgets
+            .dark
+            .insert("DockMaterial".to_owned(), Value::from("#FF21162E"));
+        widgets
+            .dark
+            .insert("SettingsControl".to_owned(), Value::from("#FF312242"));
+        widgets
+            .dark
+            .insert("AccentBrush".to_owned(), Value::from("#FFE06C9F"));
+        widgets
+            .dark
+            .insert("TextPrimary".to_owned(), Value::from("#FFF5EDF7"));
+        widgets
+            .dark
+            .insert("DockBorderMaterial".to_owned(), Value::from("#FF9D6BFF"));
+
+        // Built-in IDs (case-insensitive) and unsafe IDs must be rejected.
+        assert!(save_custom_theme(&root, Some("nord"), &manifest, &widgets).is_err());
+        assert!(save_custom_theme(&root, Some("Catppuccin"), &manifest, &widgets).is_err());
+        assert!(save_custom_theme(&root, Some("../escape"), &manifest, &widgets).is_err());
+
+        let saved = save_custom_theme(&root, None, &manifest, &widgets).expect("save custom");
+        assert_eq!(saved.id, "Midnight-Berry");
+        assert_eq!(saved.manifest.name, "Midnight Berry");
+        assert!(saved.manifest.preserve_original_icons);
+
+        let swatches = preview_swatches(&saved, opentaskbar_core::settings::AppTheme::Dark);
+        assert_eq!(swatches.surface, TokenRgba::from_rgb(0x21, 0x16, 0x2E));
+        assert_eq!(swatches.card, TokenRgba::from_rgb(0x31, 0x22, 0x42));
+        assert_eq!(swatches.accent, TokenRgba::from_rgb(0xE0, 0x6C, 0x9F));
+        assert_eq!(swatches.text, TokenRgba::from_rgb(0xF5, 0xED, 0xF7));
+        assert_eq!(swatches.border, TokenRgba::from_rgb(0x9D, 0x6B, 0xFF));
+
+        let archive = base.join("midnight-berry.ottheme");
+        export_theme(&root, &saved.id, &archive).expect("export custom theme");
+        let imported_id = import_theme(&import_root, &archive).expect("import custom theme");
+        let reloaded = ThemePack::load(&import_root.join(&imported_id)).expect("load imported");
+        assert_eq!(
+            preview_swatches(&reloaded, opentaskbar_core::settings::AppTheme::Dark),
+            swatches
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

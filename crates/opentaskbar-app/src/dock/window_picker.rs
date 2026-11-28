@@ -463,7 +463,7 @@ fn paint(state: &PickerState) {
         return;
     }
     let dip = state.dpi;
-    let pal = design::palette(state.is_dark);
+    let pal = design::active_palette(state.is_dark);
 
     let mut client = RECT {
         left: 0,
@@ -1238,7 +1238,7 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
             (&dark as *const u32).cast(),
             size_of::<u32>() as u32,
         );
-        let border = gdi_rgb(design::palette(is_dark).border_rgb);
+        let border = gdi_rgb(design::active_palette(is_dark).border_rgb);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,

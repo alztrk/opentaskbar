@@ -2277,7 +2277,10 @@ fn show_flyout_impl<'a>(
                 size_of::<u32>() as u32,
             );
         }
-        let mut host = SpatialGlassHost::attach(hwnd as usize, false, border.glass_config);
+        // Active theme packs tint the glass body and rim; stock themes stay neutral.
+        let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
+        let glass_config = border.glass_config.with_theme_tint(tint, rim);
+        let mut host = SpatialGlassHost::attach(hwnd as usize, false, glass_config);
         if let Some(ref mut g) = host {
             g.sync_rect(
                 0.0,
@@ -2749,13 +2752,23 @@ impl FlyoutState<'_> {
         let content_wf = content_w as f32;
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
-        let pal = design::palette_with_border(self.is_dark, Some(self.border.rgb));
+        let pal = design::active_palette_with_border(self.is_dark, Some(self.border.rgb));
+        // Theme packs / editor tokens tint glass cards and hovers with the live palette;
+        // the stock theme keeps the neutral white veils below.
+        let themed = design::theme::has_active_theme_customization();
         let border_w = (self.border.width_dips * dpi).clamp(1.0, 2.0);
         let surface_c = if use_spatial_glass {
-            // Faint slate tint so dark glass keeps text contrast over bright wallpapers.
-            d2d_rgba((30, 33, 40), if self.is_dark { 0.18 } else { 0.0 })
+            // Faint contrast tint so dark glass keeps text legible over bright wallpapers;
+            // themed packs tint it with their own surface colour.
+            if themed {
+                d2d_rgba(pal.surface, if self.is_dark { 0.24 } else { 0.12 })
+            } else {
+                d2d_rgba((30, 33, 40), if self.is_dark { 0.18 } else { 0.0 })
+            }
         } else if self.border.glass_mode {
-            let tint = if self.is_dark {
+            let tint = if themed {
+                pal.surface
+            } else if self.is_dark {
                 (0x1c_u8, 0x1f_u8, 0x26_u8)
             } else {
                 (0xf6_u8, 0xf8_u8, 0xfc_u8)
@@ -2765,7 +2778,9 @@ impl FlyoutState<'_> {
             d2d_rgba(pal.surface, 1.0)
         };
         let card_bg = if self.border.glass_mode {
-            if self.is_dark {
+            if themed {
+                d2d_rgba(pal.elevated, if self.is_dark { 0.42 } else { 0.62 })
+            } else if self.is_dark {
                 d2d_rgba((0xff, 0xff, 0xff), 0.08)
             } else {
                 d2d_rgba((0xff, 0xff, 0xff), 0.56)
@@ -2774,7 +2789,9 @@ impl FlyoutState<'_> {
             d2d_rgba(pal.elevated, 1.0)
         };
         let hover_bg = if self.border.glass_mode {
-            if self.is_dark {
+            if themed {
+                d2d_rgba(pal.hover, if self.is_dark { 0.62 } else { 0.80 })
+            } else if self.is_dark {
                 d2d_rgba((0xff, 0xff, 0xff), 0.14)
             } else {
                 d2d_rgba((0xff, 0xff, 0xff), 0.76)
@@ -2789,8 +2806,16 @@ impl FlyoutState<'_> {
         let sel_fill = d2d_rgba(pal.selected_fill, 1.0);
         let sel_stroke = d2d_rgba(pal.selected_stroke, 1.0);
         let sel_fg = d2d_rgba(pal.selected_fg, 1.0);
-        let primary_fill = if self.is_dark { sel_fill } else { accent_blue };
-        let primary_stroke = if self.is_dark {
+        let primary_fill = if themed {
+            d2d_rgba(pal.accent, if self.is_dark { 0.30 } else { 1.0 })
+        } else if self.is_dark {
+            sel_fill
+        } else {
+            accent_blue
+        };
+        let primary_stroke = if themed {
+            d2d_rgba(pal.accent, 1.0)
+        } else if self.is_dark {
             sel_stroke
         } else {
             accent_blue
@@ -2812,7 +2837,9 @@ impl FlyoutState<'_> {
         let danger_fg = d2d_rgba(pal.danger_fg, 1.0);
         let sep_col = d2d_rgba(pal.sep_rgb, if self.is_dark { 0.85 } else { 1.0 });
         let scroll_col = d2d_rgba(pal.text_secondary, 0.45);
-        let track_col = if self.is_dark {
+        let track_col = if themed {
+            d2d_rgba(pal.border_rgb, 1.0)
+        } else if self.is_dark {
             d2d_rgba((0x34, 0x39, 0x45), 1.0)
         } else {
             d2d_rgba((0xdc, 0xe1, 0xe8), 1.0)

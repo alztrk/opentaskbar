@@ -209,7 +209,7 @@ impl BorderStyle {
     /// Palette hairline used by call sites that do not have `DockSettings`.
     pub fn default_for(is_dark: bool) -> Self {
         Self {
-            rgb: design::palette(is_dark).border_rgb,
+            rgb: design::active_palette(is_dark).border_rgb,
             width_dips: 1.0,
             glass_mode: true,
             glass_tint_alpha: clear_crystal_tint_alpha(0.9, is_dark),
@@ -226,13 +226,16 @@ impl BorderStyle {
         );
         style.glass_mode = settings.menu_background == SurfaceBackground::Glass;
         style.glass_tint_alpha = clear_crystal_tint_alpha(settings.menu_opacity, is_dark);
+        // Active theme packs tint the glass body and rim; stock themes stay neutral.
+        let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
         style.glass_config = SpatialGlassConfig::from_settings(
             settings,
             settings.menu_background,
             settings.menu_opacity,
             is_dark,
             false,
-        );
+        )
+        .with_theme_tint(tint, rim);
         style
     }
 
@@ -259,7 +262,7 @@ impl BorderStyle {
         let rgb = color
             .as_deref()
             .and_then(design::parse_hex_rgb)
-            .unwrap_or_else(|| design::palette(is_dark).border_rgb);
+            .unwrap_or_else(|| design::active_palette(is_dark).border_rgb);
         let width_dips = if thickness.is_finite() {
             thickness.clamp(0.0, 8.0) as f32
         } else {
@@ -1573,66 +1576,49 @@ fn draw_menu_entries_rt(
     focused: Option<usize>,
     open_submenu_idx: Option<usize>,
 ) -> windows::core::Result<()> {
-    let (
-        clear_col,
-        hover_col,
-        danger_hover_col,
-        danger_hover_border_col,
-        text_col,
-        icon_col,
-        hint_col,
-        danger_col,
-        danger_idle_col,
-        sep_col,
-    ) = if is_dark {
-        (
-            if transparent_glass_bg {
-                rgba_f(0, 0, 0, 0.0)
-            } else if acrylic {
-                rgba_f(0x10, 0x12, 0x18, border.glass_tint_alpha.clamp(0.14, 0.45))
-            } else {
-                rgba_f(0x1a, 0x1a, 0x1e, 0.98)
-            },
-            rgba_f(
-                0xff,
-                0xff,
-                0xff,
-                if transparent_glass_bg { 0.13 } else { 0.085 },
-            ),
-            rgba_f(0xef, 0x44, 0x44, 0.26),
-            rgba_f(0xf8, 0x71, 0x71, 0.35),
-            rgba_f(0xf8, 0xf8, 0xfa, 0.99),
-            rgba_f(0xdc, 0xdc, 0xe2, 0.92),
-            rgba_f(0xb4, 0xb4, 0xbe, 0.88),
-            rgba_f(0xfc, 0xa5, 0xa5, 1.0),
-            rgba_f(0xf8, 0x71, 0x71, 0.86),
-            rgba_f(0xff, 0xff, 0xff, 0.12),
-        )
+    // Live (theme-pack / editor aware) palette; identical to the base palette for the
+    // stock theme.
+    let pal = design::active_palette(is_dark);
+    let themed = design::theme::has_active_theme_customization();
+    let col = |c: Rgb, a: f32| rgba_f(c.0, c.1, c.2, a);
+
+    // Transparent Glass keeps a fully clear background so `SpatialGlassHost` shows through.
+    let clear_col = if transparent_glass_bg {
+        rgba_f(0, 0, 0, 0.0)
+    } else if acrylic {
+        let alpha = if is_dark {
+            border.glass_tint_alpha.clamp(0.14, 0.45)
+        } else {
+            border.glass_tint_alpha.clamp(0.18, 0.50)
+        };
+        col(pal.surface, alpha)
     } else {
-        (
-            if transparent_glass_bg {
-                rgba_f(0, 0, 0, 0.0)
-            } else if acrylic {
-                rgba_f(0xf6, 0xf8, 0xfc, border.glass_tint_alpha.clamp(0.18, 0.50))
-            } else {
-                rgba_f(0xff, 0xff, 0xff, 0.98)
-            },
-            rgba_f(
-                0x00,
-                0x00,
-                0x00,
-                if transparent_glass_bg { 0.08 } else { 0.055 },
-            ),
-            rgba_f(0xdc, 0x26, 0x26, 0.18),
-            rgba_f(0xdc, 0x26, 0x26, 0.28),
-            rgba_f(0x14, 0x14, 0x18, 0.98),
-            rgba_f(0x36, 0x36, 0x3e, 0.92),
-            rgba_f(0x5c, 0x5c, 0x66, 0.88),
-            rgba_f(0xb9, 0x1c, 0x1c, 1.0),
-            rgba_f(0xc8, 0x1e, 0x1e, 0.86),
-            rgba_f(0x00, 0x00, 0x00, 0.10),
-        )
+        col(pal.surface, 0.98)
     };
+    // Stock glass keeps its neutral veil hover; themed glass and opaque menus use the
+    // palette hover colour.
+    let hover_col = if transparent_glass_bg && !themed {
+        if is_dark {
+            rgba_f(0xff, 0xff, 0xff, 0.13)
+        } else {
+            rgba_f(0x00, 0x00, 0x00, 0.08)
+        }
+    } else {
+        col(pal.hover, if transparent_glass_bg { 0.62 } else { 0.95 })
+    };
+    let danger_hover_col = col(pal.danger, if is_dark { 0.26 } else { 0.18 });
+    let danger_hover_border_col = col(pal.danger_fg, if is_dark { 0.35 } else { 0.28 });
+    let text_col = col(pal.text_primary, if is_dark { 0.99 } else { 0.98 });
+    let icon_col = col(pal.text_primary, if is_dark { 0.86 } else { 0.84 });
+    let hint_col = col(pal.text_secondary, 0.92);
+    let danger_col = if is_dark {
+        rgba_f(0xfc, 0xa5, 0xa5, 1.0)
+    } else {
+        rgba_f(0xb9, 0x1c, 0x1c, 1.0)
+    };
+    let danger_idle_col = col(pal.danger_fg, 0.86);
+    let sep_col = col(pal.sep_rgb, if transparent_glass_bg { 0.85 } else { 1.0 });
+    let accent_col = col(pal.accent, 1.0);
 
     let dpi = dpi.max(0.5);
     let inv_dpi = 1.0 / dpi;
@@ -1654,6 +1640,7 @@ fn draw_menu_entries_rt(
         let danger_br = rt.CreateSolidColorBrush(&danger_col, None)?;
         let danger_idle_br = rt.CreateSolidColorBrush(&danger_idle_col, None)?;
         let sep_br = rt.CreateSolidColorBrush(&sep_col, None)?;
+        let accent_br = rt.CreateSolidColorBrush(&accent_col, None)?;
 
         let mut y_px = pad_y_px;
         for (idx, entry) in entries.iter().enumerate() {
@@ -1858,7 +1845,11 @@ fn draw_menu_entries_rt(
                             right: (right - 8.0).max(left),
                             bottom,
                         },
-                        &hint_br,
+                        if open_submenu_idx == Some(idx) {
+                            &accent_br
+                        } else {
+                            &hint_br
+                        },
                         D2D1_DRAW_TEXT_OPTIONS_CLIP,
                         DWRITE_MEASURING_MODE_NATURAL,
                     );

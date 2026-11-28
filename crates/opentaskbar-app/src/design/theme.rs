@@ -1146,6 +1146,86 @@ pub fn resolve_token(key: &str) -> Option<TokenValue> {
     ThemeManager::resolve(key)
 }
 
+/// Returns `true` whenever `ThemeManager` currently has non-empty theme-pack
+/// tokens or manual editor token overrides loaded.
+pub fn has_active_theme_customization() -> bool {
+    let state = lock();
+    !state.pack.is_empty() || !state.overrides.is_empty()
+}
+
+/// Resolves `(surface_tint_rgb, rim_rgb)` for Clear Crystal `SpatialGlass` when
+/// a theme pack or manual token override is active. Returns `(None, None)` when
+/// using the stock Windows Default chrome so Clear Crystal stays neutral.
+pub fn theme_surface_tint(
+    surface_token: &str,
+    rim_token: &str,
+) -> (Option<crate::design::Rgb>, Option<crate::design::Rgb>) {
+    let state = lock();
+    if state.pack.is_empty() && state.overrides.is_empty() {
+        return (None, None);
+    }
+    let rgb_of = |key: &str| -> Option<crate::design::Rgb> {
+        let value = state.resolve(key)?;
+        let rgba = token_rgba(value)?;
+        (rgba.a > 0).then_some((rgba.r, rgba.g, rgba.b))
+    };
+    (rgb_of(surface_token), rgb_of(rim_token))
+}
+
+/// Resolves a token strictly from custom layers (`overrides` > `pack`),
+/// bypassing the stock `base` and `windows` layers.
+pub(crate) fn resolve_custom_token(key: &str) -> Option<TokenValue> {
+    let state = lock();
+    state
+        .overrides
+        .get(key)
+        .or_else(|| state.pack.get(key))
+        .cloned()
+}
+
+/// Resolves a token strictly from the `windows` palette layer.
+pub(crate) fn resolve_windows_token(key: &str) -> Option<TokenValue> {
+    let state = lock();
+    state.windows.get(key).cloned()
+}
+
+/// Authoritatively synchronizes `ThemeManager`, the Windows accent palette
+/// layer, the active theme pack's widget tokens, icon pack state, and saved
+/// manual token overrides from `settings`.
+pub fn sync_from_settings(settings: &DockSettings) {
+    ThemeManager::apply(settings.theme, Some(settings));
+    let effective = ThemeManager::effective_theme();
+    ThemeManager::set_windows_palette(&windows_palette::read_for(effective == AppTheme::Dark));
+    crate::platform::icon_pack::set_theme_application_icons(settings.theme_application_icons);
+
+    let id = settings.theme_pack.trim();
+    if !id.is_empty() && crate::platform::theme_packs::is_safe_id(id) {
+        let dir = opentaskbar_core::paths::theme_root().join(id);
+        if !dir.is_dir() && crate::platform::theme_packs::is_built_in_theme(id) {
+            let _ = crate::platform::theme_packs::install_bundled();
+        }
+        if let Ok(pack) = crate::platform::theme_packs::ThemePack::load(&dir) {
+            let pack_tokens = crate::platform::theme_packs::widgets_override(&pack, effective);
+            apply_pack_tokens_to_palette(pack_tokens);
+            crate::platform::icon_pack::set_active_pack(Some(pack.directory.as_path()));
+        } else {
+            apply_pack_tokens_to_palette(TokenMap::new());
+            crate::platform::icon_pack::set_active_pack(None);
+        }
+    } else {
+        apply_pack_tokens_to_palette(TokenMap::new());
+        crate::platform::icon_pack::set_active_pack(None);
+    }
+
+    let overrides = settings
+        .extra
+        .get("ThemeTokens")
+        .and_then(Value::as_object)
+        .map(token_overrides_from_json)
+        .unwrap_or_default();
+    apply_token_overrides(overrides);
+}
+
 /// Startup hook: applies the tokens persisted in `settings.extra["ThemeTokens"]`.
 /// Call this right after `ThemeManager::apply` so the real palette is themed
 /// before any window opens (the settings window also calls it on load).
@@ -1232,25 +1312,27 @@ fn style_from_settings(
         .get("SurfaceOpacity")
         .and_then(|value| value.as_f64())
         .unwrap_or(settings.surface_opacity);
-    let color = |name: &str| -> Option<Rgba> {
-        settings
-            .extra
-            .get(name)
-            .and_then(|v| v.as_str())
-            .and_then(Rgba::from_hex)
+    let color = |typed: Option<&str>, name: &str| -> Option<Rgba> {
+        typed.and_then(Rgba::from_hex).or_else(|| {
+            settings
+                .extra
+                .get(name)
+                .and_then(|v| v.as_str())
+                .and_then(Rgba::from_hex)
+        })
     };
     let mut style = match kind {
         SurfaceKind::Dock => SurfaceStyle::new(
             settings.dock_background,
             settings.dock_opacity,
             settings.dock_border_thickness,
-            color("DockBorderColor"),
+            color(settings.dock_border_color.as_deref(), "DockBorderColor"),
         ),
         SurfaceKind::Menu => SurfaceStyle::new(
             background("MenuBackground", settings.menu_background),
             number("MenuOpacity", settings.menu_opacity, global),
             number("MenuBorderThickness", settings.menu_border_thickness, 1.0),
-            color("MenuBorderColor"),
+            color(settings.menu_border_color.as_deref(), "MenuBorderColor"),
         ),
         SurfaceKind::Widget => SurfaceStyle::new(
             background("WidgetBackground", settings.widget_background),
@@ -1260,7 +1342,7 @@ fn style_from_settings(
                 settings.widget_border_thickness,
                 1.0,
             ),
-            color("WidgetBorderColor"),
+            color(settings.widget_border_color.as_deref(), "WidgetBorderColor"),
         ),
         SurfaceKind::Settings => SurfaceStyle::new(
             background("SettingsBackground", settings.settings_background),
@@ -1274,7 +1356,10 @@ fn style_from_settings(
                 settings.settings_border_thickness,
                 1.0,
             ),
-            color("SettingsBorderColor"),
+            color(
+                settings.settings_border_color.as_deref(),
+                "SettingsBorderColor",
+            ),
         ),
     };
     if let Some(opacity) = overrides.get(&kind) {
@@ -1645,5 +1730,96 @@ mod tests {
             Some(TokenValue::RadialGradient(_))
         ));
         apply_token_overrides(TokenMap::new());
+    }
+
+    #[test]
+    fn style_from_settings_reads_typed_border_colors_and_alpha_hex() {
+        let mut settings = DockSettings {
+            dock_border_color: Some("#38BDF8".into()),
+            menu_border_color: Some("#80FF2244".into()),
+            widget_border_color: Some("#112233".into()),
+            settings_border_color: None,
+            ..DockSettings::default()
+        };
+        settings
+            .extra
+            .insert("SettingsBorderColor".into(), serde_json::json!("#CC445566"));
+        let overrides = BTreeMap::new();
+        assert_eq!(
+            style_from_settings(&settings, SurfaceKind::Dock, &overrides).border_color,
+            Some(Rgba::from_rgb(0x38, 0xBD, 0xF8))
+        );
+        assert_eq!(
+            style_from_settings(&settings, SurfaceKind::Menu, &overrides).border_color,
+            Some(Rgba::new(0xFF, 0x22, 0x44, 0x80))
+        );
+        assert_eq!(
+            style_from_settings(&settings, SurfaceKind::Widget, &overrides).border_color,
+            Some(Rgba::from_rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(
+            style_from_settings(&settings, SurfaceKind::Settings, &overrides).border_color,
+            Some(Rgba::new(0x44, 0x55, 0x66, 0xCC))
+        );
+    }
+
+    #[test]
+    fn sync_from_settings_loads_all_built_in_themes_and_clears_back_to_default() {
+        let _guard = theme_test_guard();
+        ThemeManager::clear_opacity_overrides();
+
+        let base_settings = DockSettings {
+            theme: AppTheme::Dark,
+            theme_pack: String::new(),
+            ..DockSettings::default()
+        };
+        sync_from_settings(&base_settings);
+        assert!(!has_active_theme_customization());
+        assert_eq!(
+            theme_surface_tint("DockMaterial", "DockBorderMaterial"),
+            (None, None)
+        );
+        let baseline = crate::design::active_palette(true);
+        let stock = crate::design::palette(true);
+        assert_eq!(baseline.dock_pill, stock.dock_pill);
+
+        let expected = [
+            ("catppuccin", (0xCB, 0xA6, 0xF7), (0x1E, 0x1E, 0x2E)),
+            ("gruvbox", (0xD7, 0x99, 0x21), (0x28, 0x28, 0x28)),
+            ("nord", (0x88, 0xC0, 0xD0), (0x2E, 0x34, 0x40)),
+            ("prism", (0xC4, 0xB5, 0xFD), (0x1C, 0x1B, 0x29)),
+            ("solarized", (0x2A, 0xA1, 0x98), (0x00, 0x2B, 0x36)),
+            ("tokyo-night", (0x7D, 0xCF, 0xFF), (0x1A, 0x1B, 0x26)),
+        ];
+        for (id, expected_accent, expected_pill) in expected {
+            let settings = DockSettings {
+                theme: AppTheme::Dark,
+                theme_pack: id.to_owned(),
+                ..DockSettings::default()
+            };
+            sync_from_settings(&settings);
+            assert!(has_active_theme_customization(), "{id}");
+            let themed = crate::design::active_palette(true);
+            assert_eq!(themed.accent, expected_accent, "{id} accent");
+            assert_eq!(themed.dock_pill, expected_pill, "{id} dock_pill");
+            assert_ne!(themed.accent, stock.accent, "{id} accent changed");
+            assert_ne!(
+                themed.dock_pill, baseline.dock_pill,
+                "{id} dock_pill changed"
+            );
+            let (tint, rim) = theme_surface_tint("DockMaterial", "DockBorderMaterial");
+            assert_eq!(tint, Some(expected_pill), "{id} tint");
+            assert!(rim.is_some(), "{id} rim");
+        }
+
+        // Clearing theme_pack restores the default palette and clears custom tints.
+        sync_from_settings(&base_settings);
+        assert!(!has_active_theme_customization());
+        assert_eq!(
+            theme_surface_tint("DockMaterial", "DockBorderMaterial"),
+            (None, None)
+        );
+        let restored = crate::design::active_palette(true);
+        assert_eq!(restored, baseline);
     }
 }

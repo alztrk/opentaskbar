@@ -309,7 +309,8 @@ impl PreviewPopup {
             return None;
         }
 
-        let default_glass = SpatialGlassConfig::default_glass(true, 0.9);
+        let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
+        let default_glass = SpatialGlassConfig::default_glass(true, 0.9).with_theme_tint(tint, rim);
         configure_host_backdrop_window(hwnd as usize, true, true);
         let spatial_glass = SpatialGlassHost::attach(hwnd as usize, false, default_glass);
         let dcomp_fg = DCompForeground::new(hwnd as usize);
@@ -351,6 +352,9 @@ impl PreviewPopup {
     }
 
     pub fn set_glass_config(&mut self, config: SpatialGlassConfig) {
+        // Active theme packs tint the preview glass body and rim; stock themes stay neutral.
+        let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
+        let config = config.with_theme_tint(tint, rim);
         self.glass_mode = config.enabled;
         self.glass_tint_alpha = config.tint_alpha;
         self.glass_config = config;
@@ -437,7 +441,7 @@ impl PreviewPopup {
 
         self.clear_thumbnails();
         self.is_dark = is_dark;
-        let pal = design::palette(is_dark);
+        let pal = design::active_palette(is_dark);
         unsafe {
             let dark_val: u32 = u32::from(is_dark);
             let _ = DwmSetWindowAttribute(
@@ -605,7 +609,7 @@ impl PreviewPopup {
         let header_h = HEADER_H_DIPS * dpi;
         let inner_pad = 9.0 * dpi;
         let corner = 10.0 * dpi;
-        let pal = design::palette(self.is_dark);
+        let pal = design::active_palette(self.is_dark);
 
         let mut client = RECT {
             left: 0,

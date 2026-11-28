@@ -26,6 +26,10 @@ pub struct SpatialGlassConfig {
     /// When true (Dynamic Island), top corners are square/flush at `y = 0` while bottom
     /// corners are rounded with `radius_px`.
     pub top_flush: bool,
+    /// Optional theme-pack glass body tint (`None` keeps Clear Crystal neutral slate).
+    pub tint_rgb: Option<crate::design::Rgb>,
+    /// Optional theme-pack rim & cursor-light accent (`None` keeps pure specular white).
+    pub rim_rgb: Option<crate::design::Rgb>,
 }
 
 impl SpatialGlassConfig {
@@ -40,6 +44,8 @@ impl SpatialGlassConfig {
             edge_glow: 0.88,
             pointer_light: true,
             top_flush: false,
+            tint_rgb: None,
+            rim_rgb: None,
         }
     }
 
@@ -54,6 +60,8 @@ impl SpatialGlassConfig {
             edge_glow: 0.0,
             pointer_light: false,
             top_flush: false,
+            tint_rgb: None,
+            rim_rgb: None,
         }
     }
 
@@ -97,7 +105,30 @@ impl SpatialGlassConfig {
             edge_glow,
             pointer_light,
             top_flush,
+            tint_rgb: None,
+            rim_rgb: None,
         }
+    }
+
+    /// Applies optional theme-pack glass body and rim tints when glass is enabled.
+    /// Disabled modes (`Solid`, `None`, `TrueBlack`) ignore any theme tint.
+    pub fn with_theme_tint(
+        mut self,
+        tint_rgb: Option<crate::design::Rgb>,
+        rim_rgb: Option<crate::design::Rgb>,
+    ) -> Self {
+        if self.enabled {
+            self.tint_rgb = tint_rgb;
+            self.rim_rgb = rim_rgb;
+        }
+        self
+    }
+
+    /// True when the dual GPU drop shadows should be rendered.
+    /// Top-flush surfaces (Dynamic Island) disable shadows so no dark halo bleeds into
+    /// transparent bottom corner cutouts.
+    pub const fn shadows_visible(&self) -> bool {
+        self.enabled && !self.top_flush
     }
 }
 
@@ -196,6 +227,26 @@ mod imp {
             R: r,
             G: g,
             B: b,
+        }
+    }
+
+    fn blend_with_white(rgb: crate::design::Rgb, tint_weight: f32) -> (u8, u8, u8) {
+        let w = tint_weight.clamp(0.0, 1.0);
+        let inv = 1.0 - w;
+        let mix =
+            |c: u8| -> u8 { (f32::from(c) * w + 255.0 * inv).round().clamp(0.0, 255.0) as u8 };
+        (mix(rgb.0), mix(rgb.1), mix(rgb.2))
+    }
+
+    fn point_light_color(config: SpatialGlassConfig) -> Color {
+        if !config.pointer_light {
+            return ui_color(0, 0, 0, 0);
+        }
+        if let Some(rim) = config.rim_rgb {
+            let (r, g, b) = blend_with_white(rim, 0.40);
+            ui_color(255, r, g, b)
+        } else {
+            ui_color(255, 255, 255, 255)
         }
     }
 
@@ -491,12 +542,14 @@ mod imp {
             drop_shadow_lift.SetColor(ui_color(72, 0, 4, 12))?;
             let shadow_lift_visual = compositor.CreateSpriteVisual()?;
             shadow_lift_visual.SetShadow(&drop_shadow_lift)?;
+            shadow_lift_visual.SetIsVisible(config.shadows_visible())?;
             root.Children()?.InsertAtTop(&shadow_lift_visual)?;
 
             let drop_shadow_contact = compositor.CreateDropShadow()?;
             drop_shadow_contact.SetColor(ui_color(42, 0, 2, 8))?;
             let shadow_contact_visual = compositor.CreateSpriteVisual()?;
             shadow_contact_visual.SetShadow(&drop_shadow_contact)?;
+            shadow_contact_visual.SetIsVisible(config.shadows_visible())?;
             root.Children()?.InsertAtTop(&shadow_contact_visual)?;
 
             let glass_visual = compositor.CreateSpriteVisual()?;
@@ -509,11 +562,7 @@ mod imp {
 
             let point_light = compositor.CreatePointLight()?;
             point_light.SetCoordinateSpace(&root)?;
-            point_light.SetColor(if config.pointer_light {
-                ui_color(255, 255, 255, 255)
-            } else {
-                ui_color(0, 0, 0, 0)
-            })?;
+            point_light.SetColor(point_light_color(config))?;
             point_light.SetConstantAttenuation(1.0)?;
             point_light.SetLinearAttenuation(0.004)?;
             point_light.SetQuadraticAttenuation(0.000_045)?;
@@ -554,6 +603,16 @@ mod imp {
             self.config.enabled
         }
 
+        fn sync_shadow_visibility(&self) -> WinResult<()> {
+            // Top-flush capsules (Dynamic Island) occupy an exact `w_px × h_px` HWND:
+            // hiding both drop-shadow visuals eliminates the halo that would otherwise bleed
+            // into the transparent bottom corner cutouts and get hard-clipped by DWM.
+            let visible = self.config.shadows_visible();
+            self.shadow_lift_visual.SetIsVisible(visible)?;
+            self.shadow_contact_visual.SetIsVisible(visible)?;
+            Ok(())
+        }
+
         /// Updates optical parameters when settings or theme change (diff-checked, no-op if unchanged).
         pub fn apply_config(&mut self, config: SpatialGlassConfig) {
             if self.config == config && !self.brush_dirty {
@@ -562,9 +621,11 @@ mod imp {
             let flush_changed = self.config.top_flush != config.top_flush;
             let overlay_changed = self.config.is_dark != config.is_dark
                 || (self.config.edge_glow - config.edge_glow).abs() > 0.001
+                || self.config.rim_rgb != config.rim_rgb
                 || flush_changed;
             self.config = config;
             let _ = self.root.SetIsVisible(config.enabled);
+            let _ = self.sync_shadow_visibility();
             if !config.enabled {
                 return;
             }
@@ -746,6 +807,7 @@ mod imp {
                 Y: 2.0 * dpi,
                 Z: 0.0,
             })?;
+            self.sync_shadow_visibility()?;
             self.pill_mask_surface = Some(pill_surf);
 
             let rim_surf = self.gfx_device.CreateDrawingSurface(
@@ -773,7 +835,9 @@ mod imp {
 
         fn rebuild_glass_brush(&mut self) -> WinResult<()> {
             let p = self.config;
-            let tint_rgb = if p.is_dark {
+            let tint_rgb = if let Some((r, g, b)) = p.tint_rgb {
+                ui_color(255, r, g, b)
+            } else if p.is_dark {
                 ui_color(255, 8, 11, 16)
             } else {
                 ui_color(255, 246, 248, 252)
@@ -802,9 +866,16 @@ mod imp {
             // Unified polarized Clear Crystal curve shared by Taskbar, Dynamic Island, Menus,
             // Flyouts, and Settings: keeps `c2 + c3 == 1.0` (zero unblurred alpha bleed) while
             // attenuating blindingly bright wallpapers enough for crisp white/dark text contrast
-            // without turning any surface into an opaque slab.
+            // without turning any surface into an opaque slab. When a theme pack tint is active,
+            // lift the blend curve so signature theme hues read clearly while preserving blur.
             let raw_a = p.tint_alpha.clamp(0.0, 0.85);
-            let a = if p.is_dark {
+            let a = if p.tint_rgb.is_some() {
+                if p.is_dark {
+                    (0.48 + raw_a * 0.85).clamp(0.42, 0.82)
+                } else {
+                    (0.52 + raw_a * 0.72).clamp(0.48, 0.84)
+                }
+            } else if p.is_dark {
                 (0.32 + raw_a * 0.90).clamp(0.28, 0.72)
             } else {
                 (0.42 + raw_a * 0.75).clamp(0.40, 0.78)
@@ -870,11 +941,7 @@ mod imp {
             let brush: CompositionBrush = effect_brush.cast()?;
             self.glass_visual.SetBrush(&brush)?;
 
-            self.point_light.SetColor(if p.pointer_light {
-                ui_color(255, 255, 255, 255)
-            } else {
-                ui_color(0, 0, 0, 0)
-            })?;
+            self.point_light.SetColor(point_light_color(p))?;
             self.drop_shadow_lift.SetColor(if p.is_dark {
                 ui_color(72, 0, 4, 12)
             } else {
@@ -900,6 +967,10 @@ mod imp {
             let oy = offset.y as f32;
             let is_dark = self.config.is_dark;
             let edge_scale = (self.config.edge_glow / 0.88).clamp(0.0, 1.35);
+            let (rim_r, rim_g, rim_b) = match self.config.rim_rgb {
+                Some(rim) => blend_with_white(rim, 0.65),
+                None => (255, 255, 255),
+            };
 
             // EndDraw must run even if a gradient/brush creation fails below,
             // otherwise the surface stays locked and every later repaint fails.
@@ -915,15 +986,15 @@ mod imp {
                             D2D1_GRADIENT_STOP {
                                 position: 0.0,
                                 color: rgba_f(
-                                    255,
-                                    255,
-                                    255,
+                                    rim_r,
+                                    rim_g,
+                                    rim_b,
                                     if is_dark { 0.055 } else { 0.18 } * edge_scale,
                                 ),
                             },
                             D2D1_GRADIENT_STOP {
                                 position: 0.34,
-                                color: rgba_f(255, 255, 255, 0.0),
+                                color: rgba_f(rim_r, rim_g, rim_b, 0.0),
                             },
                             D2D1_GRADIENT_STOP {
                                 position: 1.0,
@@ -963,36 +1034,36 @@ mod imp {
                             D2D1_GRADIENT_STOP {
                                 position: 0.0,
                                 color: rgba_f(
-                                    255,
-                                    255,
-                                    255,
+                                    rim_r,
+                                    rim_g,
+                                    rim_b,
                                     if is_dark { 0.54 } else { 0.88 } * edge_scale,
                                 ),
                             },
                             D2D1_GRADIENT_STOP {
                                 position: 0.30,
                                 color: rgba_f(
-                                    255,
-                                    255,
-                                    255,
+                                    rim_r,
+                                    rim_g,
+                                    rim_b,
                                     if is_dark { 0.18 } else { 0.42 } * edge_scale,
                                 ),
                             },
                             D2D1_GRADIENT_STOP {
                                 position: 0.65,
                                 color: rgba_f(
-                                    255,
-                                    255,
-                                    255,
+                                    rim_r,
+                                    rim_g,
+                                    rim_b,
                                     if is_dark { 0.12 } else { 0.28 } * edge_scale,
                                 ),
                             },
                             D2D1_GRADIENT_STOP {
                                 position: 1.0,
                                 color: rgba_f(
-                                    255,
-                                    255,
-                                    255,
+                                    rim_r,
+                                    rim_g,
+                                    rim_b,
                                     if is_dark { 0.32 } else { 0.64 } * edge_scale,
                                 ),
                             },
@@ -1460,5 +1531,31 @@ mod tests {
         assert_eq!(clamped.blur_sigma, 36.0);
         assert_eq!(clamped.saturation, 0.8);
         assert_eq!(clamped.edge_glow, 0.88);
+    }
+
+    #[test]
+    fn with_theme_tint_applies_only_in_glass_mode() {
+        let s = DockSettings::default();
+        let tint = Some((0x1E, 0x1E, 0x2E));
+        let rim = Some((0xCB, 0xA6, 0xF7));
+
+        let glass =
+            SpatialGlassConfig::from_settings(&s, SurfaceBackground::Glass, 0.9, true, false)
+                .with_theme_tint(tint, rim);
+        assert!(glass.enabled);
+        assert_eq!(glass.tint_rgb, tint);
+        assert_eq!(glass.rim_rgb, rim);
+
+        for mode in [
+            SurfaceBackground::TrueBlack,
+            SurfaceBackground::Solid,
+            SurfaceBackground::None,
+        ] {
+            let disabled = SpatialGlassConfig::from_settings(&s, mode, 0.9, true, false)
+                .with_theme_tint(tint, rim);
+            assert!(!disabled.enabled, "{mode:?}");
+            assert_eq!(disabled.tint_rgb, None, "{mode:?}");
+            assert_eq!(disabled.rim_rgb, None, "{mode:?}");
+        }
     }
 }
