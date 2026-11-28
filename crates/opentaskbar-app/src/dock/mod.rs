@@ -238,6 +238,136 @@ impl EffectiveMetrics {
 
 /// Vertically centers app icons inside the dock pill (matching shell buttons), while reserving
 /// clean room at the bottom for the running/active indicator dot inside the pill clip.
+/// `AnimationFpsCap` (`0` = unlimited, `30`/`60`/`120`): clamps an effective frame rate.
+fn apply_fps_cap(fps: u32, settings: &DockSettings) -> u32 {
+    match u32::try_from(settings.animation_fps_cap) {
+        Ok(cap) if cap > 0 => fps.min(cap),
+        _ => fps,
+    }
+}
+
+/// VSync producer target for a `hz` monitor: `0` paces with `DwmFlush` (native refresh),
+/// any other value is a fixed rate below the refresh (`animation_fps` and
+/// `animation_fps_cap` both apply, the lower one wins).
+pub(crate) fn target_fps_for_hz(settings: &DockSettings, hz: u32) -> u32 {
+    if !effective_animations_enabled(settings.animations_enabled, settings.focus_mode) {
+        return 0;
+    }
+    let hz = hz.max(15);
+    let requested = match settings.animation_fps {
+        Some(fps) if fps < hz => fps.clamp(15, hz),
+        _ => hz,
+    };
+    let capped = apply_fps_cap(requested, settings).max(15);
+    if capped < hz { capped } else { 0 }
+}
+
+/// Public crate entry point mirroring `DockState::compute_target_fps`.
+pub(crate) fn compute_target_fps(settings: &DockSettings, device_name: &str) -> u32 {
+    DockState::compute_target_fps(settings, device_name)
+}
+
+/// OLED display care: the dock switches to `TrueBlack` while the low-battery trigger or
+/// the Night Light trigger is active; otherwise the configured background applies.
+pub fn effective_dock_background(
+    settings: &DockSettings,
+    on_low_battery: bool,
+    night_light_on: bool,
+) -> SurfaceBackground {
+    if (settings.oled_auto_trigger_enabled && on_low_battery)
+        || (settings.oled_auto_on_night_light && night_light_on)
+    {
+        SurfaceBackground::TrueBlack
+    } else {
+        settings.dock_background
+    }
+}
+
+/// Deterministic burn-in shift cycle (logical pixels).
+const BURN_IN_SHIFT_CYCLE: [(i32, i32); 8] = [
+    (0, 0),
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, -1),
+];
+
+/// `(dx, dy)` burn-in nudge after `elapsed_minutes`: one cycle step every
+/// `burn_in_shift_minutes`, `(0, 0)` while the feature is off.
+fn burn_in_shift_px(settings: &DockSettings, elapsed_minutes: u64) -> (i32, i32) {
+    if !settings.burn_in_shift_enabled {
+        return (0, 0);
+    }
+    let interval = settings.burn_in_shift_minutes.clamp(5, 120) as u64;
+    BURN_IN_SHIFT_CYCLE[((elapsed_minutes / interval) % BURN_IN_SHIFT_CYCLE.len() as u64) as usize]
+}
+
+/// Ambient mode dims the dock after this much user inactivity.
+const AMBIENT_IDLE_SECS: u64 = 5 * 60;
+const AMBIENT_DIM_OPACITY: f32 = 0.45;
+
+/// Milliseconds since the last keyboard/mouse input (`GetLastInputInfo`).
+fn idle_millis() -> Option<u64> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO {
+        cbSize: size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a valid, correctly sized LASTINPUTINFO.
+    if unsafe { GetLastInputInfo(&mut info) } == 0 {
+        return None;
+    }
+    // Both counters are 32-bit tick counts; wrapping subtraction handles the 49.7 day wrap.
+    let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    Some(u64::from(now.wrapping_sub(info.dwTime)))
+}
+
+/// ShrinkPriority compaction: when the resting widgets overflow by `overflow_dips`, the
+/// lowest-priority widgets (`widget_shrink_priority`) are compacted first until the
+/// overflow is absorbed. `bias > 0` compacts harder and reaches higher priorities,
+/// `bias < 0` compacts gentler and protects more widgets; `0` uses the 0.84 scale.
+pub(crate) fn widget_shrink_factors(
+    widths: &[(&'static str, f32)],
+    overflow_dips: f32,
+    bias: i32,
+) -> HashMap<&'static str, f32> {
+    let mut out = HashMap::new();
+    if !overflow_dips.is_finite() || overflow_dips <= 0.5 || widths.is_empty() {
+        return out;
+    }
+    let bias = bias.clamp(-10, 10);
+    let scale = if bias >= 0 {
+        0.84 - 0.016 * bias as f32
+    } else {
+        0.84 + 0.012 * (-bias) as f32
+    };
+    // Priority ceiling: bias 0 lets every regular widget (<= 100) compact.
+    let ceiling = 100 + bias * 8;
+    let mut order: Vec<(u8, usize)> = widths
+        .iter()
+        .enumerate()
+        .map(|(idx, (id, _))| (settings::widget_shrink_priority(id), idx))
+        .filter(|(priority, _)| i32::from(*priority) <= ceiling)
+        .collect();
+    order.sort_by_key(|(priority, idx)| (*priority, *idx));
+    let mut saved = 0.0_f32;
+    for (_, idx) in order {
+        if saved >= overflow_dips {
+            break;
+        }
+        let (id, width) = widths[idx];
+        if !width.is_finite() || width <= 0.0 {
+            continue;
+        }
+        saved += width * (1.0 - scale);
+        out.insert(id, scale);
+    }
+    out
+}
+
 fn app_icon_vertical_metrics(pill_top: f32, pill_h: f32, icon_size: f32) -> (f32, f32, f32) {
     let top = pill_top + ((pill_h - icon_size) * 0.5 - 1.5).max(4.0);
     let bottom = top + icon_size;
@@ -1010,8 +1140,25 @@ struct DockState {
     pressed_stack: Option<usize>,
     /// Pointer x while over the folder stacks (in-place magnification only).
     stack_hover_x: Option<f32>,
-    widget_runtime: WidgetRuntime,
+    /// Declared before `widget_runtime` so the islands (which hold a
+    /// `dynamic_island::SharedRuntime` into it) are destroyed first on drop.
     dynamic_island: Option<dynamic_island::DynamicIslandManager>,
+    /// The single widget runtime shared with every Dynamic Island. Boxed so its
+    /// address stays stable while `DockState` moves.
+    widget_runtime: Box<WidgetRuntime>,
+    /// ShrinkPriority compaction factor per widget while the dock overflows.
+    widget_shrink: HashMap<&'static str, f32>,
+    /// Current ambient-mode dim level (`1.0` = full opacity).
+    ambient_opacity: f32,
+    /// OLED care inputs sampled on the 2 s widget tick.
+    oled_low_battery: bool,
+    oled_night_light: bool,
+    /// Start of the burn-in shift cycle and the last applied shift.
+    burn_in_epoch: Instant,
+    burn_in_applied: (i32, i32),
+    /// Resolved pill corner radius (user override > theme-pack `DockRadius` > profile),
+    /// shared by the pill surfaces, the glass host and the scroll clip.
+    pill_radius_dips: f32,
     show_desktop_corner: Option<ShowDesktopCorner>,
     dot_running: IDCompositionSurface,
     dot_active: IDCompositionSurface,
@@ -1718,6 +1865,9 @@ impl DockState {
         light_strip: bool,
     ) -> windows::core::Result<Self> {
         let dpi = monitor.dpi_scale;
+        // Theme pack, Windows accent and editor overrides must be live before the
+        // first surface is drawn so startup matches a later live reload.
+        crate::design::theme::sync_from_settings(&settings);
         let is_dark = resolve_is_dark(settings.theme);
         set_win_key_reveal_gate(&settings);
         let dcomp = DcompEngine::new(hwnd)?;
@@ -1940,8 +2090,14 @@ impl DockState {
 
         let corner_h = pill_h + settings.dock_bottom_gap_pixels.max(0) as f32;
         let all_monitors = win32::enumerate_monitors();
+        let mut widget_runtime = Box::<WidgetRuntime>::default();
+        widget_runtime.tick(&settings);
         let dynamic_island = if monitor.is_primary {
-            let mut mgr = dynamic_island::DynamicIslandManager::new();
+            // SAFETY: the runtime is boxed (stable address), owned by this `DockState`
+            // next to the manager, which is declared (and therefore dropped) first; both
+            // live on this UI thread.
+            let shared = unsafe { dynamic_island::SharedRuntime::new(&mut widget_runtime) };
+            let mut mgr = dynamic_island::DynamicIslandManager::new(shared);
             mgr.apply(&settings, &all_monitors, is_dark);
             Some(mgr)
         } else {
@@ -2043,8 +2199,15 @@ impl DockState {
             hovered_stack: None,
             pressed_stack: None,
             stack_hover_x: None,
-            widget_runtime: WidgetRuntime::default(),
             dynamic_island,
+            widget_runtime,
+            widget_shrink: HashMap::new(),
+            ambient_opacity: 1.0,
+            oled_low_battery: false,
+            oled_night_light: false,
+            burn_in_epoch: Instant::now(),
+            burn_in_applied: (0, 0),
+            pill_radius_dips: radius,
             show_desktop_corner,
             dot_running,
             dot_active,
@@ -2122,7 +2285,10 @@ impl DockState {
             shutdown,
             target_fps,
         };
-        state.rebuild_visual_tree();
+        // Startup takes the same themed path as a live reload (OLED inputs, theme-pack
+        // pill/indicator/radius tokens); it ends with `rebuild_visual_tree`.
+        state.sample_oled_inputs();
+        state.rebuild_theme_surfaces();
         state.refresh_widgets();
         state.request_missing_icons();
         state.update_visuals();
@@ -2136,10 +2302,7 @@ impl DockState {
             return 0;
         }
         let hz = win32::monitor_refresh_hz(device_name);
-        match settings.animation_fps {
-            Some(fps) if fps < hz => fps.clamp(15, hz),
-            _ => 0,
-        }
+        target_fps_for_hz(settings, hz)
     }
 
     fn widget_anim_interval_ms(&self) -> u32 {
@@ -2149,7 +2312,7 @@ impl DockState {
             .animation_fps
             .map(|f| f.clamp(15, hz))
             .unwrap_or(hz);
-        (1000 / fps.max(15)).max(4)
+        (1000 / apply_fps_cap(fps, &self.settings).max(15)).max(4)
     }
 
     fn spawn_vsync_thread(&self) {
@@ -2435,9 +2598,48 @@ impl DockState {
 
     /// Live chip width: settings-driven dynamic width times the density override.
     fn widget_width_for(&self, id: &str) -> f32 {
+        self.widget_full_width_for(id) * self.widget_shrink.get(id).copied().unwrap_or(1.0)
+    }
+
+    /// Live chip width before any ShrinkPriority overflow compaction.
+    fn widget_full_width_for(&self, id: &str) -> f32 {
         self.widget_runtime
             .widget_width_dips_with_settings(id, &self.settings)
             * self.effective.widget_density(id)
+    }
+
+    /// Recomputes ShrinkPriority compaction from the resting overflow. Widgets that do
+    /// not fit the available pill width compact lowest-priority first (`ShrinkPriority`
+    /// bias), before the dock falls back to scroll chevrons. Returns `true` on change.
+    fn update_widget_shrink(&mut self) -> bool {
+        let next = if self.widget_visuals.is_empty() || self.settings.full_width {
+            HashMap::new()
+        } else {
+            let full: Vec<(&'static str, f32)> = self
+                .widget_visuals
+                .iter()
+                .map(|wv| (wv.id, self.widget_full_width_for(wv.id)))
+                .collect();
+            let full_sum: f32 = full.iter().map(|(_, w)| *w).sum();
+            let current_sum: f32 = self.widget_visuals.iter().map(|wv| wv.width_dips).sum();
+            let natural = self.rest_content_width_at(Instant::now()) - current_sum + full_sum;
+            let mon_w = self.mon_w_dips();
+            let available = self
+                .effective
+                .width_dips
+                .map_or(mon_w - 16.0, |w| w.min(mon_w - 16.0))
+                .max(200.0);
+            widget_shrink_factors(
+                &full,
+                natural - available,
+                self.settings.shrink_priority_bias(),
+            )
+        };
+        if next == self.widget_shrink {
+            return false;
+        }
+        self.widget_shrink = next;
+        true
     }
 
     /// Reconciles `widget_visuals` with the enabled widgets. Returns `true` when
@@ -2493,14 +2695,19 @@ impl DockState {
     }
 
     fn refresh_widgets(&mut self) -> bool {
+        if dynamic_island::is_modal_flyout_active() {
+            return false;
+        }
         // A newly enabled/removed widget changes the strip width; the window
         // must follow, or the pill stays clamped to the old window (bogus
         // overflow + scroll chevrons) until some unrelated resize happens.
         let structure_changed = self.sync_widget_visuals();
         self.widget_runtime.tick(&self.settings);
+        // The islands share this runtime: they only re-render what changed.
         if let Some(island) = &mut self.dynamic_island {
             island.tick();
         }
+        self.update_widget_shrink();
         let mut changed = false;
         let mut width_changed = false;
         let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
@@ -2834,6 +3041,63 @@ impl DockState {
         false
     }
 
+    /// Dock background after OLED care triggers (see `effective_dock_background`).
+    fn effective_background(&self) -> SurfaceBackground {
+        effective_dock_background(&self.settings, self.oled_low_battery, self.oled_night_light)
+    }
+
+    /// Samples the OLED auto-trigger inputs. Only the enabled triggers touch the
+    /// system (one `GetSystemPowerStatus` / one registry read). Returns `true` when the
+    /// effective dock background changed.
+    fn sample_oled_inputs(&mut self) -> bool {
+        let before = self.effective_background();
+        self.oled_low_battery = self.settings.oled_auto_trigger_enabled && {
+            let threshold = u32::try_from(self.settings.oled_low_battery_threshold).unwrap_or(0);
+            let battery = widgets::telemetry::sample_battery();
+            threshold > 0 && battery.has_battery && !battery.on_ac && battery.percent <= threshold
+        };
+        self.oled_night_light = self.settings.oled_auto_on_night_light
+            && widgets::telemetry::read_night_light().unwrap_or(false);
+        self.effective_background() != before
+    }
+
+    /// Display-care work on the existing 2 s widget timer (never per frame): OLED
+    /// auto-triggers, the burn-in shift step and ambient-mode idle dimming.
+    fn display_care_tick(&mut self) {
+        if self.sample_oled_inputs() {
+            self.rebuild_theme_surfaces();
+            self.update_visuals();
+        }
+        let burn = burn_in_shift_px(&self.settings, self.burn_in_epoch.elapsed().as_secs() / 60);
+        if burn != self.burn_in_applied {
+            self.burn_in_applied = burn;
+            self.update_visuals();
+        }
+        let idle = self.settings.ambient_mode_enabled
+            && idle_millis().is_some_and(|ms| ms >= AMBIENT_IDLE_SECS * 1000);
+        self.set_ambient_dim(idle);
+    }
+
+    /// Smoothly dims the dock to `0.45` while ambient mode is idle, and restores it as
+    /// soon as input resumes (compositor-side animation, no extra UI frames).
+    fn set_ambient_dim(&mut self, dim: bool) {
+        let target = if dim { AMBIENT_DIM_OPACITY } else { 1.0 };
+        if (self.ambient_opacity - target).abs() < 0.001 {
+            return;
+        }
+        let duration = if !self.animations_effective() {
+            0.0
+        } else if dim {
+            1.2
+        } else {
+            0.25
+        };
+        self.dcomp
+            .animate_root_opacity(self.ambient_opacity, target, duration);
+        self.dcomp.commit();
+        self.ambient_opacity = target;
+    }
+
     fn rebuild_theme_surfaces(&mut self) {
         let dpi = self.dpi;
         let is_dark = self.is_dark;
@@ -2857,13 +3121,29 @@ impl DockState {
         let radius = if self.settings.dock_corner_radius.is_some() {
             self.settings.corner_radius_dips()
         } else {
-            materials
-                .radii
-                .get("DockRadius")
-                .map(|corner| corner.top_left as f32)
-                .filter(|value| (*value - 20.0).abs() > 0.5) // stock reference radius
+            // Theme pack / editor `DockRadius` wins over the size profile.
+            dcomp::custom_token_radius(&["DockRadius"])
+                .or_else(|| {
+                    materials
+                        .radii
+                        .get("DockRadius")
+                        .map(|corner| corner.top_left as f32)
+                        .filter(|value| (*value - 20.0).abs() > 0.5) // stock reference radius
+                })
+                .map(|value| value.clamp(0.0, 32.0))
                 .unwrap_or_else(|| self.settings.corner_radius_dips())
         };
+        self.pill_radius_dips = radius;
+        // OLED care can force `TrueBlack` (low battery / Night Light triggers).
+        let dock_background = self.effective_background();
+        // Running / active indicator dots follow `IndicatorBrush` and
+        // `IndicatorForegroundBrush` (or the accent) of an active theme pack.
+        let indicator_rgb = |keys: &[&str]| {
+            dcomp::custom_token_rgba(keys)
+                .map(|c| (c.r, c.g, c.b, (f32::from(c.a) / 255.0).max(0.55)))
+        };
+        let dot_run_theme = indicator_rgb(&["IndicatorBrush"]);
+        let dot_act_theme = indicator_rgb(&["IndicatorForegroundBrush", "AccentBrush"]);
         let glass_fill = design::glass::glass_surface_color_for(
             design::theme::SurfaceKind::Dock,
             is_dark,
@@ -2894,14 +3174,21 @@ impl DockState {
                 (0x18, 0x18, 0x1b, 0.95),
             )
         };
+        let dot_run_rgb = dot_run_theme.unwrap_or(dot_run_rgb);
+        let dot_act_rgb = dot_act_theme.unwrap_or(dot_act_rgb);
 
-        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+        let mut glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
             &self.settings,
-            self.settings.dock_background,
+            dock_background,
             self.settings.dock_opacity,
             is_dark,
             false,
         );
+        if dock_background != SurfaceBackground::TrueBlack {
+            let (tint, rim) =
+                design::theme::theme_surface_tint("DockMaterial", "DockBorderMaterial");
+            glass_cfg = glass_cfg.with_theme_tint(tint, rim);
+        }
         if let Some(ref mut glass) = self.spatial_glass {
             glass.apply_config(glass_cfg);
         }
@@ -2912,14 +3199,12 @@ impl DockState {
         let has_custom_border = self.settings.dock_border_color.is_some()
             || (self.settings.dock_border_thickness - 1.0).abs() > 0.05;
 
-        let true_black = self.settings.dock_background == SurfaceBackground::TrueBlack;
+        let true_black = dock_background == SurfaceBackground::TrueBlack;
         // Use the same opacity→mode decision as the theme/material layer so the
         // generated materials and the DComp pill can never disagree.
-        let effective_background = design::theme::background_for_opacity(
-            self.settings.dock_background,
-            self.settings.dock_opacity,
-        );
-        let bg_alpha = match self.settings.dock_background {
+        let effective_background =
+            design::theme::background_for_opacity(dock_background, self.settings.dock_opacity);
+        let bg_alpha = match dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
             SurfaceBackground::Glass if glass_host_active => 0.0_f32,
@@ -2930,7 +3215,7 @@ impl DockState {
             },
             SurfaceBackground::TrueBlack => 1.0_f32,
         };
-        let bd_alpha = if self.settings.dock_background == SurfaceBackground::None
+        let bd_alpha = if dock_background == SurfaceBackground::None
             || true_black
             || (glass_host_active && !has_custom_border)
         {
@@ -3165,6 +3450,15 @@ impl DockState {
             )
         };
         crate::platform::icon_pack::set_active_pack(theme_dir.as_deref());
+        // Live theme engine: theme pack, Windows accent layer, icon pack and editor
+        // token overrides are re-synced before any surface is rebuilt.
+        crate::design::theme::sync_from_settings(&self.settings);
+        // `ui_font_family` / `ui_font_size` / `InterfaceFont` apply immediately.
+        self.dcomp.clear_text_format_cache();
+        self.sample_oled_inputs();
+        if !self.settings.ambient_mode_enabled {
+            self.set_ambient_dim(false);
+        }
         register_global_hotkeys(self.hwnd as HWND, &self.settings);
         let registry_icons = tray_host::enumerate_tray_icons();
         let pinned_paths: Vec<String> = self
@@ -4929,6 +5223,12 @@ impl DockState {
         } else {
             (0.0, hide_shift_px)
         };
+        // OLED burn-in care: a deterministic 1-2 px cyclic nudge of the whole dock
+        // content (zero when disabled; O(1), no extra frames).
+        let (burn_dx, burn_dy) =
+            burn_in_shift_px(&self.settings, self.burn_in_epoch.elapsed().as_secs() / 60);
+        let hide_x_px = hide_x_px + (burn_dx as f32 * dpi).round();
+        let hide_y_px = hide_y_px + (burn_dy as f32 * dpi).round();
         self.dcomp.set_root_offset_x(hide_x_px);
         self.dcomp.set_root_offset_y(hide_y_px);
 
@@ -4945,7 +5245,7 @@ impl DockState {
                 pill_top_px,
                 pill_w_px,
                 pill_h_px,
-                self.settings.corner_radius_dips() * dpi,
+                self.pill_radius_dips * dpi,
                 dpi,
                 hide_x_px,
                 hide_y_px,
@@ -5034,7 +5334,7 @@ impl DockState {
             (pill_left_px + pill_w_px - clip_inset_px - (chevron_right_dips * dpi).round())
                 .max(clip_left_px);
         let clip_bottom_px = (pill_top_px + pill_h_px - clip_inset_px).max(clip_top_px);
-        let clip_radius_px = (self.settings.corner_radius_dips() * dpi - clip_inset_px)
+        let clip_radius_px = (self.pill_radius_dips * dpi - clip_inset_px)
             .clamp(0.0, (clip_bottom_px - clip_top_px) * 0.5);
         DcompEngine::update_rounded_clip_rect(
             &self.pill_scroll_clip,
@@ -5880,15 +6180,18 @@ impl DockState {
         let (anchor_x, anchor_y) = self.flyout_anchor_center_px();
         self.hide_tooltip_for_flyout();
         self.hover_flyout_open = true;
-        let action = crate::ui::flyout::show_primary_with_options(
-            self.hwnd,
-            self.is_dark,
-            anchor_x,
-            anchor_y,
-            spec,
-            BorderStyle::from_menu_settings(self.is_dark, &self.settings),
-            FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
-        );
+        let action = {
+            let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+            crate::ui::flyout::show_primary_with_options(
+                self.hwnd,
+                self.is_dark,
+                anchor_x,
+                anchor_y,
+                spec,
+                BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+                FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
+            )
+        };
         self.hover_flyout_open = false;
         match action {
             Some(1) => {
@@ -5940,7 +6243,7 @@ impl DockState {
     /// the dock edge. The Keyboard flyout targets the last external foreground
     /// window, never the dock or one of our popups.
     fn open_widget_flyout_at(&mut self, id: &str, rc: DipRect) -> bool {
-        if self.hover_flyout_open {
+        if self.hover_flyout_open || dynamic_island::is_modal_flyout_active() {
             return false;
         }
         self.hide_tooltip_for_flyout();
@@ -5952,15 +6255,18 @@ impl DockState {
         let (ax, ay) = self.flyout_anchor_px(rc);
         let edge = self.dock_flyout_edge();
         self.hover_flyout_open = true;
-        let changed = self.widget_runtime.open_widget_flyout_on_edge(
-            id,
-            self.hwnd,
-            self.is_dark,
-            ax,
-            ay,
-            edge,
-            &mut self.settings,
-        );
+        let changed = {
+            let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+            self.widget_runtime.open_widget_flyout_on_edge(
+                id,
+                self.hwnd,
+                self.is_dark,
+                ax,
+                ay,
+                edge,
+                &mut self.settings,
+            )
+        };
         self.hover_flyout_open = false;
         changed
     }
@@ -5980,7 +6286,9 @@ impl DockState {
             return;
         }
         self.keyboard_target_hwnd = foreground;
-        self.widget_runtime.set_keyboard_target_hwnd(foreground);
+        if !dynamic_island::is_modal_flyout_active() {
+            self.widget_runtime.set_keyboard_target_hwnd(foreground);
+        }
     }
 
     /// Left-click on a folder stack: a dedicated flyout listing the folder's
@@ -6048,15 +6356,18 @@ impl DockState {
         );
         self.hide_tooltip_for_flyout();
         self.hover_flyout_open = true;
-        let action = crate::ui::flyout::show_primary_with_options(
-            self.hwnd,
-            self.is_dark,
-            anchor_x,
-            anchor_y,
-            spec,
-            BorderStyle::from_menu_settings(self.is_dark, &self.settings),
-            FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
-        );
+        let action = {
+            let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+            crate::ui::flyout::show_primary_with_options(
+                self.hwnd,
+                self.is_dark,
+                anchor_x,
+                anchor_y,
+                spec,
+                BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+                FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
+            )
+        };
         self.hover_flyout_open = false;
         match action {
             Some(STACK_FLYOUT_OPEN_FOLDER_ID) => open_folder_in_explorer(&path),
@@ -7006,15 +7317,18 @@ impl DockState {
                 let edge = self.dock_flyout_edge();
                 self.hide_tooltip_for_flyout();
                 self.hover_flyout_open = true;
-                let result = tray::open_background_apps_flyout(
-                    self.hwnd,
-                    self.is_dark,
-                    &self.settings,
-                    ax,
-                    ay,
-                    edge,
-                    &self.settings.user_pinned_background_apps,
-                );
+                let result = {
+                    let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+                    tray::open_background_apps_flyout(
+                        self.hwnd,
+                        self.is_dark,
+                        &self.settings,
+                        ax,
+                        ay,
+                        edge,
+                        &self.settings.user_pinned_background_apps,
+                    )
+                };
                 self.hover_flyout_open = false;
                 if let Some((path, pinned)) = result {
                     self.set_background_pin(&path, pinned);
@@ -7607,8 +7921,12 @@ impl DockState {
             self.widget_runtime.hover.suppress(wid, Instant::now());
             match action {
                 WidgetContextAction::PlaceAllDisplays => {
+                    // One canonical key per widget: drop legacy spellings first.
+                    self.settings
+                        .dynamic_island_placements
+                        .retain(|k, _| !opentaskbar_core::dynamic_island::same_widget_id(k, wid));
                     self.settings.dynamic_island_placements.insert(
-                        (*wid).to_owned(),
+                        settings::canonical_widget_setting_id(wid),
                         opentaskbar_core::settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned(),
                     );
                     if let Err(error) = opentaskbar_core::settings::save_to(
@@ -7634,9 +7952,13 @@ impl DockState {
                 }
                 WidgetContextAction::PlaceOnDisplay(idx) => {
                     if let Some(mon) = self.all_monitors.get(idx) {
+                        let device = mon.device_name.clone();
+                        self.settings.dynamic_island_placements.retain(|k, _| {
+                            !opentaskbar_core::dynamic_island::same_widget_id(k, wid)
+                        });
                         self.settings
                             .dynamic_island_placements
-                            .insert((*wid).to_owned(), mon.device_name.clone());
+                            .insert(settings::canonical_widget_setting_id(wid), device);
                         if let Err(error) = opentaskbar_core::settings::save_to(
                             &opentaskbar_core::settings::settings_path(),
                             &self.settings,
@@ -7662,7 +7984,7 @@ impl DockState {
                 WidgetContextAction::MoveToTaskbar => {
                     self.settings
                         .dynamic_island_placements
-                        .retain(|k, _| !k.eq_ignore_ascii_case(wid));
+                        .retain(|k, _| !opentaskbar_core::dynamic_island::same_widget_id(k, wid));
                     let _ = opentaskbar_core::settings::save_to(
                         &opentaskbar_core::settings::settings_path(),
                         &self.settings,
@@ -8702,6 +9024,10 @@ unsafe extern "system" fn wnd_proc(
             // 1000 Hz mice repeat the same point many times; hit testing and
             // animation wake-ups must run only for a genuinely new coordinate.
             if layout::mouse_move_coalesce(&mut state.last_mouse_move, mx, my) {
+                // Ambient mode: pointer activity over the dock restores it immediately.
+                if state.ambient_opacity < 1.0 {
+                    state.set_ambient_dim(false);
+                }
                 // Re-entry cancels the pending 400 ms delayed hide.
                 unsafe { KillTimer(hwnd, TIMER_HIDE_DELAY) };
                 state.handle_mouse_move(mx, my);
@@ -8986,9 +9312,13 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_WIDGETS => {
+            if dynamic_island::is_modal_flyout_active() {
+                return 0;
+            }
             if state.refresh_widgets() {
                 state.update_visuals();
             }
+            state.display_care_tick();
             if effective_animations_enabled(
                 state.settings.animations_enabled,
                 state.settings.focus_mode,
@@ -9006,6 +9336,9 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_WIDGET_ANIM => {
+            if dynamic_island::is_modal_flyout_active() {
+                return 0;
+            }
             if effective_animations_enabled(
                 state.settings.animations_enabled,
                 state.settings.focus_mode,
@@ -10515,5 +10848,99 @@ mod tests {
         assert_eq!(stack_entry_display_name("notes.lnk.txt"), "notes.lnk.txt");
         assert_eq!(stack_entry_display_name(".lnk"), ".lnk");
         assert_eq!(stack_entry_display_name("Sub"), "Sub");
+    }
+
+    #[test]
+    fn oled_auto_triggers_switch_the_dock_to_true_black() {
+        let mut settings = DockSettings {
+            dock_background: SurfaceBackground::Glass,
+            ..DockSettings::default()
+        };
+        // Triggers off: inputs are ignored.
+        assert_eq!(
+            effective_dock_background(&settings, true, true),
+            SurfaceBackground::Glass
+        );
+        settings.oled_auto_trigger_enabled = true;
+        assert_eq!(
+            effective_dock_background(&settings, true, false),
+            SurfaceBackground::TrueBlack
+        );
+        assert_eq!(
+            effective_dock_background(&settings, false, true),
+            SurfaceBackground::Glass
+        );
+        settings.oled_auto_trigger_enabled = false;
+        settings.oled_auto_on_night_light = true;
+        assert_eq!(
+            effective_dock_background(&settings, false, true),
+            SurfaceBackground::TrueBlack
+        );
+        assert_eq!(
+            effective_dock_background(&settings, false, false),
+            SurfaceBackground::Glass
+        );
+    }
+
+    #[test]
+    fn compute_target_fps_respects_animation_fps_cap() {
+        let mut settings = DockSettings {
+            animations_enabled: true,
+            focus_mode: false,
+            animation_fps: None,
+            animation_fps_cap: 0,
+            ..DockSettings::default()
+        };
+        // Unlimited: follow the native refresh (DwmFlush pacing).
+        assert_eq!(target_fps_for_hz(&settings, 144), 0);
+        settings.animation_fps_cap = 60;
+        assert_eq!(target_fps_for_hz(&settings, 144), 60);
+        settings.animation_fps_cap = 120;
+        assert_eq!(target_fps_for_hz(&settings, 60), 0, "cap above refresh");
+        settings.animation_fps_cap = 30;
+        settings.animation_fps = Some(90);
+        assert_eq!(target_fps_for_hz(&settings, 144), 30, "lower limit wins");
+        // The real entry point (an unknown device reports 60 Hz) honours the cap too.
+        assert_eq!(DockState::compute_target_fps(&settings, ""), 30);
+        settings.animations_enabled = false;
+        assert_eq!(DockState::compute_target_fps(&settings, ""), 0);
+        assert_eq!(apply_fps_cap(240, &DockSettings::default()), 240);
+    }
+
+    #[test]
+    fn burn_in_shift_cycles_one_pixel_steps_only_when_enabled() {
+        let mut settings = DockSettings::default();
+        assert_eq!(burn_in_shift_px(&settings, 999), (0, 0));
+        settings.burn_in_shift_enabled = true;
+        settings.burn_in_shift_minutes = 30;
+        assert_eq!(burn_in_shift_px(&settings, 0), (0, 0));
+        assert_eq!(burn_in_shift_px(&settings, 30), (1, 0));
+        assert_eq!(burn_in_shift_px(&settings, 65), (1, 1));
+        assert_eq!(burn_in_shift_px(&settings, 30 * 8), (0, 0), "cycle wraps");
+        for minutes in 0..600 {
+            let (dx, dy) = burn_in_shift_px(&settings, minutes);
+            assert!(dx.abs() <= 1 && dy.abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn shrink_priority_compacts_lowest_priority_widgets_first() {
+        let widths = [("clock", 120.0), ("media", 314.0), ("weather", 168.0)];
+        assert!(widget_shrink_factors(&widths, 0.0, 0).is_empty());
+        assert!(widget_shrink_factors(&widths, f32::NAN, 0).is_empty());
+        // A small overflow compacts only Media (priority 10) at the 0.84 scale.
+        let small = widget_shrink_factors(&widths, 20.0, 0);
+        assert_eq!(small.len(), 1);
+        assert!((small["media"] - 0.84).abs() < 0.001);
+        // A larger overflow continues with Weather (15) before Clock (80).
+        let large = widget_shrink_factors(&widths, 70.0, 0);
+        assert!(large.contains_key("media") && large.contains_key("weather"));
+        assert!(!large.contains_key("clock"));
+        // Positive bias compacts harder; negative bias is gentler and protects Clock.
+        let hard = widget_shrink_factors(&widths, 20.0, 5);
+        assert!(hard["media"] < 0.84);
+        let gentle = widget_shrink_factors(&widths, 10_000.0, -3);
+        assert!(gentle.values().all(|scale| *scale > 0.84));
+        assert!(!gentle.contains_key("clock"), "priority 80 > ceiling 76");
     }
 }

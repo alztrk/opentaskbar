@@ -13,8 +13,6 @@ use opentaskbar_core::settings::DockSettings;
 use crate::design;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
-use super::catalog_ops::setting_value_from;
-
 /// `FocusWidget.Phase`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusPhase {
@@ -78,26 +76,36 @@ impl Default for FocusSession {
 }
 
 impl FocusSession {
-    /// Reads `FocusMinutes`, `FocusBreakMinutes`, `FocusSessions` from settings (WS-A typed fields
-    /// or `extra` — both are visible via the serialized-settings helper).
+    /// Reads `FocusMinutes`, `FocusBreakMinutes`, `FocusSessions` from settings without
+    /// serializing the full `DockSettings` struct on the UI hot path.
     pub fn from_settings(settings: &DockSettings) -> Self {
-        // Serialize once: the four keys below used to round-trip the whole settings object
-        // four separate times.
-        let root = serde_json::to_value(settings).unwrap_or_default();
-        let read = |key: &str, default: i64| -> i64 {
-            setting_value_from(&root, key)
+        let extra_i64 = |key: &str| -> Option<i64> {
+            settings
+                .extra
+                .get(key)
                 .and_then(|v| v.as_i64())
-                .unwrap_or(default)
+                .or_else(|| {
+                    settings
+                        .extra
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                        .and_then(|(_, v)| v.as_i64())
+                })
         };
-        let focus = read("FocusMinutes", 25).clamp(1, 180) as u64;
-        let break_mins = read("FocusBreakMinutes", 5).clamp(0, 60) as u64;
-        let target = read("FocusSessions", 4).clamp(1, 20) as u64;
-        // Legacy alias used by some reference profiles before the rename.
-        let target = if setting_value_from(&root, "FocusSessions").is_none() {
-            read("FocusBreakSessions", target as i64).clamp(1, 20) as u64
-        } else {
-            target
-        };
+        let focus = extra_i64("FocusMinutes")
+            .unwrap_or_else(|| i64::from(settings.focus_minutes))
+            .clamp(1, 180) as u64;
+        let break_mins = extra_i64("FocusBreakMinutes")
+            .unwrap_or_else(|| i64::from(settings.focus_break_minutes))
+            .clamp(0, 60) as u64;
+        let target = extra_i64("FocusSessions")
+            .or_else(|| {
+                (settings.focus_sessions == 4)
+                    .then(|| extra_i64("FocusBreakSessions"))
+                    .flatten()
+            })
+            .unwrap_or_else(|| i64::from(settings.focus_sessions))
+            .clamp(1, 20) as u64;
         Self {
             remaining_secs: focus * 60,
             focus_minutes: focus,

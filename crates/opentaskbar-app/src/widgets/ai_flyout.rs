@@ -189,13 +189,15 @@ pub fn build_ai_flyout(
     id: &str,
     snap: &AiUsageSnapshot,
     detail: &AiFullDetail,
-    _settings: &DockSettings,
+    settings: &DockSettings,
     is_dark: bool,
 ) -> FlyoutSpec {
     let pal = design::palette(is_dark);
     let ai = ai_provider_meta(id);
     let name = ai.map_or(id, |m| m.name).to_owned();
     let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
+    let ring = super::resolved_ai_usage_ring(settings, id);
+    let ordered_windows = super::order_ai_windows(&snap.windows, ring);
 
     let mut blocks = Vec::new();
     // Status dot + plan chip in a single `SectionHeader`-style row.
@@ -257,8 +259,19 @@ pub fn build_ai_flyout(
         )));
     }
 
-    // Usage window bars from the cached chip snapshot.
-    for w in &snap.windows {
+    // Usage window bars from the cached chip snapshot, ordered by the active AiUsageRing setting.
+    if !ordered_windows.is_empty() {
+        let ring_label = match ring {
+            opentaskbar_core::settings::AiUsageRing::Highest => loc::t("AiUsageRingHighest"),
+            opentaskbar_core::settings::AiUsageRing::Session => loc::t("AiUsageRingSession"),
+            opentaskbar_core::settings::AiUsageRing::Weekly => loc::t("AiUsageRingWeekly"),
+        };
+        blocks.push(FlyoutBlock::StatRow {
+            label: loc::t("AiUsageRingLabel"),
+            value: format!("{ring_label} · {}", ordered_windows[0].label),
+        });
+    }
+    for (idx, w) in ordered_windows.iter().enumerate() {
         let pct_val = (w.used * 100.0).round() as u32;
         let pct_str = super::format_percent(pct_val);
         let reset_trimmed = w.reset_text.trim();
@@ -271,8 +284,13 @@ pub fn build_ai_flyout(
         } else {
             format!("{pct_str} · {reset_trimmed}")
         };
+        let label = if idx == 0 && ordered_windows.len() > 1 {
+            format!("{} ★", w.label)
+        } else {
+            w.label.clone()
+        };
         blocks.push(FlyoutBlock::ProgressBar {
-            label: w.label.clone(),
+            label,
             value_text,
             ratio: w.used,
             tone: BarTone::Usage,
@@ -424,5 +442,47 @@ mod tests {
         );
         assert!(AI_PROVIDERS.iter().any(|p| p.id == "aiusage_cursor"));
         assert!(AI_PROVIDERS.iter().any(|p| p.id == "aiusage_claude"));
+    }
+
+    #[test]
+    fn flyout_respects_ai_usage_ring_selection() {
+        use crate::widgets::telemetry::AiWindowData;
+        use opentaskbar_core::settings::AiUsageRing;
+
+        let snap = AiUsageSnapshot {
+            windows: vec![
+                AiWindowData {
+                    label: "5h".to_owned(),
+                    used: 0.25,
+                    reset_text: "2h 0m".to_owned(),
+                },
+                AiWindowData {
+                    label: "7d".to_owned(),
+                    used: 0.75,
+                    reset_text: "3d 0h".to_owned(),
+                },
+            ],
+            has_cred: true,
+            ..Default::default()
+        };
+        let detail = AiFullDetail::default();
+        let mut settings = DockSettings {
+            ai_usage_ring: AiUsageRing::Session,
+            ..Default::default()
+        };
+        let session_spec = build_ai_flyout("aiusage_claude", &snap, &detail, &settings, true);
+        let session_first = session_spec.blocks.iter().find_map(|b| match b {
+            FlyoutBlock::ProgressBar { label, .. } => Some(label.clone()),
+            _ => None,
+        });
+        assert_eq!(session_first.as_deref(), Some("5h ★"));
+
+        settings.ai_usage_ring = AiUsageRing::Weekly;
+        let weekly_spec = build_ai_flyout("aiusage_claude", &snap, &detail, &settings, true);
+        let weekly_first = weekly_spec.blocks.iter().find_map(|b| match b {
+            FlyoutBlock::ProgressBar { label, .. } => Some(label.clone()),
+            _ => None,
+        });
+        assert_eq!(weekly_first.as_deref(), Some("7d ★"));
     }
 }

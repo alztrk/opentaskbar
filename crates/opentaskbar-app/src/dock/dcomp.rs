@@ -84,6 +84,112 @@ pub enum IslandButton {
     Prev,
     Next,
     Expand,
+    /// Clickable page indicator dot (absolute page index).
+    Dot(u8),
+}
+
+/// Widget chip chrome. Dock cards keep the frosted card; the Dynamic Island draws
+/// frameless chips that sit directly inside the island capsule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipChrome {
+    /// Standard dock widget card (`draw_chip_card`).
+    Card,
+    /// Frameless Dynamic Island chip: no card at rest, a subtle 12 DIP rounded
+    /// hover/press pill only while hovered or pressed.
+    Bare,
+}
+
+/// Theme-pack widget card overrides resolved once per chip render. `None` fields keep
+/// the stock frosted recipe for that layer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ThemedChipCard {
+    fill: Option<design::tokens::Rgba>,
+    hover: Option<design::tokens::Rgba>,
+    pressed: Option<design::tokens::Rgba>,
+    stroke: Option<design::tokens::Rgba>,
+    radius: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChipCardStyle {
+    chrome: ChipChrome,
+    themed: Option<ThemedChipCard>,
+}
+
+impl ChipCardStyle {
+    fn resolve(chrome: ChipChrome) -> Self {
+        let themed = if design::theme::has_active_theme_customization() {
+            let card = ThemedChipCard {
+                fill: custom_token_rgba(&["DockWidgetSurface", "WidgetCard"]),
+                hover: custom_token_rgba(&["WidgetCardHover"]),
+                pressed: custom_token_rgba(&["WidgetCardPressed"]),
+                stroke: custom_token_rgba(&["WidgetCardStroke"]),
+                radius: custom_token_radius(&["DockWidgetRadius"]),
+            };
+            let any = card.fill.is_some()
+                || card.hover.is_some()
+                || card.pressed.is_some()
+                || card.stroke.is_some()
+                || card.radius.is_some();
+            any.then_some(card)
+        } else {
+            None
+        };
+        Self { chrome, themed }
+    }
+}
+
+/// First visible colour carried by a theme-pack / editor override token. The stock
+/// `base` and `windows` layers are ignored so Windows Default keeps its own recipe.
+pub(crate) fn custom_token_rgba(keys: &[&str]) -> Option<design::tokens::Rgba> {
+    keys.iter().find_map(|key| {
+        design::theme::resolve_custom_token(key)
+            .as_ref()
+            .and_then(design::theme::token_rgba)
+            .filter(|rgba| rgba.a > 0)
+    })
+}
+
+/// Uniform corner radius (DIP) carried by a theme-pack / editor override token.
+pub(crate) fn custom_token_radius(keys: &[&str]) -> Option<f32> {
+    keys.iter().find_map(|key| {
+        let value = match design::theme::resolve_custom_token(key)? {
+            design::tokens::TokenValue::CornerRadius(corner) => corner.top_left as f32,
+            design::tokens::TokenValue::Double(value) => value as f32,
+            _ => return None,
+        };
+        (value.is_finite() && value >= 0.0).then_some(value.min(64.0))
+    })
+}
+
+/// Gradient stops for the Start button Windows logo when a theme pack or editor
+/// override defines `WindowsLogoBrush`; `None` keeps the stock sky-to-azure logo.
+fn themed_windows_logo_stops() -> Option<Vec<D2D1_GRADIENT_STOP>> {
+    if !design::theme::has_active_theme_customization() {
+        return None;
+    }
+    let stop = |color: design::tokens::Rgba, position: f32| D2D1_GRADIENT_STOP {
+        position,
+        color: color_rgba(color.r, color.g, color.b, f32::from(color.a) / 255.0),
+    };
+    let stops: Vec<D2D1_GRADIENT_STOP> =
+        match design::theme::resolve_custom_token("WindowsLogoBrush")? {
+            design::tokens::TokenValue::Solid(color) | design::tokens::TokenValue::Color(color) => {
+                vec![stop(color, 0.0), stop(color, 1.0)]
+            }
+            design::tokens::TokenValue::Gradient(gradient) => gradient
+                .stops
+                .iter()
+                .map(|s| stop(s.color, s.position.clamp(0.0, 1.0) as f32))
+                .collect(),
+            design::tokens::TokenValue::RadialGradient(gradient) => gradient
+                .stops
+                .iter()
+                .map(|s| stop(s.color, s.position.clamp(0.0, 1.0) as f32))
+                .collect(),
+            _ => return None,
+        };
+    (!stops.is_empty() && stops.iter().any(|s| s.color.a > 0.0)).then_some(stops)
 }
 
 /// One telemetry column rendered inside `WidgetChipSpec::SystemStats` (CPU, RAM, GPU, GPU °C).
@@ -728,7 +834,7 @@ impl DcompEngine {
         hovered: bool,
         dpi: f32,
     ) -> Result<IDCompositionSurface> {
-        let pal = design::palette(is_dark);
+        let pal = design::active_palette(is_dark);
         self.draw_surface(width_px, height_px, |dc, w, h| unsafe {
             let stops = [
                 D2D1_GRADIENT_STOP {
@@ -880,6 +986,40 @@ impl DcompEngine {
         }
     }
 
+    /// Drops every cached chip/island text format so `ui_font_family`, `ui_font_size` and
+    /// `InterfaceFont` changes apply on the next redraw instead of after a restart.
+    pub fn clear_text_format_cache(&self) {
+        self.text_formats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Fades the whole DComp tree to `to`. A DirectComposition animation runs on the
+    /// compositor (zero UI-thread frames); falls back to an instant opacity set.
+    pub fn animate_root_opacity(&self, from: f32, to: f32, duration_secs: f32) {
+        let Ok(visual) = self.root.cast::<IDCompositionVisual3>() else {
+            return;
+        };
+        let from = from.clamp(0.0, 1.0);
+        let to = to.clamp(0.0, 1.0);
+        // SAFETY: the root visual and the device are live COM objects owned by the UI thread.
+        unsafe {
+            if duration_secs > 0.001
+                && (to - from).abs() > 0.001
+                && let Ok(animation) = self.dcomp_device.CreateAnimation()
+                && animation
+                    .AddCubic(0.0, from, (to - from) / duration_secs, 0.0, 0.0)
+                    .is_ok()
+                && animation.End(f64::from(duration_secs), to).is_ok()
+                && visual.SetOpacity(&animation).is_ok()
+            {
+                return;
+            }
+            let _ = visual.SetOpacity2(to);
+        }
+    }
+
     /// Returns a cached chip text format; only the first request per (size, weight, alignment)
     /// creates COM objects, later redraws just AddRef the existing format.
     fn cached_text_format(&self, size: f32, bold: bool, align: u8) -> Result<IDWriteTextFormat> {
@@ -954,7 +1094,42 @@ impl DcompEngine {
         border_rgb: Option<Rgb>,
         border_width_dips: f32,
     ) -> Result<IDCompositionSurface> {
-        let pal = design::palette_with_border(is_dark, border_rgb);
+        self.create_widget_chip_surface_with_chrome(
+            spec,
+            width_dips,
+            height_dips,
+            dpi,
+            is_dark,
+            interaction,
+            border_rgb,
+            border_width_dips,
+            ChipChrome::Card,
+        )
+    }
+
+    /// `create_widget_chip_surface` with an explicit chrome (`ChipChrome::Bare` for the
+    /// Dynamic Island, where chips sit directly inside the capsule).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_widget_chip_surface_with_chrome(
+        &self,
+        spec: &WidgetChipSpec,
+        width_dips: f32,
+        height_dips: f32,
+        dpi: f32,
+        is_dark: bool,
+        interaction: WidgetInteraction,
+        border_rgb: Option<Rgb>,
+        border_width_dips: f32,
+        chrome: ChipChrome,
+    ) -> Result<IDCompositionSurface> {
+        let pal = design::active_palette_with_border(is_dark, border_rgb);
+        let card_style = ChipCardStyle::resolve(chrome);
+        // A frameless island chip never paints the per-widget card border.
+        let border_rgb = if chrome == ChipChrome::Bare {
+            None
+        } else {
+            border_rgb
+        };
         let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
         let h_px = (height_dips * dpi).ceil().max(1.0) as u32;
         let fg_p = color_rgba(
@@ -1187,6 +1362,7 @@ impl DcompEngine {
             }
             let draw_two_line_chip = |chip: TwoLine<'_>| -> Result<()> {
                 draw_chip_card(
+                    &card_style,
                     dc,
                     width_dips,
                     height_dips,
@@ -1268,6 +1444,7 @@ impl DcompEngine {
                     weekday,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -1467,6 +1644,7 @@ impl DcompEngine {
                     today_range,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -1652,6 +1830,7 @@ impl DcompEngine {
                     unit,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -1747,6 +1926,7 @@ impl DcompEngine {
                     text,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -2047,6 +2227,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::SystemStats { columns } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -2177,6 +2358,7 @@ impl DcompEngine {
                     up_history,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -2394,6 +2576,7 @@ impl DcompEngine {
                     // meniscus wave + -22deg skewed left-to-right charging sheen!
                     if !*present {
                         draw_chip_card(
+                            &card_style,
                             dc,
                             width_dips,
                             height_dips,
@@ -2439,6 +2622,7 @@ impl DcompEngine {
                             border_rgb
                         };
                         draw_chip_card(
+                            &card_style,
                             dc,
                             width_dips,
                             height_dips,
@@ -3016,6 +3200,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::Bluetooth { devices } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -3177,6 +3362,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::Storage { drives } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -3309,6 +3495,7 @@ impl DcompEngine {
                     muted,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -3616,6 +3803,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::Audio { volume, muted } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -3683,6 +3871,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::QuickSettings { pills } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -3908,6 +4097,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::Keyboard { code } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -3957,6 +4147,7 @@ impl DcompEngine {
                     rows,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -4069,6 +4260,7 @@ impl DcompEngine {
                 }
                 WidgetChipSpec::AiOpenCode { columns } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -4183,6 +4375,7 @@ impl DcompEngine {
                     bar_color,
                 } => {
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -4309,6 +4502,7 @@ impl DcompEngine {
                     // Unified AI card style: neutral card surface, 16x16 brand logo, divider,
                     // 2-line metric stack, and optional 2px credit bar for OpenRouter.
                     draw_chip_card(
+                        &card_style,
                         dc,
                         width_dips,
                         height_dips,
@@ -4900,35 +5094,38 @@ impl DcompEngine {
         size_px: u32,
         is_dark: bool,
     ) -> Result<IDCompositionSurface> {
-        let pal = design::palette(is_dark);
+        let pal = design::active_palette(is_dark);
 
         self.draw_surface(size_px, size_px, |dc, w, h| unsafe {
             if kind == ShellGlyph::Start {
                 // Crisp Windows 11 4-pane logo with diagonal sky-to-azure gradient.
                 let s = w / 24.0;
-                let stops = if is_dark {
-                    [
-                        D2D1_GRADIENT_STOP {
-                            position: 0.0,
-                            color: color_rgba(0x60, 0xcd, 0xff, 1.0),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 1.0,
-                            color: color_rgba(0x00, 0x78, 0xd4, 1.0),
-                        },
-                    ]
-                } else {
-                    [
-                        D2D1_GRADIENT_STOP {
-                            position: 0.0,
-                            color: color_rgba(0x00, 0x95, 0xf6, 1.0),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 1.0,
-                            color: color_rgba(0x00, 0x5f, 0xb8, 1.0),
-                        },
-                    ]
-                };
+                // A theme pack / editor `WindowsLogoBrush` repaints the logo in its colours.
+                let stops = themed_windows_logo_stops().unwrap_or_else(|| {
+                    if is_dark {
+                        vec![
+                            D2D1_GRADIENT_STOP {
+                                position: 0.0,
+                                color: color_rgba(0x60, 0xcd, 0xff, 1.0),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 1.0,
+                                color: color_rgba(0x00, 0x78, 0xd4, 1.0),
+                            },
+                        ]
+                    } else {
+                        vec![
+                            D2D1_GRADIENT_STOP {
+                                position: 0.0,
+                                color: color_rgba(0x00, 0x95, 0xf6, 1.0),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 1.0,
+                                color: color_rgba(0x00, 0x5f, 0xb8, 1.0),
+                            },
+                        ]
+                    }
+                });
                 let coll = dc.CreateGradientStopCollection(
                     &stops,
                     D2D1_COLOR_SPACE_SRGB,
@@ -5182,6 +5379,7 @@ impl DcompEngine {
 /// and a thin specular line under the rim. Hover and press raise fill and rim opacity.
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_chip_card(
+    style: &ChipCardStyle,
     dc: &ID2D1DeviceContext,
     width_dips: f32,
     height_dips: f32,
@@ -5191,6 +5389,87 @@ unsafe fn draw_chip_card(
     border_rgb: Option<Rgb>,
     border_width_dips: f32,
 ) -> Result<()> {
+    let ink = if is_dark { 0xff } else { 0x00 };
+    let rounded = |radius: f32, inset: f32| D2D1_ROUNDED_RECT {
+        rect: D2D_RECT_F {
+            left: inset,
+            top: inset,
+            right: (width_dips - inset).max(inset),
+            bottom: (height_dips - inset).max(inset),
+        },
+        radiusX: (radius - inset).max(0.0),
+        radiusY: (radius - inset).max(0.0),
+    };
+
+    // Dynamic Island: frameless chip, only a soft rounded hover/press pill.
+    if style.chrome == ChipChrome::Bare {
+        let alpha = match interaction {
+            WidgetInteraction::Idle => return Ok(()),
+            WidgetInteraction::Hovered(_) => 0.08,
+            WidgetInteraction::Pressed(_) => 0.13,
+        };
+        let radius = 12.0_f32.min(height_dips * 0.5);
+        unsafe {
+            let brush = dc.CreateSolidColorBrush(&color_rgba(ink, ink, ink, alpha), None)?;
+            dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
+        }
+        return Ok(());
+    }
+
+    // Theme pack / editor overrides: tint the card from `ThemeManager` tokens.
+    if let Some(theme) = style.themed {
+        let radius = theme
+            .radius
+            .unwrap_or(island_geo::CHIP_RADIUS_DIPS)
+            .min(height_dips * 0.5);
+        let solid = |color: design::tokens::Rgba, alpha_scale: f32| {
+            color_rgba(
+                color.r,
+                color.g,
+                color.b,
+                (f32::from(color.a) / 255.0 * alpha_scale).clamp(0.0, 1.0),
+            )
+        };
+        unsafe {
+            if let Some(fill) = theme.fill {
+                let brush = dc.CreateSolidColorBrush(&solid(fill, 1.0), None)?;
+                dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
+            } else {
+                let base_alpha = if is_dark { 0.08 } else { 0.06 };
+                let brush =
+                    dc.CreateSolidColorBrush(&color_rgba(ink, ink, ink, base_alpha), None)?;
+                dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
+            }
+            let overlay = match interaction {
+                WidgetInteraction::Idle => None,
+                WidgetInteraction::Hovered(_) => Some(theme.hover.map_or_else(
+                    || color_rgba(ink, ink, ink, if is_dark { 0.10 } else { 0.07 }),
+                    |c| solid(c, 1.0),
+                )),
+                WidgetInteraction::Pressed(_) => Some(theme.pressed.or(theme.hover).map_or_else(
+                    || color_rgba(ink, ink, ink, if is_dark { 0.16 } else { 0.12 }),
+                    |c| solid(c, if theme.pressed.is_some() { 1.0 } else { 1.4 }),
+                )),
+            };
+            if let Some(color) = overlay {
+                let brush = dc.CreateSolidColorBrush(&color, None)?;
+                dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
+            }
+            let stroke = match (border_rgb, theme.stroke) {
+                (Some(rgb), _) if border_width_dips > 0.0 => {
+                    Some((color_rgba(rgb.0, rgb.1, rgb.2, 0.85), border_width_dips))
+                }
+                (_, Some(token)) => Some((solid(token, 1.0), 1.0)),
+                _ => None,
+            };
+            if let Some((color, width)) = stroke {
+                let brush = dc.CreateSolidColorBrush(&color, None)?;
+                dc.DrawRoundedRectangle(&rounded(radius, width * 0.5), &brush, width, None);
+            }
+        }
+        return Ok(());
+    }
+
     // (top fill alpha, bottom fill alpha, rim top alpha, rim bottom alpha, specular alpha)
     let (fill_top, fill_bottom, rim_top, rim_bottom, specular) = match (is_dark, interaction) {
         (true, WidgetInteraction::Idle) => (0.105, 0.050, 0.24, 0.06, 0.14),
@@ -5462,205 +5741,484 @@ unsafe fn draw_chip_icon(
     }
 }
 
+/// Everything `create_island_chrome_surface` needs; the island resolves colours,
+/// geometry and the symmetric header layout before asking for a surface.
+pub struct IslandChromeRender<'a> {
+    pub width_dips: f32,
+    pub height_dips: f32,
+    pub dpi: f32,
+    pub is_dark: bool,
+    pub opacity: f32,
+    pub background: SurfaceBackground,
+    /// Solid / tint fill (custom `#RRGGBB`, active theme surface or neutral pill).
+    pub fill_rgb: Rgb,
+    /// `Notch`: flat top edge flush with the monitor, rounded bottom corners.
+    /// `Floating`: four rounded corners (a detached capsule).
+    pub top_flush: bool,
+    pub radius_dips: f32,
+    pub layout: &'a super::dynamic_island::IslandHeaderLayout,
+    pub current_page: usize,
+    pub expanded: bool,
+    pub hovered_btn: Option<IslandButton>,
+    pub pressed_btn: Option<IslandButton>,
+    pub border_rgb: Rgb,
+    pub border_width_dips: f32,
+    pub glass_host_active: bool,
+    /// Strip layout hairline divider x positions (island DIPs).
+    pub dividers_dips: &'a [f32],
+}
+
+/// Everything `create_island_detail_surface` needs to draw the expanded detail card.
+pub struct IslandDetailRender<'a> {
+    pub spec: &'a crate::widgets::IslandDetailSpec,
+    pub layout: &'a super::dynamic_island::IslandDetailLayout,
+    pub dpi: f32,
+    pub is_dark: bool,
+    pub glass_host_active: bool,
+    pub hovered_button: Option<usize>,
+    pub pressed_button: Option<usize>,
+    /// Localized label of the trailing "open the full flyout" button.
+    pub open_full_label: &'a str,
+}
+
 impl DcompEngine {
-    /// Draws the Dynamic Island surface (top-flush rounded bottom pill, border, nav chevrons,
-    /// tabular page counter, and expand chevron).
-    #[allow(clippy::too_many_arguments)]
+    /// Draws the Dynamic Island capsule (Notch: top-flush with rounded bottom corners,
+    /// Floating: fully rounded pill), border, symmetric `‹`/`›` navigation, clickable page
+    /// dots, the compact expand chevron and the Strip layout hairline dividers.
     pub fn create_island_chrome_surface(
         &self,
-        width_dips: f32,
-        height_dips: f32,
-        dpi: f32,
-        is_dark: bool,
-        opacity: f32,
-        background: SurfaceBackground,
-        use_theme: bool,
-        has_prev_next: bool,
-        page_count_text: &str,
-        has_expand: bool,
-        expanded: bool,
-        hovered_btn: Option<IslandButton>,
-        pressed_btn: Option<IslandButton>,
-        border_rgb: Rgb,
-        border_width_dips: f32,
-        glass_host_active: bool,
+        r: &IslandChromeRender<'_>,
     ) -> Result<IDCompositionSurface> {
-        let pal = design::palette(is_dark);
-        let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
-        let h_px = (height_dips * dpi).ceil().max(1.0) as u32;
-        let fmt_count = self.cached_text_format(11.0 * dpi, false, 0)?;
+        let pal = design::active_palette(r.is_dark);
+        let dpi = r.dpi.max(0.5);
+        let w_px = (r.width_dips * dpi).ceil().max(1.0) as u32;
+        let h_px = (r.height_dips * dpi).ceil().max(1.0) as u32;
+        let ink = if r.is_dark {
+            (0xff_u8, 0xff_u8, 0xff_u8)
+        } else {
+            (0x18_u8, 0x18_u8, 0x1b_u8)
+        };
 
-        self.draw_surface(w_px, h_px, |dc, w, h| unsafe {
-            let r = island_geo::BOTTOM_RADIUS_DIPS * dpi;
-            let stroke = (border_width_dips * dpi).max(0.0);
-            // Theme follows the active palette; opting out paints a fixed neutral pill.
-            let neutral_pill = if is_dark {
-                (0x2b_u8, 0x2b_u8, 0x30_u8)
-            } else {
-                (0xf7_u8, 0xf7_u8, 0xfa_u8)
-            };
-            let fill_rgb = if background == SurfaceBackground::TrueBlack {
+        self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
+            let mut prev = Matrix3x2::identity();
+            dc.GetTransform(&mut prev);
+            dc.SetTransform(&Matrix3x2 {
+                M11: dpi,
+                M12: 0.0,
+                M21: 0.0,
+                M22: dpi,
+                M31: prev.M31,
+                M32: prev.M32,
+            });
+            let w = r.width_dips;
+            let h = r.height_dips;
+            let stroke = r.border_width_dips.clamp(0.0, 8.0);
+            let radius = r.radius_dips.clamp(0.0, (h * 0.5).min(w * 0.5));
+            let fill_rgb = if r.background == SurfaceBackground::TrueBlack {
                 (0_u8, 0_u8, 0_u8)
-            } else if use_theme {
-                pal.dock_pill
             } else {
-                neutral_pill
+                r.fill_rgb
             };
-            let fill_alpha = match background {
+            let fill_alpha = match r.background {
                 SurfaceBackground::None => 0.0,
                 SurfaceBackground::Solid | SurfaceBackground::TrueBlack => 1.0,
-                SurfaceBackground::Glass if glass_host_active => 0.0,
-                SurfaceBackground::Glass => opacity.clamp(0.1, 1.0),
+                SurfaceBackground::Glass if r.glass_host_active => 0.0,
+                SurfaceBackground::Glass => r.opacity.clamp(0.1, 1.0),
             };
-            let bd_alpha = if is_dark { 0.14_f32 } else { 0.12_f32 };
-            let bd_color = color_rgba(border_rgb.0, border_rgb.1, border_rgb.2, bd_alpha);
-            let bd_brush = dc.CreateSolidColorBrush(&bd_color, None)?;
-
-            // Top-flush rounded rectangle (flat top edge, 20 DIP bottom corners).
-            let pill_rect = D2D1_ROUNDED_RECT {
+            let inset = stroke * 0.5;
+            // Notch: extend the rounded rect above the surface so only the bottom
+            // corners are rounded and the top edge stays razor-flat at y = 0.
+            let capsule = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
-                    left: stroke * 0.5,
-                    top: -r,
-                    right: w - stroke * 0.5,
-                    bottom: h - stroke * 0.5,
+                    left: inset,
+                    top: if r.top_flush { -radius } else { inset },
+                    right: w - inset,
+                    bottom: h - inset,
                 },
-                radiusX: r,
-                radiusY: r,
+                radiusX: radius,
+                radiusY: radius,
             };
             if fill_alpha > 0.0 {
-                let bg_brush = dc.CreateSolidColorBrush(
+                let bg = dc.CreateSolidColorBrush(
                     &color_rgba(fill_rgb.0, fill_rgb.1, fill_rgb.2, fill_alpha),
                     None,
                 )?;
-                dc.FillRoundedRectangle(&pill_rect, &bg_brush);
+                dc.FillRoundedRectangle(&capsule, &bg);
             }
-            if background != SurfaceBackground::None
-                && background != SurfaceBackground::TrueBlack
-                && !(glass_host_active && background == SurfaceBackground::Glass)
+            if stroke > 0.0
+                && r.background != SurfaceBackground::None
+                && r.background != SurfaceBackground::TrueBlack
+                && !(r.glass_host_active && r.background == SurfaceBackground::Glass)
             {
-                dc.DrawRoundedRectangle(&pill_rect, &bd_brush, stroke, None);
-            }
-
-            let draw_btn = |btn: IslandButton, cx_dips: f32, glyph: &str, enabled: bool| -> Result<()> {
-                let bx = cx_dips * dpi;
-                let by = 9.0 * dpi;
-                let bsz = 32.0 * dpi;
-                let is_pressed = pressed_btn == Some(btn);
-                let is_hovered = hovered_btn == Some(btn);
-                if enabled && (is_pressed || is_hovered) {
-                    let alpha = if is_pressed {
-                        0.16
-                    } else if is_dark {
-                        0.10
-                    } else {
-                        0.08
-                    };
-                    let ink = if is_dark { (0xff, 0xff, 0xff) } else { (0x18, 0x18, 0x1b) };
-                    let hb = dc.CreateSolidColorBrush(&color_rgba(ink.0, ink.1, ink.2, alpha), None)?;
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: bx,
-                                top: by,
-                                right: bx + bsz,
-                                bottom: by + bsz,
-                            },
-                            radiusX: island_geo::BUTTON_RADIUS_DIPS * dpi,
-                            radiusY: island_geo::BUTTON_RADIUS_DIPS * dpi,
-                        },
-                        &hb,
-                    );
-                }
-                let ink = if enabled { pal.text_primary } else { pal.text_secondary };
-                let alpha = if enabled { 0.92 } else { 0.35 };
-                draw_fluent_str_d2d(
-                    &self.dwrite_factory,
-                    dc,
-                    glyph,
-                    D2D_RECT_F {
-                        left: bx,
-                        top: by,
-                        right: bx + bsz,
-                        bottom: by + bsz,
-                    },
-                    13.0 * dpi,
-                    ink,
-                    alpha,
-                )
-            };
-
-            if has_prev_next {
-                draw_btn(
-                    IslandButton::Prev,
-                    3.0,
-                    icons::glyph_for_icon(AppIcon::ChevronLeft),
-                    true,
-                )?;
-            }
-            let right_total = 38.0 + 56.0 + 38.0;
-            let next_x = width_dips - right_total;
-            if has_prev_next {
-                draw_btn(
-                    IslandButton::Next,
-                    next_x + 3.0,
-                    icons::glyph_for_icon(AppIcon::ChevronRight),
-                    true,
-                )?;
-            }
-
-            if !page_count_text.is_empty() {
-                let count_rect = D2D_RECT_F {
-                    left: (next_x + 38.0) * dpi,
-                    top: 0.0,
-                    right: (next_x + 38.0 + 56.0) * dpi,
-                    bottom: 50.0 * dpi,
-                };
-                let sec_brush = dc.CreateSolidColorBrush(
-                    &color_rgba(pal.text_secondary.0, pal.text_secondary.1, pal.text_secondary.2, 0.9),
+                let bd_alpha = if r.is_dark { 0.14 } else { 0.12 };
+                let bd = dc.CreateSolidColorBrush(
+                    &color_rgba(r.border_rgb.0, r.border_rgb.1, r.border_rgb.2, bd_alpha),
                     None,
                 )?;
-                let layout = self.dwrite_factory.CreateTextLayout(
-                    &HSTRING::from(page_count_text),
-                    &fmt_count,
-                    56.0 * dpi,
-                    50.0 * dpi,
+                dc.DrawRoundedRectangle(&capsule, &bd, stroke, None);
+            }
+
+            // Strip layout: crisp 1 DIP hairlines between packed widgets.
+            if !r.dividers_dips.is_empty() {
+                let header = r.layout.chip_top + r.layout.chip_h;
+                let div = dc.CreateSolidColorBrush(
+                    &color_rgba(ink.0, ink.1, ink.2, if r.is_dark { 0.16 } else { 0.14 }),
+                    None,
                 )?;
-                if let Ok(typo) = self.dwrite_factory.CreateTypography() {
-                    let _ = typo.AddFontFeature(
-                        windows::Win32::Graphics::DirectWrite::DWRITE_FONT_FEATURE {
-                            nameTag: windows::Win32::Graphics::DirectWrite::DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
-                            parameter: 1,
+                for x in r.dividers_dips {
+                    let x = x.round() + 0.5 / dpi;
+                    dc.FillRectangle(
+                        &D2D_RECT_F {
+                            left: x - 0.5,
+                            top: r.layout.chip_top + 8.0,
+                            right: x + 0.5,
+                            bottom: (header - 8.0).max(r.layout.chip_top + 9.0),
                         },
-                    );
-                    let _ = layout.SetTypography(
-                        &typo,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {
-                            startPosition: 0,
-                            length: page_count_text.encode_utf16().count() as u32,
-                        },
+                        &div,
                     );
                 }
-                dc.DrawTextLayout(
-                    Vector2 {
-                        X: count_rect.left,
-                        Y: count_rect.top,
+            }
+
+            let draw_btn =
+                |btn: IslandButton, rect: (f32, f32, f32, f32), glyph: &str| -> Result<()> {
+                    let is_pressed = r.pressed_btn == Some(btn);
+                    let is_hovered = r.hovered_btn == Some(btn);
+                    let (l, t, rr, b) = rect;
+                    if is_pressed || is_hovered {
+                        let alpha = if is_pressed {
+                            0.16
+                        } else if r.is_dark {
+                            0.10
+                        } else {
+                            0.08
+                        };
+                        let hb = dc
+                            .CreateSolidColorBrush(&color_rgba(ink.0, ink.1, ink.2, alpha), None)?;
+                        let br = island_geo::BUTTON_RADIUS_DIPS.max(6.0);
+                        dc.FillRoundedRectangle(
+                            &D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left: l,
+                                    top: t,
+                                    right: rr,
+                                    bottom: b,
+                                },
+                                radiusX: br,
+                                radiusY: br,
+                            },
+                            &hb,
+                        );
+                    }
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        glyph,
+                        D2D_RECT_F {
+                            left: l,
+                            top: t,
+                            right: rr,
+                            bottom: b,
+                        },
+                        12.0,
+                        pal.text_primary,
+                        if is_hovered || is_pressed { 0.98 } else { 0.78 },
+                    )
+                };
+
+            if let Some(rect) = r.layout.prev {
+                draw_btn(
+                    IslandButton::Prev,
+                    rect,
+                    icons::glyph_for_icon(AppIcon::ChevronLeft),
+                )?;
+            }
+            if let Some(rect) = r.layout.next {
+                draw_btn(
+                    IslandButton::Next,
+                    rect,
+                    icons::glyph_for_icon(AppIcon::ChevronRight),
+                )?;
+            }
+            if let Some(rect) = r.layout.expand {
+                let glyph = if r.expanded {
+                    icons::named_glyph("ChevronUp").unwrap_or("\u{E70E}")
+                } else {
+                    icons::named_glyph("ChevronDown").unwrap_or("\u{E70D}")
+                };
+                draw_btn(IslandButton::Expand, rect, glyph)?;
+            }
+
+            // Page indicator: 6 DIP dots, the active page a 14×6 DIP pill.
+            for (page, (l, t, rr, b)) in &r.layout.dots {
+                let active = *page == r.current_page;
+                let hovered = r.hovered_btn == Some(IslandButton::Dot(*page as u8));
+                let (color, alpha) = if active {
+                    (pal.text_primary, 0.92)
+                } else if hovered {
+                    (pal.text_primary, 0.62)
+                } else {
+                    (pal.text_secondary, 0.38)
+                };
+                let brush =
+                    dc.CreateSolidColorBrush(&color_rgba(color.0, color.1, color.2, alpha), None)?;
+                let dot_r = (b - t) * 0.5;
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: *l,
+                            top: *t,
+                            right: *rr,
+                            bottom: *b,
+                        },
+                        radiusX: dot_r,
+                        radiusY: dot_r,
                     },
-                    &layout,
-                    &sec_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    &brush,
                 );
             }
+            dc.SetTransform(&prev);
+            Ok(())
+        })
+    }
 
-            if has_expand {
-                let expand_x = width_dips - 35.0;
-                let glyph = if expanded {
-                    icons::named_glyph("ChevronDown").unwrap_or("\u{E70E}")
-                } else {
-                    icons::named_glyph("ChevronUp").unwrap_or("\u{E70D}")
+    /// Rich expanded Dynamic Island card: localized title, bold headline metric, subtitle,
+    /// up to four stat rows with rounded progress bars and up to three quick actions plus
+    /// an "open full flyout" button. Geometry comes from `IslandDetailLayout` so the
+    /// island's hit testing always matches what is drawn.
+    pub fn create_island_detail_surface(
+        &self,
+        r: &IslandDetailRender<'_>,
+    ) -> Result<IDCompositionSurface> {
+        let pal = design::active_palette(r.is_dark);
+        let dpi = r.dpi.max(0.5);
+        let layout = r.layout;
+        let (pl, pt, pr, pb) = layout.panel;
+        let panel_w = (pr - pl).max(1.0);
+        let panel_h = (pb - pt).max(1.0);
+        let w_px = (panel_w * dpi).ceil().max(1.0) as u32;
+        let h_px = (panel_h * dpi).ceil().max(1.0) as u32;
+        let ink = if r.is_dark {
+            (0xff_u8, 0xff_u8, 0xff_u8)
+        } else {
+            (0x00_u8, 0x00_u8, 0x00_u8)
+        };
+        let fmt_title = self.cached_text_format(design::fonts::scaled_size(11.0), true, 1)?;
+        let fmt_headline = self.cached_text_format(design::fonts::scaled_size(20.0), true, 1)?;
+        let fmt_sub = self.cached_text_format(design::fonts::scaled_size(11.0), false, 1)?;
+        let fmt_label = self.cached_text_format(design::fonts::scaled_size(11.0), false, 1)?;
+        let fmt_value = self.cached_text_format(design::fonts::scaled_size(11.0), true, 2)?;
+        let fmt_button = self.cached_text_format(design::fonts::scaled_size(11.0), true, 0)?;
+        let accent = pal.widget_accent;
+
+        self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
+            let mut prev = Matrix3x2::identity();
+            dc.GetTransform(&mut prev);
+            dc.SetTransform(&Matrix3x2 {
+                M11: dpi,
+                M12: 0.0,
+                M21: 0.0,
+                M22: dpi,
+                M31: prev.M31,
+                M32: prev.M32,
+            });
+            // Island-local rect -> panel-local rect.
+            let local = |rect: (f32, f32, f32, f32)| D2D_RECT_F {
+                left: rect.0 - pl,
+                top: rect.1 - pt,
+                right: rect.2 - pl,
+                bottom: rect.3 - pt,
+            };
+            let rounded = |rect: D2D_RECT_F, radius: f32| D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let panel_fill = if r.glass_host_active {
+                color_rgba(ink.0, ink.1, ink.2, if r.is_dark { 0.07 } else { 0.05 })
+            } else if r.is_dark {
+                color_rgba(0x1b, 0x21, 0x2d, 0.97)
+            } else {
+                color_rgba(0xf2, 0xf4, 0xfa, 0.97)
+            };
+            let panel_brush = dc.CreateSolidColorBrush(&panel_fill, None)?;
+            dc.FillRoundedRectangle(
+                &rounded(
+                    D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: panel_w,
+                        bottom: panel_h,
+                    },
+                    island_geo::CHIP_RADIUS_DIPS,
+                ),
+                &panel_brush,
+            );
+
+            let p_brush = dc.CreateSolidColorBrush(
+                &color_rgba(
+                    pal.text_primary.0,
+                    pal.text_primary.1,
+                    pal.text_primary.2,
+                    0.98,
+                ),
+                None,
+            )?;
+            let s_brush = dc.CreateSolidColorBrush(
+                &color_rgba(
+                    pal.text_secondary.0,
+                    pal.text_secondary.1,
+                    pal.text_secondary.2,
+                    0.92,
+                ),
+                None,
+            )?;
+            let draw_text =
+                |text: &str,
+                 fmt: &IDWriteTextFormat,
+                 rect: D2D_RECT_F,
+                 brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush| {
+                    if text.is_empty() {
+                        return;
+                    }
+                    let wtxt: Vec<u16> = text.encode_utf16().collect();
+                    if let Ok(text_layout) = self.dwrite_factory.CreateTextLayout(
+                        &wtxt,
+                        fmt,
+                        (rect.right - rect.left).max(1.0),
+                        (rect.bottom - rect.top).max(1.0),
+                    ) {
+                        dc.DrawTextLayout(
+                            Vector2 {
+                                X: rect.left,
+                                Y: rect.top,
+                            },
+                            &text_layout,
+                            brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
                 };
-                draw_btn(IslandButton::Expand, expand_x, glyph, true)?;
+
+            draw_text(&r.spec.title, &fmt_title, local(layout.title), &s_brush);
+            draw_text(
+                &r.spec.headline,
+                &fmt_headline,
+                local(layout.headline),
+                &p_brush,
+            );
+            draw_text(&r.spec.subtitle, &fmt_sub, local(layout.subtitle), &s_brush);
+
+            let track = dc.CreateSolidColorBrush(
+                &color_rgba(ink.0, ink.1, ink.2, if r.is_dark { 0.14 } else { 0.10 }),
+                None,
+            )?;
+            for (row, rect) in r.spec.rows.iter().zip(layout.rows.iter()) {
+                let rc = local(*rect);
+                let text_bottom = if row.progress.is_some() {
+                    rc.bottom - 7.0
+                } else {
+                    rc.bottom
+                };
+                draw_text(
+                    &row.label,
+                    &fmt_label,
+                    D2D_RECT_F {
+                        right: rc.left + (rc.right - rc.left) * 0.58,
+                        bottom: text_bottom,
+                        ..rc
+                    },
+                    &s_brush,
+                );
+                draw_text(
+                    &row.value,
+                    &fmt_value,
+                    D2D_RECT_F {
+                        left: rc.left + (rc.right - rc.left) * 0.42,
+                        bottom: text_bottom,
+                        ..rc
+                    },
+                    &p_brush,
+                );
+                if let Some(progress) = row.progress.filter(|p| p.is_finite()) {
+                    let ratio = progress.clamp(0.0, 1.0);
+                    let bar = D2D_RECT_F {
+                        left: rc.left,
+                        top: rc.bottom - 5.0,
+                        right: rc.right,
+                        bottom: rc.bottom - 1.0,
+                    };
+                    dc.FillRoundedRectangle(&rounded(bar, 2.0), &track);
+                    let fill_w = (bar.right - bar.left) * ratio;
+                    if fill_w >= 1.0 {
+                        let color = if ratio >= 0.9 {
+                            pal.danger
+                        } else if ratio >= 0.75 {
+                            pal.warning
+                        } else {
+                            accent
+                        };
+                        let fill = dc.CreateSolidColorBrush(
+                            &color_rgba(color.0, color.1, color.2, 0.95),
+                            None,
+                        )?;
+                        dc.FillRoundedRectangle(
+                            &rounded(
+                                D2D_RECT_F {
+                                    right: bar.left + fill_w.max(4.0),
+                                    ..bar
+                                },
+                                2.0,
+                            ),
+                            &fill,
+                        );
+                    }
+                }
             }
 
+            for (idx, rect) in layout.buttons.iter().enumerate() {
+                let (label, primary) = match r.spec.actions.get(idx) {
+                    Some(action) => (action.label.as_str(), action.primary),
+                    None => (r.open_full_label, false),
+                };
+                let hovered = r.hovered_button == Some(idx);
+                let pressed = r.pressed_button == Some(idx);
+                let rc = local(*rect);
+                let (fill, text_brush) = if primary {
+                    let alpha = if pressed {
+                        0.78
+                    } else if hovered {
+                        1.0
+                    } else {
+                        0.90
+                    };
+                    let white =
+                        dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, 0.98), None)?;
+                    (color_rgba(accent.0, accent.1, accent.2, alpha), white)
+                } else {
+                    let alpha = match (pressed, hovered, r.is_dark) {
+                        (true, _, true) => 0.20,
+                        (true, _, false) => 0.15,
+                        (false, true, true) => 0.14,
+                        (false, true, false) => 0.10,
+                        (false, false, true) => 0.08,
+                        (false, false, false) => 0.06,
+                    };
+                    (color_rgba(ink.0, ink.1, ink.2, alpha), p_brush.clone())
+                };
+                let fill_brush = dc.CreateSolidColorBrush(&fill, None)?;
+                dc.FillRoundedRectangle(&rounded(rc, 8.0), &fill_brush);
+                draw_text(
+                    label,
+                    &fmt_button,
+                    D2D_RECT_F {
+                        left: rc.left + 6.0,
+                        right: rc.right - 6.0,
+                        ..rc
+                    },
+                    &text_brush,
+                );
+            }
+            dc.SetTransform(&prev);
             Ok(())
         })
     }

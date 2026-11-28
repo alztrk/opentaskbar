@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
-use super::catalog_ops::{compact_id, setting_value};
+use super::catalog_ops::setting_value;
 
 /// `DockWidget.ShrinkPriority` — lower values shrink first when the dock overflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -524,22 +524,43 @@ pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
         })
 }
 
-/// Resolves a user-facing / legacy widget ID to its canonical catalog ID.
+/// Zero-allocation comparison ignoring `_`/`-` and ASCII/Unicode case, matching `compact_id`.
+fn eq_compact_id(a: &str, b: &str) -> bool {
+    let mut ai = a
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase);
+    let mut bi = b
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase);
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(ac), Some(bc)) if ac == bc => continue,
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Resolves a user-facing / legacy widget ID to its canonical catalog ID without heap allocation.
 pub fn canonical_widget_id(id: &str) -> &str {
-    let lower = id.to_ascii_lowercase();
+    // Fast path: exact case-insensitive match against built-in IDs (covers 99% of hot-path calls).
+    if let Some(w) = BUILTINS.iter().find(|w| w.id.eq_ignore_ascii_case(id)) {
+        return w.id;
+    }
     if let Some((_, canonical)) = WIDGET_ALIASES
         .iter()
-        .find(|(alias, _)| alias.eq_ignore_ascii_case(&lower))
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(id))
     {
         return canonical;
     }
     // Reference writes `AiUsageClaude` / `KeyboardLayout` while the catalog uses
     // `aiusage_claude` / `keyboard`; ignore word separators so both spellings
     // resolve to the same card. Only catalog IDs participate, exactly as before.
-    let compact = compact_id(&lower);
     BUILTINS
         .iter()
-        .find(|w| compact_id(w.id) == compact)
+        .find(|w| eq_compact_id(w.id, id))
         .map_or(id, |w| w.id)
 }
 

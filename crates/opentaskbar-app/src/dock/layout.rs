@@ -131,20 +131,10 @@ pub fn legacy_magnification_expands_dock(settings: &DockSettings) -> Option<bool
 /// `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
 /// shared host into one executable-keyed slot instead of grouping by AUMID.
 pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
-    if let Some(value) = settings
+    settings
         .extra
         .get("AggregateByExecutablePath")
         .and_then(|v| v.as_bool())
-    {
-        return value;
-    }
-    serde_json::to_value(settings)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("AggregateByExecutablePath")
-                .and_then(|v| v.as_bool())
-        })
         .unwrap_or(false)
 }
 

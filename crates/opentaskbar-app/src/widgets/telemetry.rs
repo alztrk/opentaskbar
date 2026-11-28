@@ -3588,6 +3588,358 @@ pub fn ai_api_key_providers() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+fn canonical_ai_provider_id(provider_id: &str) -> Option<&'static str> {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "aiusage_claude" | "claude" => Some("aiusage_claude"),
+        "aiusage_codex" | "codex" => Some("aiusage_codex"),
+        "aiusage_opencode" | "opencode" => Some("aiusage_opencode"),
+        "aiusage_copilot" | "copilot" => Some("aiusage_copilot"),
+        "aiusage_deepseek" | "deepseek" => Some("aiusage_deepseek"),
+        "aiusage_openrouter" | "openrouter" => Some("aiusage_openrouter"),
+        "aiusage_cursor" | "cursor" => Some("aiusage_cursor"),
+        _ => None,
+    }
+}
+
+/// DPAPI secret store key for any of the seven AI usage providers.
+pub fn ai_secret_key_for_provider(provider_id: &str) -> Option<&'static str> {
+    match canonical_ai_provider_id(provider_id)? {
+        "aiusage_claude" => Some("api-key:claude"),
+        "aiusage_codex" => Some("api-key:codex"),
+        "aiusage_opencode" => Some("api-key:opencode"),
+        "aiusage_copilot" => Some("api-key:copilot"),
+        "aiusage_deepseek" => Some("api-key:deepseek"),
+        "aiusage_openrouter" => Some("api-key:openrouter"),
+        "aiusage_cursor" => Some("api-key:cursor"),
+        _ => None,
+    }
+}
+
+/// Source that supplies credentials for an AI provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiAuthSource {
+    None,
+    Env,
+    Dpapi,
+    CliFile,
+    GhKeyring,
+    CursorPkce,
+}
+
+/// Non-blocking credential and CLI presence probe for Settings UI & telemetry diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiAuthProbe {
+    pub source: AiAuthSource,
+    pub cli_installed: bool,
+    pub has_token: bool,
+    pub env_override: bool,
+    pub secret_key: &'static str,
+    pub env_var_hint: &'static str,
+}
+
+fn find_executable_on_path(command: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        for extension in [".exe", ".cmd", ".bat", ""] {
+            let candidate = dir.join(format!("{command}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn json_has_non_empty_str(val: &serde_json::Value, keys: &[&str]) -> bool {
+    keys.iter().any(|k| {
+        val.get(*k)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+    })
+}
+
+fn claude_cli_file_has_token(home: Option<&PathBuf>) -> bool {
+    let Some(path) = home.map(|h| h.join(".claude").join(".credentials.json")) else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let auth = v.get("claudeAiOauth").unwrap_or(&v);
+    json_has_non_empty_str(
+        auth,
+        &[
+            "accessToken",
+            "access_token",
+            "refreshToken",
+            "refresh_token",
+        ],
+    )
+}
+
+fn codex_cli_file_has_token(home: Option<&PathBuf>) -> bool {
+    let paths = [
+        home.map(|h| h.join(".codex").join("auth.json")),
+        home.map(|h| {
+            h.join(".local")
+                .join("share")
+                .join("codex")
+                .join("auth.json")
+        }),
+    ];
+    paths.into_iter().flatten().any(|path| {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return false;
+        };
+        let tokens = v.get("tokens").unwrap_or(&v);
+        json_has_non_empty_str(tokens, &["access_token", "api_key"])
+    })
+}
+
+fn opencode_cli_file_token(home: Option<&PathBuf>, local: Option<&PathBuf>) -> Option<String> {
+    let paths = [
+        home.map(|h| h.join(".opencode").join("auth.json")),
+        home.map(|h| {
+            h.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("auth.json")
+        }),
+        local.map(|l| l.join("opencode").join("auth.json")),
+    ];
+    paths.into_iter().flatten().find_map(|path| {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        v.get("token")
+            .or_else(|| v.get("access_token"))
+            .and_then(|t| t.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn copilot_cli_file_token(home: Option<&PathBuf>, local: Option<&PathBuf>) -> Option<String> {
+    let paths = [
+        home.map(|h| h.join(".config").join("github-copilot").join("apps.json")),
+        local.map(|l| l.join("github-copilot").join("apps.json")),
+    ];
+    for path in paths.into_iter().flatten() {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&raw)
+        {
+            for val in map.values() {
+                if let Some(tok) = val.get("oauth_token").and_then(|s| s.as_str())
+                    && !tok.trim().is_empty()
+                {
+                    return Some(tok.trim().to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn gh_hosts_has_auth(home: Option<&PathBuf>, appdata: Option<&PathBuf>) -> bool {
+    let paths = [
+        appdata.map(|d| d.join("GitHub CLI").join("hosts.yml")),
+        home.map(|h| h.join(".config").join("gh").join("hosts.yml")),
+    ];
+    paths
+        .into_iter()
+        .flatten()
+        .any(|p| std::fs::read_to_string(p).is_ok_and(|s| !s.trim().is_empty()))
+}
+
+/// Fast, non-blocking probe of credential sources and CLI availability for `provider_id`.
+pub fn ai_auth_probe(provider_id: &str) -> AiAuthProbe {
+    let Some(canonical) = canonical_ai_provider_id(provider_id) else {
+        return AiAuthProbe {
+            source: AiAuthSource::None,
+            cli_installed: false,
+            has_token: false,
+            env_override: false,
+            secret_key: "",
+            env_var_hint: "",
+        };
+    };
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+    let secret_key = ai_secret_key_for_provider(canonical).unwrap_or("");
+    let has_dpapi = !secret_key.is_empty() && has_dpapi_secret(secret_key);
+
+    match canonical {
+        "aiusage_claude" => {
+            let env_override = env_token(&["ANTHROPIC_API_KEY"]).is_some();
+            let cli_installed = find_executable_on_path("claude").is_some();
+            let cli_file = claude_cli_file_has_token(home.as_ref());
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if cli_file {
+                AiAuthSource::CliFile
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "ANTHROPIC_API_KEY",
+            }
+        }
+        "aiusage_codex" => {
+            let env_override = env_token(&["CODEX_API_KEY"]).is_some();
+            let cli_installed = find_executable_on_path("codex").is_some();
+            let cli_file = codex_cli_file_has_token(home.as_ref());
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if cli_file {
+                AiAuthSource::CliFile
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "CODEX_API_KEY",
+            }
+        }
+        "aiusage_opencode" => {
+            let env_override = env_token(&[
+                "OPENCODE_GO_API_KEY",
+                "OPENCODE_API_KEY",
+                "OPENCODE_ZEN_API_KEY",
+            ])
+            .is_some();
+            let cli_installed = find_executable_on_path("opencode").is_some();
+            let cli_file = opencode_cli_file_token(home.as_ref(), local.as_ref()).is_some();
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else if cli_file {
+                AiAuthSource::CliFile
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "OPENCODE_GO_API_KEY",
+            }
+        }
+        "aiusage_copilot" => {
+            let env_override = env_token(&["GITHUB_TOKEN", "GH_TOKEN"]).is_some();
+            let cli_installed = find_executable_on_path("gh").is_some();
+            let cli_file = copilot_cli_file_token(home.as_ref(), local.as_ref()).is_some();
+            let gh_keyring = cli_installed && gh_hosts_has_auth(home.as_ref(), appdata.as_ref());
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if cli_file {
+                AiAuthSource::CliFile
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else if gh_keyring {
+                AiAuthSource::GhKeyring
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "GITHUB_TOKEN",
+            }
+        }
+        "aiusage_deepseek" => {
+            let env_override = env_token(&["DEEPSEEK_API_KEY"]).is_some();
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed: false,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "DEEPSEEK_API_KEY",
+            }
+        }
+        "aiusage_openrouter" => {
+            let env_override = env_token(&["OPENROUTER_API_KEY"]).is_some();
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed: false,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "OPENROUTER_API_KEY",
+            }
+        }
+        "aiusage_cursor" => {
+            let env_override = env_token(&["CURSOR_API_KEY"]).is_some();
+            let pkce = crate::platform::cursor_auth::has_session();
+            let source = if env_override {
+                AiAuthSource::Env
+            } else if pkce {
+                AiAuthSource::CursorPkce
+            } else if has_dpapi {
+                AiAuthSource::Dpapi
+            } else {
+                AiAuthSource::None
+            };
+            AiAuthProbe {
+                source,
+                cli_installed: false,
+                has_token: source != AiAuthSource::None,
+                env_override,
+                secret_key,
+                env_var_hint: "CURSOR_API_KEY",
+            }
+        }
+        _ => AiAuthProbe {
+            source: AiAuthSource::None,
+            cli_installed: false,
+            has_token: false,
+            env_override: false,
+            secret_key: "",
+            env_var_hint: "",
+        },
+    }
+}
+
 /// Reads a token from an environment override. Environment variables always win over stored
 /// credentials so a user can rotate a key without touching the DPAPI store (`AiUsageService`).
 fn env_token(names: &[&str]) -> Option<String> {
@@ -3668,9 +4020,10 @@ fn refresh_claude_oauth(path: &std::path::Path, auth: &serde_json::Value) -> Opt
 }
 
 fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
+    let canonical = canonical_ai_provider_id(provider_id)?;
     let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    match provider_id {
+    match canonical {
         "aiusage_deepseek" => env_token(&["DEEPSEEK_API_KEY"])
             .or_else(|| read_dpapi_secret("api-key:deepseek"))
             .map(|t| (t, None)),
@@ -3683,53 +4036,40 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
             "OPENCODE_ZEN_API_KEY",
         ])
         .or_else(|| read_dpapi_secret("api-key:opencode"))
-        .or_else(|| {
-            // Legacy opencode CLI locations (both Windows and portable home layouts).
-            let paths = [
-                home.as_ref().map(|h| h.join(".opencode").join("auth.json")),
-                home.as_ref().map(|h| {
-                    h.join(".local")
-                        .join("share")
-                        .join("opencode")
-                        .join("auth.json")
-                }),
-                local.as_ref().map(|l| l.join("opencode").join("auth.json")),
-            ];
-            paths.into_iter().flatten().find_map(|path| {
-                let v: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-                v.get("token")
-                    .or_else(|| v.get("access_token"))
-                    .and_then(|t| t.as_str())
-                    .map(str::to_owned)
-            })
-        })
+        .or_else(|| opencode_cli_file_token(home.as_ref(), local.as_ref()))
         .map(|t| (t, None)),
         "aiusage_claude" => {
             if let Some(key) = env_token(&["ANTHROPIC_API_KEY"]) {
                 return Some((key, None));
             }
-            let path = home?.join(".claude").join(".credentials.json");
-            let raw = std::fs::read_to_string(&path).ok()?;
-            let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-            let auth = v.get("claudeAiOauth").unwrap_or(&v).clone();
-            let mut tok = auth
-                .get("accessToken")
-                .or_else(|| auth.get("access_token"))
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
-            if tok.is_empty()
-                && let Some(refreshed) = refresh_claude_oauth(&path, &auth)
+            if let Some(path) = home
+                .as_ref()
+                .map(|h| h.join(".claude").join(".credentials.json"))
+                && let Ok(raw) = std::fs::read_to_string(&path)
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
             {
-                tok = refreshed;
+                let auth = v.get("claudeAiOauth").unwrap_or(&v).clone();
+                let mut tok = auth
+                    .get("accessToken")
+                    .or_else(|| auth.get("access_token"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                if tok.is_empty()
+                    && let Some(refreshed) = refresh_claude_oauth(&path, &auth)
+                {
+                    tok = refreshed;
+                }
+                let plan = auth
+                    .get("subscriptionType")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_owned);
+                if !tok.is_empty() {
+                    return Some((tok, plan));
+                }
             }
-            let plan = auth
-                .get("subscriptionType")
-                .and_then(|s| s.as_str())
-                .map(str::to_owned);
-            (!tok.is_empty()).then_some((tok, plan))
+            read_dpapi_secret("api-key:claude").map(|t| (t, None))
         }
         "aiusage_codex" => {
             if let Some(key) = env_token(&["CODEX_API_KEY"]) {
@@ -3767,36 +4107,23 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
                     .map(str::to_owned);
                 return Some((tok.to_owned(), acct));
             }
-            None
+            read_dpapi_secret("api-key:codex").map(|t| (t, None))
         }
         "aiusage_copilot" => {
             if let Some(key) = env_token(&["GITHUB_TOKEN", "GH_TOKEN"]) {
                 return Some((key, None));
             }
-            let paths = [
-                home.as_ref()
-                    .map(|h| h.join(".config").join("github-copilot").join("apps.json")),
-                local
-                    .as_ref()
-                    .map(|l| l.join("github-copilot").join("apps.json")),
-            ];
-            for path in paths.into_iter().flatten() {
-                if let Ok(raw) = std::fs::read_to_string(path)
-                    && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&raw)
-                {
-                    for val in map.values() {
-                        if let Some(tok) = val.get("oauth_token").and_then(|s| s.as_str())
-                            && !tok.trim().is_empty()
-                        {
-                            return Some((tok.trim().to_owned(), None));
-                        }
-                    }
-                }
+            if let Some(tok) = copilot_cli_file_token(home.as_ref(), local.as_ref()) {
+                return Some((tok, None));
+            }
+            if let Some(tok) = read_dpapi_secret("api-key:copilot") {
+                return Some((tok, None));
             }
             gh_cli_token().map(|tok| (tok, None))
         }
-        "aiusage_cursor" => crate::platform::cursor_auth::token()
-            .or_else(|| env_token(&["CURSOR_API_KEY"]))
+        "aiusage_cursor" => env_token(&["CURSOR_API_KEY"])
+            .or_else(crate::platform::cursor_auth::token)
+            .or_else(|| read_dpapi_secret("api-key:cursor"))
             .map(|tok| (tok, None)),
         _ => None,
     }
@@ -4135,40 +4462,10 @@ pub fn refresh_ai_provider(
         });
 }
 
-/// Checks whether a local CLI/app config or DPAPI secret exists for `provider_id`.
+/// Checks whether credentials or a CLI installation exist for `provider_id`.
 pub fn ai_provider_detected(provider_id: &str) -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
-        return false;
-    };
-    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let secrets = opentaskbar_core::paths::secrets_dir();
-    let has_dpapi = |name: &str| secrets.join(format!("{name}.bin")).exists();
-    match provider_id {
-        "aiusage_claude" => home.join(".claude").exists(),
-        "aiusage_codex" => home.join(".codex").exists(),
-        "aiusage_opencode" => {
-            has_dpapi("api-key_opencode")
-                || home.join(".local").join("share").join("opencode").exists()
-                || appdata.is_some_and(|d| d.join("opencode").exists())
-        }
-        "aiusage_copilot" => {
-            home.join(".config").join("github-copilot").exists()
-                || local.is_some_and(|d| d.join("github-copilot").exists())
-        }
-        "aiusage_deepseek" => {
-            has_dpapi("api-key_deepseek") || std::env::var_os("DEEPSEEK_API_KEY").is_some()
-        }
-        "aiusage_openrouter" => {
-            has_dpapi("api-key_openrouter") || std::env::var_os("OPENROUTER_API_KEY").is_some()
-        }
-        "aiusage_cursor" => {
-            crate::platform::cursor_auth::token().is_some()
-                || std::env::var_os("CURSOR_API_KEY").is_some()
-                || appdata.is_some_and(|d| d.join("Cursor").exists())
-        }
-        _ => false,
-    }
+    let probe = ai_auth_probe(provider_id);
+    probe.has_token || probe.cli_installed
 }
 
 #[cfg(test)]
@@ -4765,9 +5062,7 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
     };
 
     if provider == "aiusage_cursor" || provider == "cursor" {
-        let token = crate::platform::cursor_auth::token()
-            .or_else(|| read_provider_token("aiusage_cursor").map(|(t, _)| t));
-        let Some(token) = token else {
+        let Some(token) = read_provider_token("aiusage_cursor").map(|(t, _)| t) else {
             out.error = Some("sign_in".to_owned());
             return out;
         };
@@ -4898,6 +5193,59 @@ pub fn ai_full_windows(detail: &AiFullDetail) -> Vec<(&str, f32, &str)> {
         rows.push((share.name.as_str(), share.used, "—"));
     }
     rows
+}
+
+/// Runs a live connection test for `provider_id`, returning `(true, summary)` on success or
+/// `(false, error_reason)` on failure.
+pub fn test_ai_connection(provider_id: &str) -> (bool, String) {
+    let Some(canonical) = canonical_ai_provider_id(provider_id) else {
+        return (false, "Unknown AI provider".to_owned());
+    };
+    let meta = ai_provider_meta(canonical);
+    let probe = ai_auth_probe(canonical);
+    let detail = ai_fetch_full(canonical);
+    if let Some(err) = &detail.error {
+        let reason = match err.as_str() {
+            "sign_in" => {
+                if !probe.has_token {
+                    let hint = meta.map_or(probe.env_var_hint, |m| m.signin_hint);
+                    format!("{} ({hint})", loc::t("AiUsageAccountSignInRequired"))
+                } else {
+                    format!("{} (401/403)", loc::t("AiUsageAccountSignInRequired"))
+                }
+            }
+            "rate_limited" => match detail.retry_after_secs {
+                Some(secs) => format!(
+                    "{} ({})",
+                    loc::t("ErrorAiUsageRateLimited"),
+                    loc::t_fmt("AiUsageRetryAfter", &[&secs.to_string()])
+                ),
+                None => loc::t("ErrorAiUsageRateLimited"),
+            },
+            "unknown_provider" => "Unknown AI provider".to_owned(),
+            _ => loc::t("ErrorAiUsageLoad"),
+        };
+        return (false, reason);
+    }
+
+    let pct = (detail.used * 100.0).round() as u32;
+    let pct_str = loc::t_fmt("OpacityPercent", &[&pct.to_string()]);
+    let mut parts = vec![loc::t("AiUsageAccountConnected")];
+    if let Some(plan) = detail.plan.as_deref().filter(|p| !p.is_empty()) {
+        parts.push(plan.to_owned());
+    }
+    if matches!(canonical, "aiusage_deepseek" | "aiusage_openrouter") {
+        if detail.plan.is_none()
+            && let Some(credits) = detail.credits
+        {
+            parts.push(format!("${credits:.2}"));
+        }
+    } else if !detail.label.is_empty() {
+        parts.push(format!("{} {pct_str}", detail.label));
+    } else {
+        parts.push(pct_str);
+    }
+    (true, parts.join(" · "))
 }
 
 // ============================================================================================
@@ -5368,5 +5716,43 @@ mod sweep_parity_tests {
         assert_eq!(weather_kind_from_wmo(61), WeatherKind::Rain);
         assert_eq!(weather_kind_from_wmo(73), WeatherKind::Snow);
         assert_eq!(weather_kind_from_wmo(95), WeatherKind::Storm);
+    }
+
+    #[test]
+    fn ai_auth_probe_covers_all_seven_providers_with_secret_keys_and_env_hints() {
+        let expected = [
+            ("aiusage_claude", "api-key:claude", "ANTHROPIC_API_KEY"),
+            ("aiusage_codex", "api-key:codex", "CODEX_API_KEY"),
+            (
+                "aiusage_opencode",
+                "api-key:opencode",
+                "OPENCODE_GO_API_KEY",
+            ),
+            ("aiusage_copilot", "api-key:copilot", "GITHUB_TOKEN"),
+            ("aiusage_deepseek", "api-key:deepseek", "DEEPSEEK_API_KEY"),
+            (
+                "aiusage_openrouter",
+                "api-key:openrouter",
+                "OPENROUTER_API_KEY",
+            ),
+            ("aiusage_cursor", "api-key:cursor", "CURSOR_API_KEY"),
+        ];
+        for (id, secret_key, env_hint) in expected {
+            let probe = ai_auth_probe(id);
+            assert_eq!(probe.secret_key, secret_key, "secret key mismatch for {id}");
+            assert_eq!(probe.env_var_hint, env_hint, "env hint mismatch for {id}");
+            assert_eq!(ai_secret_key_for_provider(id), Some(secret_key));
+            assert_eq!(
+                ai_provider_detected(id),
+                probe.has_token || probe.cli_installed,
+                "ai_provider_detected must delegate to ai_auth_probe for {id}"
+            );
+        }
+        let unknown = ai_auth_probe("unknown_ai_provider");
+        assert_eq!(unknown.source, AiAuthSource::None);
+        assert!(!unknown.has_token);
+        assert!(!unknown.cli_installed);
+        assert!(unknown.secret_key.is_empty());
+        assert!(ai_secret_key_for_provider("unknown_ai_provider").is_none());
     }
 }
