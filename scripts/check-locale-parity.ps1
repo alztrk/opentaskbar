@@ -14,7 +14,7 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
 # Hard gate numbers after the shared-folder integration union, the removal of
 # the retired AI-provider labels and the file-manager/top-bar/Wi-Fi panel cleanup: 14 frozen
-# reference catalogs x 1046 keys and 14 Rust catalogs x 1378 keys. Rust keeps
+# reference catalogs x 1046 keys and 14 Rust catalogs x 1416 keys. Rust keeps
 # port-only feature keys (DI/calendar/font, C3 widget features, UI localization,
 # window-picker/magnification/settings, OLED/display care and searchable
 # location labels); the 50 file-manager/top-bar/Wi-Fi-panel keys were
@@ -24,7 +24,7 @@ $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-P
 # gate, not just a display string.
 $expectedLanguages = 14
 $expectedCsKeys = 1046
-$expectedRustKeys = 1378
+$expectedRustKeys = 1416
 # The legacy source tree was removed in the Rust-only cleanup; these 14 catalogs
 # are the frozen reference snapshot of the last legacy release, kept for key parity.
 $csDir = Join-Path $RepoRoot 'tests\reference\locales'
