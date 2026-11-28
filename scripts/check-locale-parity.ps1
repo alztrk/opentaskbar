@@ -92,7 +92,7 @@ $highVisibilityKeys = @(
 )
 $englishIdenticalBudget = @{
     'de-DE'=203; 'es-ES'=232; 'fr-FR'=252; 'it-IT'=242; 'ja-JP'=221; 'ko-KR'=220;
-    'nl-NL'=260; 'pl-PL'=232; 'pt-BR'=241; 'ru-RU'=211; 'tr-TR'=21; 'uk-UA'=210; 'zh-CN'=218
+    'nl-NL'=260; 'pl-PL'=232; 'pt-BR'=241; 'ru-RU'=30; 'tr-TR'=21; 'uk-UA'=210; 'zh-CN'=218
 }
 
 $csSets = @{}
