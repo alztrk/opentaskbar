@@ -520,12 +520,7 @@ fn build_device_id(prefix: &str, vid: u16, pid: u16, serial: &str, path: &str) -
         clean = clean[clean.len() - 16..].to_owned();
     }
     if clean.is_empty() {
-        let mut hash = 0x811C_9DC5u32;
-        for byte in path.bytes() {
-            hash ^= u32::from(byte);
-            hash = hash.wrapping_mul(0x0100_0193);
-        }
-        clean = format!("{hash:08X}");
+        clean = format!("{:08X}", fnv1a_u32(path.as_bytes()));
     }
     format!(
         "{prefix}:{vid:04X}:{pid:04X}:{}",
@@ -1156,18 +1151,13 @@ const HIDPP_FEATURE_BATTERY_VOLTAGE: u16 = 0x1001;
 const HIDPP_FEATURE_UNIFIED_BATTERY: u16 = 0x1004;
 
 fn hidpp_root_request(device_index: u8, feature: u16, report_len: usize) -> Vec<u8> {
-    let mut packet = vec![0u8; report_len];
-    packet[0] = if report_len == 7 {
-        HIDPP_SHORT_REPORT
-    } else {
-        HIDPP_LONG_REPORT
-    };
-    packet[1] = device_index;
-    packet[2] = 0x00;
-    packet[3] = HIDPP_SOFTWARE_ID & 0x0F;
-    packet[4] = (feature >> 8) as u8;
-    packet[5] = feature as u8;
-    packet
+    hidpp_feature_request(
+        device_index,
+        0x00,
+        0x00,
+        &[(feature >> 8) as u8, feature as u8, 0],
+        report_len,
+    )
 }
 
 fn hidpp_feature_request(
@@ -1862,6 +1852,33 @@ fn hidpp_resolve_feature(
     hidpp_parse_feature_index(&response[..len], device_index)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn hidpp_query_feature<T>(
+    session: &HidSession,
+    device_index: u8,
+    feature: u16,
+    function: u8,
+    report_len: usize,
+    response_len: usize,
+    budget: &Budget,
+    cancel: &AtomicBool,
+    parse: fn(&[u8], u8, u8) -> Option<T>,
+) -> Option<T> {
+    let index = hidpp_resolve_feature(session, device_index, feature, report_len, budget, cancel)?;
+    let request = hidpp_feature_request(device_index, index, function, &[0, 0, 0], report_len);
+    let mut response = vec![0u8; response_len];
+    let len = hidpp_transact(
+        session,
+        &request,
+        &mut response,
+        device_index,
+        index,
+        budget,
+        cancel,
+    )?;
+    parse(&response[..len], device_index, index)
+}
+
 fn probe_logitech(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessReading> {
     let budget = Budget::new(850);
     let mut result = Vec::new();
@@ -1886,98 +1903,56 @@ fn probe_logitech(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessRea
                 continue;
             }
             let response_len = device.input_len.max(report_len as u16) as usize;
-            let mut level = None;
-            let charging: bool;
-            if let Some(index) = hidpp_resolve_feature(
+            let level = hidpp_query_feature(
                 &session,
                 device_index,
                 HIDPP_FEATURE_UNIFIED_BATTERY,
+                0x01,
                 report_len,
+                response_len,
                 &budget,
                 cancel,
-            ) {
-                let request =
-                    hidpp_feature_request(device_index, index, 0x01, &[0, 0, 0], report_len);
-                let mut response = vec![0u8; response_len];
-                if let Some(len) = hidpp_transact(
-                    &session,
-                    &request,
-                    &mut response,
-                    device_index,
-                    index,
-                    &budget,
-                    cancel,
-                ) {
-                    level = hidpp_parse_unified(&response[..len], device_index, index);
-                }
-            }
-            if level.is_none()
-                && let Some(index) = hidpp_resolve_feature(
+                hidpp_parse_unified,
+            )
+            .or_else(|| {
+                hidpp_query_feature(
                     &session,
                     device_index,
                     HIDPP_FEATURE_BATTERY_STATUS,
+                    0x00,
                     report_len,
+                    response_len,
                     &budget,
                     cancel,
+                    hidpp_parse_status,
                 )
-            {
-                let request =
-                    hidpp_feature_request(device_index, index, 0x00, &[0, 0, 0], report_len);
-                let mut response = vec![0u8; response_len];
-                if let Some(len) = hidpp_transact(
-                    &session,
-                    &request,
-                    &mut response,
-                    device_index,
-                    index,
-                    &budget,
-                    cancel,
-                ) {
-                    level = hidpp_parse_status(&response[..len], device_index, index);
-                }
-            }
-            if level.is_none()
-                && let Some(index) = hidpp_resolve_feature(
+            })
+            .or_else(|| {
+                hidpp_query_feature(
                     &session,
                     device_index,
                     HIDPP_FEATURE_BATTERY_VOLTAGE,
+                    0x00,
                     report_len,
+                    response_len,
                     &budget,
                     cancel,
+                    hidpp_parse_voltage,
                 )
-            {
-                let request =
-                    hidpp_feature_request(device_index, index, 0x00, &[0, 0, 0], report_len);
-                let mut response = vec![0u8; response_len];
-                if let Some(len) = hidpp_transact(
-                    &session,
-                    &request,
-                    &mut response,
-                    device_index,
-                    index,
-                    &budget,
-                    cancel,
-                ) && let Some((percent, is_charging, _)) =
-                    hidpp_parse_voltage(&response[..len], device_index, index)
-                {
-                    level = Some((percent, is_charging));
-                }
-            }
+                .map(|(percent, is_charging, _)| (percent, is_charging))
+            });
             if let Some((percent, is_charging)) = level {
-                charging = is_charging;
                 let name = if device.product.trim().is_empty() {
                     "Logitech Wireless".to_owned()
                 } else {
                     device.product.trim().to_owned()
                 };
-                let mut id = device.id("logitech");
-                id.push_str(&format!(":{device_index:02X}"));
                 result.push(reading(
-                    id,
+                    format!("{}:{device_index:02X}", device.id("logitech")),
                     name,
                     percent,
                     true,
-                    charging,
+                    is_charging,
                     BatterySource::LogitechHidPlusPlus,
                 ));
             }
@@ -1989,6 +1964,25 @@ fn probe_logitech(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessRea
 // ---------------------------------------------------------------------------
 // Sağlayıcı 4: Razer 90 bayt feature report
 // ---------------------------------------------------------------------------
+
+fn razer_query(
+    session: &HidSession,
+    command: u8,
+    transaction_id: u8,
+    buffer_len: usize,
+) -> Option<u8> {
+    let mut request = razer_build_command(command, transaction_id, buffer_len >= RAZER_BUFFER_LEN);
+    request.resize(buffer_len, 0);
+    if !session.set_feature(&request) {
+        return None;
+    }
+    unsafe { Sleep(15) };
+    let mut response = vec![0u8; buffer_len];
+    if !session.get_feature(&mut response) {
+        return None;
+    }
+    razer_parse_reply(&response, command)
+}
 
 fn probe_razer(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessReading> {
     let mut result = Vec::new();
@@ -2008,41 +2002,14 @@ fn probe_razer(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessReadin
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let mut request = razer_build_command(
-                RAZER_CMD_BATTERY,
-                transaction_id,
-                buffer_len >= RAZER_BUFFER_LEN,
-            );
-            request.resize(buffer_len, 0);
-            if !session.set_feature(&request) {
-                continue;
-            }
-            unsafe { Sleep(15) };
-            let mut response = vec![0u8; buffer_len];
-            if !session.get_feature(&mut response) {
-                continue;
-            }
-            let Some(raw_level) = razer_parse_reply(&response, RAZER_CMD_BATTERY) else {
+            let Some(raw_level) =
+                razer_query(&session, RAZER_CMD_BATTERY, transaction_id, buffer_len)
+                    .filter(|&v| v != 0)
+            else {
                 continue;
             };
-            if raw_level == 0 {
-                continue;
-            }
-            let mut charging = false;
-            let mut charge_request = razer_build_command(
-                RAZER_CMD_CHARGING,
-                transaction_id,
-                buffer_len >= RAZER_BUFFER_LEN,
-            );
-            charge_request.resize(buffer_len, 0);
-            if session.set_feature(&charge_request) {
-                unsafe { Sleep(15) };
-                let mut charge_response = vec![0u8; buffer_len];
-                if session.get_feature(&mut charge_response) {
-                    charging = razer_parse_reply(&charge_response, RAZER_CMD_CHARGING)
-                        .is_some_and(|value| value != 0);
-                }
-            }
+            let charging = razer_query(&session, RAZER_CMD_CHARGING, transaction_id, buffer_len)
+                .is_some_and(|value| value != 0);
             let name = if device.product.trim().is_empty() {
                 "Razer Wireless".to_owned()
             } else {
@@ -2089,30 +2056,21 @@ fn probe_steelseries(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<Wireless
         };
         let out_len = (device.output_len.max(64)) as usize;
         let in_len = (device.input_len.max(64)) as usize;
-        let request = ss_build_request(protocol, out_len, out_len == 65);
-        let mut response = vec![0u8; in_len];
-        let mut parsed = session
-            .transact(
-                &request,
-                &mut response,
-                250,
-                |packet| ss_valid_packet(protocol, packet),
-                cancel,
-            )
-            .and_then(|len| ss_parse(protocol, &response[..len]));
-        if parsed.is_none() && out_len == 64 {
-            let framed = ss_build_request(protocol, 65, true);
-            let mut retry = vec![0u8; in_len];
-            parsed = session
+        let try_query = |req_len: usize, prepend_zero: bool| {
+            let request = ss_build_request(protocol, req_len, prepend_zero);
+            let mut response = vec![0u8; in_len];
+            session
                 .transact(
-                    &framed,
-                    &mut retry,
+                    &request,
+                    &mut response,
                     250,
                     |packet| ss_valid_packet(protocol, packet),
                     cancel,
                 )
-                .and_then(|len| ss_parse(protocol, &retry[..len]));
-        }
+                .and_then(|len| ss_parse(protocol, &response[..len]))
+        };
+        let parsed = try_query(out_len, out_len == 65)
+            .or_else(|| (out_len == 64).then(|| try_query(65, true)).flatten());
         let Some(parsed) = parsed else { continue };
         let name = if device.product.trim().is_empty() {
             ss_default_name(device.pid).to_owned()
@@ -2163,31 +2121,10 @@ impl Drop for RegKey {
     }
 }
 
-fn reg_dword(key: Handle, name: &str) -> Option<u32> {
-    let mut value = 0u32;
-    let mut size = size_of::<u32>() as u32;
-    let mut kind = 0u32;
-    let status = unsafe {
-        RegQueryValueExW(
-            key,
-            wide(name).as_ptr(),
-            std::ptr::null_mut(),
-            &mut kind,
-            (&mut value as *mut u32).cast::<u8>(),
-            &mut size,
-        )
-    };
-    if status == 0 && kind == REG_DWORD && size >= 4 {
-        Some(value)
-    } else {
-        None
-    }
-}
-
-fn reg_string(key: Handle, name: &str) -> Option<String> {
-    let mut buffer = vec![0u8; 1024];
+fn reg_query_raw(key: Handle, name: &str, buffer: &mut [u8]) -> Option<(u32, usize)> {
     let mut size = buffer.len() as u32;
     let mut kind = 0u32;
+    // SAFETY: owned buffer outlives the call; name is NUL-terminated.
     let status = unsafe {
         RegQueryValueExW(
             key,
@@ -2198,12 +2135,23 @@ fn reg_string(key: Handle, name: &str) -> Option<String> {
             &mut size,
         )
     };
-    if status == 0 && kind == REG_SZ {
-        let text = utf16_from_bytes(&buffer[..size.min(buffer.len() as u32) as usize]);
-        if text.is_empty() { None } else { Some(text) }
-    } else {
-        None
+    (status == 0).then_some((kind, (size as usize).min(buffer.len())))
+}
+
+fn reg_dword(key: Handle, name: &str) -> Option<u32> {
+    let mut buf = [0u8; 4];
+    let (kind, size) = reg_query_raw(key, name, &mut buf)?;
+    (kind == REG_DWORD && size >= 4).then(|| u32::from_le_bytes(buf))
+}
+
+fn reg_string(key: Handle, name: &str) -> Option<String> {
+    let mut buffer = [0u8; 1024];
+    let (kind, size) = reg_query_raw(key, name, &mut buffer)?;
+    if kind != REG_SZ {
+        return None;
     }
+    let text = utf16_from_bytes(&buffer[..size]);
+    (!text.is_empty()).then_some(text)
 }
 
 fn reg_subkeys(key: Handle) -> Vec<String> {
@@ -2401,29 +2349,14 @@ fn parse_loopback_endpoint(uri: &str, expected_port: u16, allow_websocket: bool)
 /// BLOB or decimal string) without assuming a fixed value type.
 fn reg_percent(key: Handle, name: &str) -> Option<i32> {
     let mut buffer = [0u8; 64];
-    let mut size = buffer.len() as u32;
-    let mut kind = 0u32;
-    // SAFETY: owned buffer outlives the call; name is NUL-terminated.
-    let status = unsafe {
-        RegQueryValueExW(
-            key,
-            wide(name).as_ptr(),
-            std::ptr::null_mut(),
-            &mut kind,
-            buffer.as_mut_ptr(),
-            &mut size,
-        )
-    };
-    if status != 0 {
-        return None;
-    }
+    let (kind, size) = reg_query_raw(key, name, &mut buffer)?;
     let value = match kind {
         REG_DWORD if size >= 4 => u32::from_le_bytes(buffer[..4].try_into().ok()?) as i32,
         REG_BINARY if size >= 1 => buffer[0] as i32,
-        REG_SZ => {
-            let text = utf16_from_bytes(&buffer[..size.min(buffer.len() as u32) as usize]);
-            text.trim().parse::<i32>().ok()?
-        }
+        REG_SZ => utf16_from_bytes(&buffer[..size])
+            .trim()
+            .parse::<i32>()
+            .ok()?,
         _ => return None,
     };
     (0..=100).contains(&value).then_some(value)
@@ -2582,15 +2515,12 @@ fn ghub_websocket_json(cancel: &AtomicBool) -> Option<String> {
     Some(String::from_utf8_lossy(&body).into_owned())
 }
 
-fn probe_ghub_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
-    let Some(json) = ghub_websocket_json(cancel) else {
-        return Vec::new();
-    };
-    parse_ghub_json(&json)
+fn map_loopback_readings(prefix: &str, items: Vec<BatteryReading>) -> Vec<WirelessReading> {
+    items
         .into_iter()
         .map(|b| {
             reading(
-                format!("ghub:{}", b.id),
+                format!("{prefix}:{}", b.id),
                 b.name,
                 percent_01(b.level),
                 b.connected,
@@ -2599,6 +2529,12 @@ fn probe_ghub_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
             )
         })
         .collect()
+}
+
+fn probe_ghub_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
+    ghub_websocket_json(cancel)
+        .map(|json| map_loopback_readings("ghub", parse_ghub_json(&json)))
+        .unwrap_or_default()
 }
 
 fn probe_steelseries_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
@@ -2630,19 +2566,7 @@ fn probe_steelseries_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
         };
         let readings = parse_steelseries_gg_json(&body);
         if !readings.is_empty() {
-            return readings
-                .into_iter()
-                .map(|b| {
-                    reading(
-                        format!("ss-gg:{}", b.id),
-                        b.name,
-                        percent_01(b.level),
-                        b.connected,
-                        b.charging,
-                        b.source,
-                    )
-                })
-                .collect();
+            return map_loopback_readings("ss-gg", readings);
         }
     }
     Vec::new()
@@ -2704,24 +2628,36 @@ fn lock_cache() -> std::sync::MutexGuard<'static, HashMap<String, CachedReading>
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn cached_snapshot() -> Vec<WirelessReading> {
-    let now = Instant::now();
-    let mut entries = Vec::new();
-    let mut guard = lock_cache();
+fn evict_and_collect_stale(
+    guard: &mut HashMap<String, CachedReading>,
+    now: Instant,
+    active: Option<&HashSet<String>>,
+    out: &mut Vec<WirelessReading>,
+) {
     let mut expired = Vec::new();
-    for (key, cached) in guard.iter_mut() {
+    for (key, cached) in guard.iter() {
         if now.saturating_duration_since(cached.sampled_at) > STALE_WINDOW {
             expired.push(key.clone());
             continue;
         }
+        if active.is_some_and(|set| set.contains(key)) {
+            continue;
+        }
         let mut item = cached.reading.clone();
         item.stale = true;
-        entries.push(item);
+        out.push(item);
     }
     for key in expired {
         guard.remove(&key);
     }
-    drop(guard);
+}
+
+fn cached_snapshot() -> Vec<WirelessReading> {
+    let mut entries = Vec::new();
+    {
+        let mut guard = lock_cache();
+        evict_and_collect_stale(&mut guard, Instant::now(), None, &mut entries);
+    }
     sort_readings(&mut entries);
     entries
 }
@@ -2753,44 +2689,30 @@ fn finalize(fresh: Vec<WirelessReading>) -> Vec<WirelessReading> {
             continue;
         }
         let key = canonical_key(&item);
-        let should_insert = deduplicated
+        if deduplicated
             .get(&key)
-            .is_none_or(|existing| prefer(&item, existing));
-        if should_insert {
+            .is_none_or(|existing| prefer(&item, existing))
+        {
             deduplicated.insert(key, item);
         }
     }
     let active: HashSet<String> = deduplicated.keys().cloned().collect();
     let mut output = Vec::new();
-    let mut guard = lock_cache();
-    for (key, mut item) in deduplicated {
-        item.stale = false;
-        guard.insert(
-            key,
-            CachedReading {
-                reading: item.clone(),
-                sampled_at: now,
-            },
-        );
-        output.push(item);
-    }
-    let mut expired = Vec::new();
-    for (key, cached) in guard.iter() {
-        if now.saturating_duration_since(cached.sampled_at) > STALE_WINDOW {
-            expired.push(key.clone());
-            continue;
+    {
+        let mut guard = lock_cache();
+        for (key, mut item) in deduplicated {
+            item.stale = false;
+            guard.insert(
+                key,
+                CachedReading {
+                    reading: item.clone(),
+                    sampled_at: now,
+                },
+            );
+            output.push(item);
         }
-        if active.contains(key) {
-            continue;
-        }
-        let mut item = cached.reading.clone();
-        item.stale = true;
-        output.push(item);
+        evict_and_collect_stale(&mut guard, now, Some(&active), &mut output);
     }
-    for key in expired {
-        guard.remove(&key);
-    }
-    drop(guard);
     sort_readings(&mut output);
     output
 }
@@ -2828,23 +2750,9 @@ fn run_probe(
 static SOURCE_IN_FLIGHT: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
 
 fn source_slot(source: BatterySource) -> usize {
-    match source {
-        BatterySource::XInput => 0,
-        BatterySource::LogitechHidPlusPlus => 1,
-        BatterySource::RazerHid => 2,
-        BatterySource::SteelSeriesHid => 3,
-        BatterySource::StandardHid => 4,
-        BatterySource::BluetoothGatt => 5,
-        BatterySource::AsusRogHid => 6,
-        BatterySource::CorsairHid => 7,
-        BatterySource::GamepadHid => 8,
-        BatterySource::HyperXHid => 9,
-        BatterySource::CompxAtkVxe => 10,
-        BatterySource::Keyboard24gHid => 11,
-        BatterySource::Bluetooth => 12,
-        BatterySource::SteelSeriesGg => 13,
-        BatterySource::LogitechGHub => 14,
-    }
+    let slot = source as usize;
+    debug_assert!(slot < SOURCE_IN_FLIGHT.len());
+    slot
 }
 
 struct SourceInFlightGuard {
