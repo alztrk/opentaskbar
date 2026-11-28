@@ -2,6 +2,7 @@
 #define _UNICODE
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -51,9 +52,24 @@ typedef enum FlyoutRestoreStatus {
 } FlyoutRestoreStatus;
 
 static BOOL GetJournalPath(LPCWSTR fileName, WCHAR *path, DWORD capacity) {
-    WCHAR localAppData[WATCHDOG_PATH_CAPACITY];
-    DWORD envLen = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, WATCHDOG_PATH_CAPACITY);
-    if (envLen == 0 || envLen >= WATCHDOG_PATH_CAPACITY) return FALSE;
+    if (!fileName || !path || capacity == 0) return FALSE;
+    // Resolve LocalAppData through the Windows Shell API rather than the
+    // process environment block so a caller cannot redirect journal reads
+    // or deletes by spoofing LOCALAPPDATA.
+    WCHAR localAppData[MAX_PATH] = {0};
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData))) {
+        return FALSE;
+    }
+    if (localAppData[0] == L'\0' || wcsstr(localAppData, L"..") != NULL) {
+        return FALSE;
+    }
+    // Reject UNC paths and non-basename file names as defense-in-depth.
+    if (localAppData[0] == L'\\' && localAppData[1] == L'\\') {
+        return FALSE;
+    }
+    if (wcschr(fileName, L'\\') != NULL || wcschr(fileName, L'/') != NULL || wcsstr(fileName, L"..") != NULL) {
+        return FALSE;
+    }
     return _snwprintf_s(path, capacity, _TRUNCATE, L"%s\\OpenTaskbar\\%s", localAppData, fileName) >= 0;
 }
 
