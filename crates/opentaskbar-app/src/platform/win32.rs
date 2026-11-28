@@ -38,7 +38,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::BOOL;
 
 const DWMWCP_DONOTROUND: u32 = 1;
-const DWMNCRP_DISABLED: u32 = 1;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 const MONITORINFOF_PRIMARY: u32 = 1;
 
@@ -1058,14 +1057,6 @@ pub fn show_start_context_menu(
     )
 }
 
-pub fn show_dock_context_menu(
-    hwnd: usize,
-    is_dark: bool,
-    settings: &DockSettings,
-) -> ContextAction {
-    show_dock_context_menu_with_entries(hwnd, is_dark, settings, Vec::new(), None).1
-}
-
 /// Same dock menu with extra entries inserted into Group 1 (Quick System Access)
 /// right after Notification Center, keeping Exit last. The raw chosen id is
 /// returned alongside the mapped action so integration layers (native window
@@ -1352,24 +1343,6 @@ pub fn trim_working_set() {
     unsafe {
         let _ = K32EmptyWorkingSet(GetCurrentProcess());
     }
-}
-
-/// Compatibility wrapper for the canonical startup state.
-///
-/// Reads through [`super::startup_registration::read`] so MSIX `StartupTask`
-/// policies and the `StartupApproved\Run` opt-out flag are honoured; the old
-/// direct `HKCU\...\Run` probe reported enabled state that Windows ignored.
-pub fn is_startup_enabled() -> bool {
-    super::startup_registration::read().0
-}
-
-/// Compatibility wrapper for the canonical startup setter.
-///
-/// Delegates to [`super::startup_registration::set_enabled`]; the old copy
-/// wrote the forbidden `Run` key even in MSIX installs and used a lossy
-/// `display()` conversion for the executable path.
-pub fn set_startup_enabled(enabled: bool) {
-    let _ = super::startup_registration::set_enabled(enabled);
 }
 
 #[cfg(test)]

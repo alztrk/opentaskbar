@@ -10,9 +10,7 @@
 //! settings/cfg workstream's shared `%LOCALAPPDATA%\OpenTaskbar` layout is now
 //! compiled into this crate.
 #![cfg_attr(windows, windows_subsystem = "windows")]
-// The merged reference-parity modules expose a broad public API (hardware
-// vendors, theme tokens, flyout blocks, shell helpers) that is not wired to
-// every call site yet; keep the shared surface warning-clean.
+// Binary crate hosts pure policy/parser helpers exercised by unit tests and `verification_suite`.
 #![allow(dead_code)]
 
 // Bundled resource paths, anchored to the crate manifest instead of a chain of

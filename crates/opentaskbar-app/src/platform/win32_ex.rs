@@ -10,9 +10,6 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
 };
-use windows_sys::Win32::System::Registry::{
-    HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowThreadProcessId};
 
@@ -36,17 +33,6 @@ const SHELL_OVERLAY_CLASSES: [&str; 11] = [
 ];
 const CORE_WINDOW_CLASS: &str = "windows.ui.core.corewindow";
 const MONITORINFOF_PRIMARY: u32 = 1;
-const VIRTUAL_DESKTOPS_KEY: &str =
-    r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops";
-const SESSION_VIRTUAL_DESKTOPS_KEY: &str =
-    r"Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo\{}\VirtualDesktops";
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn ProcessIdToSessionId(process_id: u32, session_id: *mut u32) -> i32;
-}
-
-use crate::platform::win32_helpers::wide;
 
 /// Pure class-list membership. Callers that may see a `CoreWindow` must use
 /// `is_shell_overlay_for_class` (or `is_shell_overlay*`) with host validation;
@@ -218,99 +204,6 @@ pub fn display_for(name: &str) -> Option<DisplayInfo> {
         .find(|display| display.is_primary)
         .or_else(|| all.first())
         .cloned()
-}
-
-pub fn display_for_index(index: u32) -> Option<DisplayInfo> {
-    displays()
-        .into_iter()
-        .find(|display| display.index == index)
-}
-
-pub fn secondary_monitors(name: &str) -> Vec<usize> {
-    let target = display_for(name).map(|display| display.handle).unwrap_or(0);
-    displays()
-        .into_iter()
-        .filter(|display| display.handle != target)
-        .map(|display| display.handle)
-        .collect()
-}
-
-fn read_binary(subkey: &str, value: &str) -> Option<Vec<u8>> {
-    let subkey = wide(subkey);
-    let value = wide(value);
-    // SAFETY: read-only registry query with owned UTF-16 strings and a handle
-    // opened on this call.
-    unsafe {
-        let mut key = std::ptr::null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut key) != 0 {
-            return None;
-        }
-        let mut size = 0u32;
-        if RegQueryValueExW(
-            key,
-            value.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut size,
-        ) != 0
-            || size < 16
-        {
-            RegCloseKey(key);
-            return None;
-        }
-        let mut buffer = vec![0u8; size as usize];
-        let status = RegQueryValueExW(
-            key,
-            value.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            buffer.as_mut_ptr(),
-            &mut size,
-        );
-        RegCloseKey(key);
-        (status == 0).then_some(buffer)
-    }
-}
-
-/// 1-based current virtual desktop index and total count from Explorer's
-/// registry state; falls back to the per-session key on Windows 10.
-pub fn virtual_desktops() -> (u32, u32) {
-    let ids = match read_binary(VIRTUAL_DESKTOPS_KEY, "VirtualDesktopIDs") {
-        Some(ids) => ids,
-        None => return (1, 1),
-    };
-    let count = (ids.len() / 16) as u32;
-    let current = read_binary(VIRTUAL_DESKTOPS_KEY, "CurrentVirtualDesktop").or_else(|| {
-        let mut session = 0u32;
-        // SAFETY: output parameter is a local u32.
-        if unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } == 0 {
-            return None;
-        }
-        read_binary(
-            &SESSION_VIRTUAL_DESKTOPS_KEY.replace("{}", &session.to_string()),
-            "CurrentVirtualDesktop",
-        )
-    });
-    let Some(current) = current else {
-        return (1, count);
-    };
-    if current.len() != 16 {
-        return (1, count);
-    }
-    for index in 0..count as usize {
-        if ids[index * 16..index * 16 + 16] == current[..16] {
-            return (index as u32 + 1, count);
-        }
-    }
-    (1, count)
-}
-
-/// Sets the default audio endpoint. The Win32-facing alias delegates to the
-/// C4 `platform::core_audio::set_default_device(id)` bridge (WS-G ownership),
-/// which applies the endpoint to all three roles via `IPolicyConfig`.
-pub fn set_default_audio_device(id: &str) -> bool {
-    crate::platform::core_audio::set_default_device(id)
 }
 
 #[cfg(test)]

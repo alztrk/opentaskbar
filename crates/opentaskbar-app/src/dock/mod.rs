@@ -436,29 +436,6 @@ fn open_folder_in_explorer(path: &str) {
 /// Registered `WM_APP_SETTINGS_RELOAD` value, shared by every dock window.
 static RELOAD_MSG: AtomicU32 = AtomicU32::new(0);
 
-/// Applies all runtime settings to the live dock windows. Called by the settings
-/// process / orchestrator after a settings write; it resolves the WS-1 effective
-/// width/height/gap/density helpers and asks each dock to rebuild on its UI thread.
-pub fn apply_runtime_settings() {
-    let settings = settings::load_from(&settings::settings_path());
-    let msg = RELOAD_MSG.load(Ordering::Relaxed);
-    if msg != 0 {
-        unsafe {
-            let _ = PostMessageW(HWND_BROADCAST, msg, 0, 0);
-        }
-    }
-    // Settings can be written by another process while the picker's nested
-    // modal loop owns this process's dispatcher. Broadcast the close signal so
-    // the picker HWND receives it directly (registered messages only reach our
-    // own windows; WM_APP+9 is private to this app family).
-    unsafe {
-        let _ = PostMessageW(HWND_BROADCAST, window_picker::PICKER_CLOSE_MSG, 0, 0);
-    }
-    window_picker::set_picker_enabled(settings.previews_enabled);
-    // Keep the application language in sync even when no dock is currently open.
-    loc::set_language(&settings.language);
-}
-
 /// One dock window's shell-button rect, in physical screen coordinates. The
 /// `FlyoutKind` tag keeps Start/Search/ControlCenter anchors independent: each
 /// native flyout owns its own generation and its own per-monitor selection.
@@ -522,15 +499,6 @@ fn select_anchor_for(
         .unwrap_or(fallback)
 }
 
-/// Screen rect of the button for `kind` most recently laid out by any dock.
-/// `(0, 0, 0, 0)` means no visible button has been laid out yet.
-pub fn shell_button_anchor(kind: FlyoutKind) -> (i32, i32, i32, i32) {
-    SHELL_BUTTON_ANCHORS
-        .lock()
-        .map(|anchors| first_valid_anchor(&anchors, kind))
-        .unwrap_or((0, 0, 0, 0))
-}
-
 /// Per-monitor variant used by the flyout callbacks: a global single anchor
 /// puts the flyout on the wrong screen when docks exist on several monitors.
 /// `hwnd == 0` (unknown flyout HWND) falls back to the first valid dock.
@@ -546,11 +514,6 @@ pub fn shell_button_anchor_for(hwnd: usize, kind: FlyoutKind) -> (i32, i32, i32,
         unsafe { MonitorFromWindow(handle as HWND, MONITOR_DEFAULTTONEAREST) as usize }
     };
     select_anchor_for(&anchors, kind, hwnd, monitor_of)
-}
-
-/// Screen rect of the Start button most recently laid out by any dock window.
-pub fn start_button_anchor() -> (i32, i32, i32, i32) {
-    shell_button_anchor(FlyoutKind::Start)
 }
 
 /// Back-compatible per-monitor Start lookup used by `on_opened`.
@@ -1699,15 +1662,6 @@ fn compute_window_dips_with(
     let bottom_inset = effective.bottom_inset_dips();
     let height_dips = (pill_h + TOOLTIP_HEADROOM + mag_headroom + bottom_inset).ceil();
     (width_dips, height_dips)
-}
-
-fn compute_window_dips(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> (f32, f32) {
-    compute_window_dips_with(
-        settings,
-        slot_count,
-        mon_w_dips,
-        &EffectiveMetrics::default(),
-    )
 }
 
 /// Fisheye extra-scale ceiling above 1.0: never above `DockMetrics.HoverScale - 1.0 = 0.5`.
@@ -3148,16 +3102,9 @@ impl DockState {
         };
         let dot_run_theme = indicator_rgb(&["IndicatorBrush"]);
         let dot_act_theme = indicator_rgb(&["IndicatorForegroundBrush", "AccentBrush"]);
-        let glass_fill = design::glass::glass_surface_color_for(
-            design::theme::SurfaceKind::Dock,
-            is_dark,
-            self.settings.dock_opacity,
-        );
         let pill_rgb = design::theme::token_rgba(&materials.fill)
             .map(|color| (color.r, color.g, color.b))
-            .unwrap_or_else(|| {
-                themed_rgb("DockMaterial", (glass_fill.r, glass_fill.g, glass_fill.b))
-            });
+            .unwrap_or_else(|| themed_rgb("DockMaterial", design::palette(is_dark).dock_pill));
         let rgba = |rgb: design::Rgb, alpha: f32| (rgb.0, rgb.1, rgb.2, alpha);
         let (bd_rgb, hover_rgb, press_rgb, div_rgb, dot_run_rgb, dot_act_rgb) = if is_dark {
             (

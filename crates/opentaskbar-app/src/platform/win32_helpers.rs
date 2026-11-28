@@ -3,6 +3,42 @@
 /// `CreateProcess` flag that suppresses the console window for child processes.
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Returns `true` on Windows 11 or newer (`RtlGetVersion` build >= 22000), cached per process.
+pub fn is_windows_11() -> bool {
+    static IS_WIN11: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS_WIN11.get_or_init(|| os_build_number() >= 22000)
+}
+
+/// Manifest-independent Windows build number from `ntdll!RtlGetVersion` (`0` on failure).
+pub fn os_build_number() -> u32 {
+    #[repr(C)]
+    struct RtlOsVersionInfoW {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform: u32,
+        csd_version: [u16; 128],
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetVersion(info: *mut RtlOsVersionInfoW) -> i32;
+    }
+    let mut info = RtlOsVersionInfoW {
+        size: std::mem::size_of::<RtlOsVersionInfoW>() as u32,
+        major: 0,
+        minor: 0,
+        build: 0,
+        platform: 0,
+        csd_version: [0; 128],
+    };
+    if unsafe { RtlGetVersion(&mut info) } == 0 {
+        info.build
+    } else {
+        0
+    }
+}
+
 /// Null-terminated UTF-16 buffer for Win32/WinHTTP APIs.
 pub fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()

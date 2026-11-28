@@ -32,9 +32,6 @@ use opentaskbar_core::settings::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Map, Value, json};
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
-use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, HWND_BROADCAST, IsWindowVisible, PostMessageW,
     RegisterWindowMessageW, SendNotifyMessageW, WM_CLOSE,
@@ -197,17 +194,6 @@ impl SettingsPage {
     const TOP: [Self; 4] = [Self::Dock, Self::Widgets, Self::DynamicIsland, Self::Themes];
     const BOTTOM: [Self; 2] = [Self::Preferences, Self::About];
 
-    fn from_name(name: &str) -> Self {
-        match name {
-            "Widgets" => Self::Widgets,
-            "DynamicIsland" => Self::DynamicIsland,
-            "Themes" => Self::Themes,
-            "Preferences" => Self::Preferences,
-            "About" => Self::About,
-            _ => Self::Dock,
-        }
-    }
-
     pub(crate) fn title(self) -> String {
         match self {
             Self::Dock => loc::t("Dock"),
@@ -367,39 +353,6 @@ fn widget_has_card_drawer(_id: &str) -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// SettingsBackdrop — acrylic + DWMWA_BORDER_COLOR=NONE + Win11 system backdrop,
-// disabled under High Contrast so text remains readable (reference SettingsBackdrop.cs).
-// ---------------------------------------------------------------------------
-
-fn win_wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
-
-fn high_contrast_enabled() -> bool {
-    let path = win_wide("Control Panel\\Accessibility\\HighContrast");
-    let flags_name = win_wide("Flags");
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: both buffers are null-terminated and `key` is only used when the call succeeds.
-    unsafe {
-        if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
-            return false;
-        }
-        let mut flags: u32 = 0;
-        let mut len = size_of::<u32>() as u32;
-        let status = RegQueryValueExW(
-            key,
-            flags_name.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            (&mut flags as *mut u32).cast(),
-            &mut len,
-        );
-        RegCloseKey(key);
-        status == 0 && flags & 1 != 0
-    }
-}
-
 /// Configures the GPUI Settings HWND (`WS_EX_NOREDIRECTIONBITMAP`) for `HostBackdropBrush`
 /// strictly in Glass mode so `SpatialGlassHost` renders live Clear Crystal glass underneath.
 fn configure_settings_glass_hwnd(window: &Window, is_dark: bool, glass_mode: bool) -> usize {
@@ -451,7 +404,6 @@ fn fit_settings_size(work: Option<gpui::Size<gpui::Pixels>>) -> gpui::Size<gpui:
 /// screen-space anchor lookup and the cross-process single-instance Settings lookup.
 pub(crate) mod window_chrome {
     use std::ffi::c_void;
-    use std::sync::OnceLock;
 
     use windows_sys::Win32::Foundation::{
         FARPROC, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -482,8 +434,7 @@ pub(crate) mod window_chrome {
         WS_THICKFRAME,
     };
 
-    use crate::design::glass::{GlassBackend, WindowsBackend, WindowsVersion, classify_windows};
-    use crate::platform::win32_helpers::set_window_long_ptr;
+    use crate::platform::win32_helpers::{set_window_long_ptr, wide};
 
     /// Window property that marks the live Settings HWND (cross-process, via a global atom).
     const SETTINGS_WINDOW_PROP: &str = "OpenTaskbarSettingsWindow";
@@ -530,19 +481,9 @@ pub(crate) mod window_chrome {
         ) -> isize;
     }
 
-    fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(Some(0)).collect()
-    }
-
     /// `RtlGetVersion` build >= 22000 (manifest-independent), cached for the process.
     pub(crate) fn is_windows_11() -> bool {
-        static IS_WIN11: OnceLock<bool> = OnceLock::new();
-        *IS_WIN11.get_or_init(|| {
-            matches!(
-                classify_windows(WindowsBackend.build_number()),
-                WindowsVersion::Windows11OrNewer
-            )
-        })
+        crate::platform::win32_helpers::is_windows_11()
     }
 
     /// GPUI creates non-resizable `WindowKind::Normal` HWNDs with `WS_SYSMENU | WS_MINIMIZEBOX`
@@ -1341,19 +1282,6 @@ fn import_backup_into(bytes: &[u8], root: &std::path::Path) -> Result<DockSettin
 // WS-A fields that are still in `DockSettings.extra` until the settings worktree lands.
 // ---------------------------------------------------------------------------
 
-fn extra_string(settings: &DockSettings, key: &str, fallback: &str) -> String {
-    settings
-        .extra
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or(fallback)
-        .to_owned()
-}
-
-fn set_extra_string(settings: &mut DockSettings, key: &str, value: &str) {
-    settings.extra.insert(key.to_owned(), json!(value));
-}
-
 fn extra_number(settings: &DockSettings, key: &str, fallback: i32) -> i32 {
     settings
         .extra
@@ -1617,39 +1545,6 @@ fn write_density_override(
     }
 }
 
-/// Translates a persisted dimension option while keeping its stored value untouched.
-fn option_label(value: &str) -> String {
-    match value {
-        "Auto" => loc::t("UnitAuto"),
-        "Pixels" => loc::t("UnitPixels"),
-        "Fixed" => loc::t("UnitFixed"),
-        "Percent" => loc::t("UnitPercent"),
-        other => loc::t(other),
-    }
-}
-
-/// Search results come from a catalogue whose labels are stable keys/literals; translate them
-/// only at display time so the search index and its tests keep using the stable values.
-fn display_catalog_text(value: &str) -> String {
-    match value {
-        "Dock Utilities" => loc::t("SearchSectionDockUtilities"),
-        "Theme & Surfaces" => loc::t("SearchSectionThemeSurfaces"),
-        "Settings Backup" => loc::t("SettingsBackup"),
-        other => loc::t(other),
-    }
-}
-
-/// Fractional per-surface opacity stored in `DockSettings::extra` (theme.rs reads these keys).
-fn extra_f64(settings: &DockSettings, key: &str, fallback: f64) -> f64 {
-    settings
-        .extra
-        .get(key)
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
-        .unwrap_or(fallback)
-        .clamp(0.2, 1.0)
-}
-
 /// Country/city data now comes from `platform::country_city` (offline fallback
 /// catalogue plus the countriesnow.space API). No static UI-side copy remains.
 fn city_list(country: &str) -> Vec<String> {
@@ -1906,8 +1801,6 @@ struct SettingsView {
     font_picker_focus: FocusHandle,
     hotkey_status: String,
     theme_status: String,
-    weather_suggestions: Vec<widgets::telemetry::GeoLocationMatch>,
-    weather_search_status: String,
     /// True trailing-edge debounce: every edit bumps `save_generation` and only the latest
     /// timer flushes to disk + broadcasts reload.
     save_pending: bool,
@@ -2071,8 +1964,6 @@ impl SettingsView {
             font_picker_focus: cx.focus_handle(),
             hotkey_status: String::new(),
             theme_status: String::new(),
-            weather_suggestions: Vec::new(),
-            weather_search_status: String::new(),
             save_pending: false,
             save_generation: 0,
             update_status: String::new(),
@@ -2984,29 +2875,6 @@ impl SettingsView {
         }
     }
 
-    fn panel_suppressed(&self) -> bool {
-        self.panel_opened_at
-            .is_some_and(|at| at.elapsed().as_millis() < 300)
-    }
-
-    fn open_widget_panel(&mut self, id: &'static str, window: &mut Window) {
-        if self.panel_suppressed() {
-            return;
-        }
-        self.widget_panel = Some(id);
-        self.panel_opened_at = None;
-        self.focus.focus(window);
-    }
-
-    fn theme(&self) -> UiTheme {
-        let is_dark = match self.settings.theme {
-            AppTheme::Dark => true,
-            AppTheme::Light => false,
-            AppTheme::System => win32::read_system_is_dark(),
-        };
-        UiTheme::new(is_dark)
-    }
-
     fn auto_save(&mut self, cx: &mut Context<Self>) {
         self.widget_runtime.tick(&self.settings);
         self.save_pending = true;
@@ -3183,78 +3051,6 @@ impl SettingsView {
     }
 
     // ---- Settings feature panels --------------------------------------------
-
-    fn render_dimension_controls(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let units = ["Auto", "Pixels", "Percent"];
-        let modes = ["Auto", "Fixed", "Percent"];
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for (key, label, options) in [
-            ("DockTopGapUnit", "TopGapUnitLabel", &units[..]),
-            ("DockWidthMode", "WidthModeLabel", &modes[..]),
-            ("DockHeightMode", "HeightModeLabel", &modes[..]),
-        ] {
-            let current = extra_string(&self.settings, key, options[0]);
-            let dd_opts = options
-                .iter()
-                .map(|option| {
-                    let key: &'static str = key;
-                    let option: &'static str = option;
-                    let entity = cx.entity().downgrade();
-                    DropdownOption {
-                        label: SharedString::from(option_label(option)),
-                        flag_path: None,
-                        glyph: None,
-                        selected: current == option,
-                        on_select: std::rc::Rc::new(move |_win, app| {
-                            let _ = entity.update(app, |this, cx| {
-                                this.open_dropdown = None;
-                                set_extra_string(&mut this.settings, key, option);
-                                this.auto_save(cx);
-                            });
-                        }),
-                    }
-                })
-                .collect();
-            let dd = self.make_dropdown(format!("dim-{key}"), t, dd_opts, cx);
-            rows.push(setting_row(t, Some("\u{E740}"), loc::t(label), dd).into_any_element());
-        }
-        let weak = cx.entity().downgrade();
-        for (key, label, max, unit) in [
-            ("DockTopGapPixels", "TopGapPixelsLabel", 64, "px"),
-            ("DockTopGapPercent", "TopGapPercentLabel", 100, "%"),
-            ("DockWidthPixels", "DockWidthPixelsLabel", 600, "px"),
-            ("DockWidthPercent", "DockWidthPercentLabel", 100, "%"),
-            ("DockHeightPixels", "DockHeightPixelsLabel", 400, "px"),
-            ("DockHeightPercent", "DockHeightPercentLabel", 100, "%"),
-        ] {
-            let value = extra_number(&self.settings, key, 0);
-            let text = loc::t_fmt("DimensionWithUnit", &[&value.to_string(), unit]);
-            let skey: &'static str = key;
-            let weak_for_slider = weak.clone();
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E8A3}"),
-                    loc::t(label),
-                    live_slider(skey, t, value as f32 / max as f32, 16, text, move |i| {
-                        let entity = weak_for_slider.clone();
-                        let key = skey;
-                        std::rc::Rc::new(move |_win, app| {
-                            let _ = entity.update(app, |this, cx| {
-                                let next = ((i as i32) * max / 16).clamp(0, max);
-                                if extra_number(&this.settings, key, 0) != next {
-                                    set_extra_number(&mut this.settings, key, next);
-                                    this.auto_save(cx);
-                                }
-                            });
-                        })
-                    }),
-                )
-                .into_any_element(),
-            );
-        }
-        rows
-    }
 
     /// Refreshes the city list from `country_city::fetch_cities` off the UI thread.
     /// The offline catalogue is shown immediately; the live list replaces it on arrival.
@@ -6696,57 +6492,6 @@ impl SettingsView {
         }
         self.hotkey_status.clear();
         self.auto_save(cx);
-    }
-
-    fn edit_weather_city(&mut self, cx: &mut Context<Self>) {
-        let title = loc::t("WeatherCity");
-        let hint = loc::t("WeatherCityHint");
-        let current = self.settings.weather_city.clone();
-        let Some(text) = prompt::ask_name(0, self.is_dark(), &title, &hint, &current) else {
-            return;
-        };
-        let query = text.trim().to_owned();
-        if query.is_empty() {
-            self.weather_suggestions.clear();
-            self.weather_search_status.clear();
-            return;
-        }
-        let lang = self.settings.language.clone();
-        self.weather_suggestions.clear();
-        self.weather_search_status = loc::t("QuickLoading");
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(
-                    async move { widgets::telemetry::search_weather_locations(&query, &lang, 6) },
-                )
-                .await;
-            let _ = this.update(cx, |view, cx| match result {
-                Ok(list) if list.len() == 1 => {
-                    view.settings.weather_city = list[0].setting_value();
-                    view.weather_suggestions.clear();
-                    view.weather_search_status.clear();
-                    view.auto_save(cx);
-                }
-                Ok(list) if !list.is_empty() => {
-                    view.weather_suggestions = list;
-                    view.weather_search_status.clear();
-                    cx.notify();
-                }
-                Ok(_) => {
-                    view.weather_suggestions.clear();
-                    view.weather_search_status = loc::t("SettingsSearchEmpty");
-                    cx.notify();
-                }
-                Err(err) => {
-                    view.weather_suggestions.clear();
-                    view.weather_search_status = err;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     // ---- Theme brush picker value helpers -----------------------------------

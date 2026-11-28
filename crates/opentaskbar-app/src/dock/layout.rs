@@ -8,8 +8,6 @@
 //! Pure policies shared by the dock message loop, the Dynamic Island and the
 //! preview/picker helpers. Some helpers remain available for renderers that
 //! live in other modules even when only a subset is used by the current host.
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::settings::{

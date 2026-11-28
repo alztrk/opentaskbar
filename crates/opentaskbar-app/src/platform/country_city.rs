@@ -490,11 +490,6 @@ pub fn geolocate() -> Option<(String, String)> {
     None
 }
 
-/// Windows Geolocation (best-effort). Returns a display city name, or `None` when denied.
-pub fn geolocate_city() -> Option<String> {
-    geolocate().map(|(_, city)| city)
-}
-
 /// Normalises the UI language to an Open-Meteo `language` query value.
 pub fn weather_language(lang: &str) -> &'static str {
     let l = lang.trim().to_ascii_lowercase();

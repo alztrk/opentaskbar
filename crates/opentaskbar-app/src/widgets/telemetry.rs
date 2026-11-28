@@ -687,14 +687,6 @@ fn sample_gpu_pdh() -> Option<(f32, String)> {
     ratio.is_finite().then(|| (ratio.clamp(0.0, 1.0), best.1))
 }
 
-/// Busiest GPU engine load in `[0.0, 1.0]`, matching `SystemSensors.SampleGpuUsage`.
-///
-/// Reads the PDH wildcard counter `\GPU Engine(*)\Utilization Percentage`. Returns `None` when the
-/// counter is unavailable or no sample can be collected; a valid but idle GPU yields `Some(0.0)`.
-pub fn sample_gpu_usage() -> Option<f32> {
-    sample_gpu_pdh().map(|(usage, _)| usage)
-}
-
 /// Engine kind of the busiest GPU engine from the latest background PDH sample
 /// (e.g. `"3D"`, `"Video Decode"`). Never invokes `PdhCollectQueryData` synchronously
 /// on the UI thread; reads the value cached by `sample_gpu_temp()`'s worker.
@@ -2838,40 +2830,6 @@ pub fn format_temperature(
 }
 
 impl WeatherCache {
-    pub fn formatted_temp(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
-        if let Some(c) = self.temp_c_val {
-            format_temperature(c, unit)
-        } else {
-            self.temp_c.clone()
-        }
-    }
-
-    pub fn formatted_feels_like(
-        &self,
-        unit: opentaskbar_core::settings::TemperatureUnit,
-    ) -> String {
-        if let Some(c) = self.feels_like_c_val {
-            format_temperature(c, unit)
-        } else {
-            self.feels_like.clone()
-        }
-    }
-
-    pub fn formatted_today_range(
-        &self,
-        unit: opentaskbar_core::settings::TemperatureUnit,
-    ) -> String {
-        if let (Some(hi), Some(lo)) = (self.today_hi_c, self.today_lo_c) {
-            format!(
-                "{} / {}",
-                format_temperature(hi, unit),
-                format_temperature(lo, unit)
-            )
-        } else {
-            self.today_range.clone()
-        }
-    }
-
     /// Wind speed in the active unit: mph for °F, km/h for °C (`WeatherUnit` parity).
     pub fn formatted_wind(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
         if let Some(kmh) = self.wind_kmh_val {
@@ -2929,22 +2887,6 @@ pub struct GeoLocationMatch {
 }
 
 impl GeoLocationMatch {
-    pub fn display_label(&self) -> String {
-        let mut parts = vec![self.name.as_str()];
-        if !self.admin1.is_empty() && !self.admin1.eq_ignore_ascii_case(&self.name) {
-            parts.push(self.admin1.as_str());
-        }
-        if !self.country.is_empty() {
-            parts.push(self.country.as_str());
-        }
-        let base = parts.join(", ");
-        if self.country_code.is_empty() {
-            base
-        } else {
-            format!("{base} ({})", self.country_code)
-        }
-    }
-
     pub fn setting_value(&self) -> String {
         if self.country.is_empty() {
             self.name.clone()
@@ -2952,72 +2894,6 @@ impl GeoLocationMatch {
             format!("{}, {}", self.name, self.country)
         }
     }
-}
-
-/// Queries Open-Meteo Geocoding API for matching cities/locations (no API key required).
-pub fn search_weather_locations(
-    query: &str,
-    language: &str,
-    count: usize,
-) -> Result<Vec<GeoLocationMatch>, String> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let lang = language
-        .split(['-', '_'])
-        .next()
-        .filter(|s| s.len() == 2)
-        .unwrap_or("en");
-    let path = format!(
-        "/v1/search?count={}&format=json&language={}&name={}",
-        count.clamp(1, 20),
-        lang,
-        urlencode_query(trimmed)
-    );
-    let (status, body) = winhttp_get("geocoding-api.open-meteo.com", &path, &[])
-        .ok_or_else(|| loc::t("WeatherGeocodeFailed"))?;
-    if status != 200 {
-        return Err(loc::t_fmt("WeatherGeocodeHttp", &[&status.to_string()]));
-    }
-    let root: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| loc::t_fmt("WeatherGeocodeInvalidJson", &[&e.to_string()]))?;
-    let Some(results) = root.get("results").and_then(|v| v.as_array()) else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(results.len());
-    for item in results {
-        let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(latitude) = item.get("latitude").and_then(|v| v.as_f64()) else {
-            continue;
-        };
-        let Some(longitude) = item.get("longitude").and_then(|v| v.as_f64()) else {
-            continue;
-        };
-        out.push(GeoLocationMatch {
-            name: name.to_owned(),
-            admin1: item
-                .get("admin1")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            country: item
-                .get("country")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            country_code: item
-                .get("country_code")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            latitude,
-            longitude,
-        });
-    }
-    Ok(out)
 }
 
 /// Pure parser for BigDataCloud reverse-geocode payloads. City falls back through locality
@@ -5182,19 +5058,6 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
     })
 }
 
-/// Convenience: every window from a provider's full detail (WS-C stacked bars).
-pub fn ai_full_windows(detail: &AiFullDetail) -> Vec<(&str, f32, &str)> {
-    let mut rows = vec![(
-        detail.label.as_str(),
-        detail.used,
-        detail.reset_text.as_str(),
-    )];
-    for share in &detail.breakdown {
-        rows.push((share.name.as_str(), share.used, "—"));
-    }
-    rows
-}
-
 /// Runs a live connection test for `provider_id`, returning `(true, summary)` on success or
 /// `(false, error_reason)` on failure.
 pub fn test_ai_connection(provider_id: &str) -> (bool, String) {
@@ -5336,24 +5199,6 @@ pub fn sample_gpu_temp() -> Option<(u32, Option<u32>)> {
 
 /// One forecast day: `(day label, condition, high/low)` — matches `WeatherCache::forecast_days`.
 pub type WeatherDay = (String, String, String);
-
-static WEATHER_FORECAST_CACHE: std::sync::LazyLock<Arc<Mutex<WeatherCache>>> =
-    std::sync::LazyLock::new(|| Arc::new(Mutex::new(WeatherCache::default())));
-
-/// Refreshes the shared forecast cache (used by the weather widget tick) and returns 3 days.
-pub fn refresh_weather_forecast(city: &str, force: bool) -> Vec<WeatherDay> {
-    refresh_weather(&WEATHER_FORECAST_CACHE, city, force);
-    weather_forecast()
-}
-
-/// Returns up to three forecast days from the shared weather cache.
-pub fn weather_forecast() -> Vec<WeatherDay> {
-    WEATHER_FORECAST_CACHE
-        .lock()
-        .ok()
-        .map(|g| g.forecast_days.iter().take(3).cloned().collect())
-        .unwrap_or_default()
-}
 
 /// Parses Open-Meteo `daily` arrays into `(weekday, condition, "Hi° / Lo°")` rows.
 pub fn parse_weather_forecast(root: &serde_json::Value) -> Vec<WeatherDay> {

@@ -5,15 +5,10 @@
 //! `ui/menu.rs`), and GPUI (`ui/components.rs`, `ui/settings.rs`) so every surface speaks
 //! one cohesive visual language.
 
-// Shared design helpers and token API surface; some helpers are consumed by the
-// dock renderer, the lab example and the theme/widget-pack resolvers.
-#![allow(dead_code)]
-
 pub mod brand_paths;
 pub mod brush;
 pub mod d2d;
 pub mod fonts;
-pub mod glass;
 pub mod icons;
 pub mod radius;
 pub mod spatial_glass;
@@ -21,6 +16,9 @@ pub mod theme;
 pub mod tokens;
 pub mod widget_pack;
 pub mod windows_palette;
+
+/// Windows 11 Acrylic transient-window backdrop (`DWMWA_SYSTEMBACKDROP_TYPE`).
+pub const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 
 /// RGB color tuple `(r, g, b)`.
 pub type Rgb = (u8, u8, u8);

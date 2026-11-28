@@ -587,62 +587,6 @@ pub fn parse_refresh_response(body: &str, old_refresh: &str) -> RefreshResult {
     }
 }
 
-/// Refreshes an expiring Cursor session, persisting rotated tokens on success.
-pub fn refresh(refresh_token: &str) -> RefreshResult {
-    let _guard = match REFRESH_LOCK.lock() {
-        Ok(g) => g,
-        Err(_) => return RefreshResult::default(),
-    };
-    let (current_access, current_refresh) = load_tokens();
-    if let (Some(a), Some(r)) = (&current_access, &current_refresh)
-        && !is_expiring_soon(a)
-        && r != refresh_token
-    {
-        return RefreshResult {
-            access_token: Some(a.clone()),
-            refresh_token: Some(r.clone()),
-            session_expired: false,
-        };
-    }
-    let payload = serde_json::json!({
-        "grant_type": "refresh_token",
-        "client_id": CLIENT_ID,
-        "refresh_token": refresh_token,
-    })
-    .to_string();
-    let keep_old = || RefreshResult {
-        refresh_token: Some(refresh_token.to_owned()),
-        ..Default::default()
-    };
-    let token_url = format!("{API_BASE}/oauth/token");
-    let Some((host, path)) = split_https_url(&token_url) else {
-        return keep_old();
-    };
-    // The refresh token is a raw UTF-8 body buffer passed in-process; it never appears in an argv.
-    let Some((status, body)) = winhttp_request(
-        "POST",
-        host,
-        path,
-        &[
-            ("User-Agent", "OpenTaskbar"),
-            ("Content-Type", "application/json"),
-        ],
-        Some(payload.as_bytes()),
-    ) else {
-        return keep_old();
-    };
-    if !(200..300).contains(&status) {
-        return keep_old();
-    }
-    let result = parse_refresh_response(&String::from_utf8_lossy(&body), refresh_token);
-    if result.session_expired {
-        sign_out();
-    } else if let (Some(a), Some(r)) = (&result.access_token, &result.refresh_token) {
-        let _ = save_tokens(a, Some(r));
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

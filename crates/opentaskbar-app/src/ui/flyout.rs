@@ -603,14 +603,6 @@ pub enum FlyoutBlock {
         mute_id: u32,
         slider_id: u32,
     },
-    /// `SystemStatsWidget` telemetry row with 45-sample vector sparkline.
-    Sparkline {
-        label: String,
-        value_text: String,
-        detail_text: Option<String>,
-        samples: Vec<f32>,
-        color: Rgb,
-    },
     /// `WeatherWidget` / `NetSpeedWidget` 2-column metric tiles (`SurfaceSelected`, `r=8`).
     MetricTiles(Vec<(String, String)>),
     /// `KeyboardLayoutWidget` selectable row: short-code badge pill + full display name.
@@ -1443,9 +1435,6 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 });
                 y = slider_top + s(24.0);
             }
-            FlyoutBlock::Sparkline { .. } => {
-                y += s(48.0);
-            }
             FlyoutBlock::MetricTiles(tiles) => {
                 let rows = tiles.len().div_ceil(2) as i32;
                 let tile_h = s(48.0);
@@ -2176,7 +2165,7 @@ fn show_flyout_impl<'a>(
                     (&corner as *const u32).cast(),
                     size_of::<u32>() as u32,
                 );
-                let backdrop: u32 = crate::design::glass::DWMSBT_TRANSIENTWINDOW;
+                let backdrop: u32 = crate::design::DWMSBT_TRANSIENTWINDOW;
                 let _ = DwmSetWindowAttribute(
                     hwnd,
                     DWMWA_SYSTEMBACKDROP_TYPE as u32,
@@ -3353,76 +3342,6 @@ impl FlyoutState<'_> {
                         );
 
                         y = slider_top + s(24.0);
-                    }
-                    FlyoutBlock::Sparkline {
-                        label,
-                        value_text,
-                        detail_text,
-                        samples,
-                        color,
-                    } => {
-                        d2d.draw_text(
-                            label,
-                            d2d_rect(pad_f, yf, pad_f + content_wf * 0.55, yf + sf(18.0)),
-                            sf(12.0),
-                            DWRITE_FONT_WEIGHT_MEDIUM,
-                            TextAlign::Left,
-                            text_fg,
-                            false,
-                        );
-                        let val_full = match detail_text {
-                            Some(d) => format!("{d}  {value_text}"),
-                            None => value_text.clone(),
-                        };
-                        let col = d2d_rgba(*color, 1.0);
-                        d2d.draw_text(
-                            &val_full,
-                            d2d_rect(
-                                pad_f + content_wf * 0.4,
-                                yf,
-                                pad_f + content_wf,
-                                yf + sf(18.0),
-                            ),
-                            sf(12.0),
-                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                            TextAlign::Right,
-                            col,
-                            true,
-                        );
-
-                        let plot_top = yf + sf(21.0);
-                        let plot_h = sf(22.0);
-                        let plot_bot = plot_top + plot_h;
-                        d2d.draw_line(pad_f, plot_bot, pad_f + content_wf, plot_bot, sep_col, 1.0);
-
-                        if !samples.is_empty() {
-                            let n = samples.len();
-                            let py = |v: f32| plot_bot - v.clamp(0.0, 1.0) * (plot_h - sf(3.0));
-                            if n == 1 {
-                                let y0 = py(samples[0]);
-                                d2d.draw_line(
-                                    pad_f,
-                                    y0,
-                                    pad_f + content_wf,
-                                    y0,
-                                    col,
-                                    sf(1.5).max(1.2),
-                                );
-                            } else {
-                                let step = content_wf / (n - 1) as f32;
-                                for i in 1..n {
-                                    d2d.draw_line(
-                                        pad_f + (i - 1) as f32 * step,
-                                        py(samples[i - 1]),
-                                        pad_f + i as f32 * step,
-                                        py(samples[i]),
-                                        col,
-                                        sf(1.6).max(1.2),
-                                    );
-                                }
-                            }
-                        }
-                        y += s(48.0);
                     }
                     FlyoutBlock::MetricTiles(tiles) => {
                         let rows = tiles.len().div_ceil(2) as i32;

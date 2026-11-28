@@ -32,8 +32,6 @@ use crate::platform::core_audio::{
     find_app_session,
 };
 
-use super::telemetry;
-
 // ---------------------------------------------------------------------------
 // Small pure helpers (also used by the unit tests at the bottom).
 // ---------------------------------------------------------------------------
@@ -75,30 +73,6 @@ pub(crate) fn exe_stem(path: &str) -> &str {
         &name[..name.len() - 4]
     } else {
         name
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GPU snapshot (all sampling lives in telemetry)
-// ---------------------------------------------------------------------------
-
-/// Snapshot of GPU utilization and (optionally) temperature.
-#[derive(Clone, Debug, Default)]
-pub struct GpuSnapshot {
-    /// Busiest GPU engine load in `[0, 1]`; `0.0` when unavailable.
-    pub usage_01: f32,
-    /// Hottest GPU in degrees Celsius via WDDM (or NVML fallback); `None` when unavailable.
-    pub temperature_c: Option<f32>,
-    /// Engine kind of the busiest instance (e.g. `"3D"`, `"Video Decode"`); empty when unknown.
-    pub engine_name: String,
-}
-
-/// Fast, non-blocking sample: open errors, lock contention and PDH failures yield `usage_01 = 0`.
-pub fn sample_gpu() -> GpuSnapshot {
-    GpuSnapshot {
-        usage_01: telemetry::sample_gpu_usage().unwrap_or(0.0),
-        temperature_c: telemetry::sample_gpu_temperature(),
-        engine_name: telemetry::sample_gpu_engine_name().unwrap_or_default(),
     }
 }
 

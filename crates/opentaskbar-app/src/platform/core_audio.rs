@@ -13,8 +13,8 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
@@ -36,9 +36,9 @@ use windows_sys::Win32::System::Threading::{
 pub type AudioDevice = (String, String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AudioEventKind {
     DefaultDeviceChanged,
-    DefaultMicChanged,
     DeviceAdded,
     DeviceRemoved,
     DeviceStateChanged,
@@ -47,15 +47,15 @@ pub enum AudioEventKind {
 #[derive(Clone, Debug)]
 pub struct AudioEvent {
     pub kind: AudioEventKind,
+    #[allow(dead_code)]
     pub device_id: String,
 }
 
 static EVENTS: Mutex<VecDeque<AudioEvent>> = Mutex::new(VecDeque::new());
 const EVENT_CAP: usize = 128;
 
-/// Process-wide device generation. Every real `IMMNotificationClient` callback
-/// bumps it, so consumers can invalidate cached device lists even when several
-/// `subscribe()` handles are alive.
+/// Process-wide device generation. Every endpoint callback bumps it so consumers
+/// can invalidate cached device lists.
 static DEVICE_GENERATION: AtomicUsize = AtomicUsize::new(1);
 
 /// Current endpoint generation (increases on every consumed device event).
@@ -63,6 +63,7 @@ pub fn device_generation() -> usize {
     DEVICE_GENERATION.load(Ordering::Acquire)
 }
 
+#[cfg(test)]
 fn push_event(kind: AudioEventKind, id: &windows::core::PCWSTR) {
     let device_id = if id.is_null() {
         String::new()
@@ -75,136 +76,7 @@ fn push_event(kind: AudioEventKind, id: &windows::core::PCWSTR) {
         }
         q.push_back(AudioEvent { kind, device_id });
     }
-    // Notification callbacks really drive the generation, not a fake timer.
     DEVICE_GENERATION.fetch_add(1, Ordering::AcqRel);
-}
-
-// ---------------------------------------------------------------------------------------------
-// IMMNotificationClient (hand-written COM vtable: the `windows::core::implement` proc macro
-// requires a direct `windows_core` crate dependency, which is lead-owned in Cargo.toml).
-// ---------------------------------------------------------------------------------------------
-
-#[repr(C)]
-struct NotifyVtbl {
-    query_interface: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> i32,
-    add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
-    release: unsafe extern "system" fn(*mut c_void) -> u32,
-    on_device_state_changed: unsafe extern "system" fn(*mut c_void, PCWSTR, u32) -> i32,
-    on_device_added: unsafe extern "system" fn(*mut c_void, PCWSTR) -> i32,
-    on_device_removed: unsafe extern "system" fn(*mut c_void, PCWSTR) -> i32,
-    on_default_device_changed: unsafe extern "system" fn(*mut c_void, i32, i32, PCWSTR) -> i32,
-    on_property_value_changed:
-        unsafe extern "system" fn(*mut c_void, PCWSTR, *const PROPERTYKEY) -> i32,
-}
-
-#[repr(C)]
-struct NotifyObject {
-    vtable: *const NotifyVtbl,
-    refs: AtomicU32,
-}
-
-unsafe extern "system" fn notify_query_interface(
-    this: *mut c_void,
-    iid: *const GUID,
-    out: *mut *mut c_void,
-) -> i32 {
-    if out.is_null() || iid.is_null() {
-        return -2147467261; // E_INVALIDARG
-    }
-    let wanted = unsafe { *iid };
-    if wanted == GUID::zeroed()
-        || wanted == <windows::core::IUnknown as Interface>::IID
-        || wanted == <windows::Win32::Media::Audio::IMMNotificationClient as Interface>::IID
-    {
-        unsafe {
-            let obj = &*(this as *const NotifyObject);
-            obj.refs.fetch_add(1, Ordering::AcqRel);
-            *out = this;
-        }
-        0 // S_OK
-    } else {
-        unsafe { *out = std::ptr::null_mut() };
-        -2147467262 // E_NOINTERFACE
-    }
-}
-
-unsafe extern "system" fn notify_add_ref(this: *mut c_void) -> u32 {
-    let obj = unsafe { &*(this as *const NotifyObject) };
-    obj.refs.fetch_add(1, Ordering::AcqRel) + 1
-}
-
-unsafe extern "system" fn notify_release(this: *mut c_void) -> u32 {
-    let obj = unsafe { &*(this as *const NotifyObject) };
-    let remaining = obj.refs.fetch_sub(1, Ordering::AcqRel) - 1;
-    if remaining == 0 {
-        unsafe { drop(Box::from_raw(this as *mut NotifyObject)) };
-    }
-    remaining
-}
-
-unsafe extern "system" fn notify_device_added(_this: *mut c_void, id: PCWSTR) -> i32 {
-    push_event(AudioEventKind::DeviceAdded, &id);
-    0
-}
-
-unsafe extern "system" fn notify_device_removed(_this: *mut c_void, id: PCWSTR) -> i32 {
-    push_event(AudioEventKind::DeviceRemoved, &id);
-    0
-}
-
-unsafe extern "system" fn notify_default_changed(
-    _this: *mut c_void,
-    flow: i32,
-    role: i32,
-    id: PCWSTR,
-) -> i32 {
-    if role != 1 {
-        return 0; // only multimedia role
-    }
-    let kind = if flow == eRender.0 {
-        AudioEventKind::DefaultDeviceChanged
-    } else if flow == eCapture.0 {
-        AudioEventKind::DefaultMicChanged
-    } else {
-        return 0;
-    };
-    push_event(kind, &id);
-    0
-}
-
-unsafe extern "system" fn notify_property_changed(
-    _this: *mut c_void,
-    _id: PCWSTR,
-    _key: *const PROPERTYKEY,
-) -> i32 {
-    0
-}
-
-fn create_notification_client() -> Option<windows::Win32::Media::Audio::IMMNotificationClient> {
-    static VTBL: NotifyVtbl = NotifyVtbl {
-        query_interface: notify_query_interface,
-        add_ref: notify_add_ref,
-        release: notify_release,
-        on_device_state_changed: notify_state_changed,
-        on_device_added: notify_device_added,
-        on_device_removed: notify_device_removed,
-        on_default_device_changed: notify_default_changed,
-        on_property_value_changed: notify_property_changed,
-    };
-    unsafe extern "system" fn notify_state_changed(
-        _this: *mut c_void,
-        id: PCWSTR,
-        _state: u32,
-    ) -> i32 {
-        push_event(AudioEventKind::DeviceStateChanged, &id);
-        0
-    }
-    let boxed = Box::new(NotifyObject {
-        vtable: &VTBL,
-        refs: AtomicU32::new(1),
-    });
-    let raw = Box::into_raw(boxed);
-    Some(unsafe { windows::Win32::Media::Audio::IMMNotificationClient::from_raw(raw.cast()) })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -273,11 +145,6 @@ pub fn set_default_device(id: &str) -> bool {
             .iter()
             .all(|&role| policy.set_default_endpoint(&wide, role))
     }
-}
-
-/// Alias matching C4 (`platform::win32_ex::set_default_audio_device`).
-pub fn set_default_audio_device(id: &str) -> bool {
-    set_default_device(id)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -353,62 +220,7 @@ pub fn list_devices(is_recording: bool) -> Vec<AudioDevice> {
     collect(if is_recording { eCapture } else { eRender })
 }
 
-/// Convenience tuple alias for consumers that prefer `(name, id)` ordering.
-pub fn list_devices_named(is_recording: bool) -> Vec<(String, String)> {
-    list_devices(is_recording)
-        .into_iter()
-        .map(|(id, name)| (name, id))
-        .collect()
-}
-
-// ---------------------------------------------------------------------------------------------
-// Shared monitor / ref-count
-// ---------------------------------------------------------------------------------------------
-
-/// Shared, ref-counted endpoint monitor (`AudioEndpointMonitor.AcquireShared`).
-///
-/// The COM enumerator + notification client are registered once and kept alive for the
-/// process lifetime; the Arc handle only implements the reference ref-count semantics.
-#[derive(Debug)]
-pub struct AudioEndpointMonitor;
-
-static SHARED: OnceLock<Mutex<Weak<AudioEndpointMonitor>>> = OnceLock::new();
-static NOTIFY_REGISTERED: OnceLock<()> = OnceLock::new();
-
-impl AudioEndpointMonitor {
-    /// Acquires (or creates) the process-wide monitor.
-    pub fn acquire_shared() -> Option<Arc<AudioEndpointMonitor>> {
-        let lock = SHARED.get_or_init(|| Mutex::new(Weak::new()));
-        let mut guard = lock.lock().ok()?;
-        if let Some(existing) = guard.upgrade() {
-            return Some(existing);
-        }
-        if NOTIFY_REGISTERED.get().is_none()
-            && let Some(en) = enumerator()
-            && let Some(client) = create_notification_client()
-            && unsafe { en.RegisterEndpointNotificationCallback(&client) }.is_ok()
-        {
-            // Keep both COM objects alive for the lifetime of the process.
-            std::mem::forget(en);
-            std::mem::forget(client);
-            let _ = NOTIFY_REGISTERED.set(());
-        }
-        let monitor = Arc::new(AudioEndpointMonitor);
-        *guard = Arc::downgrade(&monitor);
-        Some(monitor)
-    }
-
-    pub fn generation(&self) -> usize {
-        device_generation()
-    }
-}
-
-/// C4 `subscribe()` — acquires the shared monitor and returns a strong handle.
-pub fn subscribe() -> Option<Arc<AudioEndpointMonitor>> {
-    AudioEndpointMonitor::acquire_shared()
-}
-
-/// Drains queued `IMMNotificationClient` events.
+/// Drains queued endpoint events.
 pub fn take_events() -> Vec<AudioEvent> {
     EVENTS
         .lock()

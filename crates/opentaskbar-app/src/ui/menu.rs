@@ -34,7 +34,7 @@ use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
 };
-use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HDC, InvalidateRect, PAINTSTRUCT};
+use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
@@ -277,9 +277,6 @@ impl BorderStyle {
         }
     }
 }
-
-/// Public alias matching the anchored popup menu API contract.
-pub type MenuBorderStyle = BorderStyle;
 
 /// Screen edge a dock or bar is anchored to, used to place popup menus cleanly
 /// outside the visible pill without guessing from raw HWND dimensions.
@@ -717,21 +714,6 @@ fn create_menu_d2d(
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
         Some(MenuD2d { rt, formats })
-    }
-}
-
-/// Shared GDI Fluent icon helper used by `ui/flyout.rs`.
-pub(super) unsafe fn draw_menu_icon(
-    hdc: HDC,
-    icon: MenuIcon,
-    cx: i32,
-    cy: i32,
-    dpi: f32,
-    color: u32,
-) {
-    let size_px = (15.0 * dpi).round() as i32;
-    unsafe {
-        icons::draw_fluent_icon_gdi(hdc, to_app_icon(icon), cx, cy, size_px, color);
     }
 }
 
@@ -1248,30 +1230,6 @@ fn destroy_pane(pane: &mut MenuPane) {
         set_window_long_ptr(pane.hwnd, GWLP_USERDATA, 0);
         DestroyWindow(pane.hwnd);
     }
-}
-
-/// Displays a native Windows 11 Acrylic popup menu (with hover submenus) at the cursor.
-///
-/// Call sites without `DockSettings` get the palette hairline; use
-/// [`show_popup_menu_with_border`] or [`show_popup_menu_with_anchor`] to apply
-/// persisted `menu_border_*` settings and explicit dock/bar anchors.
-pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>) -> Option<u32> {
-    show_popup_menu_with_border(
-        owner_hwnd,
-        is_dark,
-        entries,
-        BorderStyle::default_for(is_dark),
-    )
-}
-
-/// Same as [`show_popup_menu`] with an explicit border stroke color/width (cursor-anchored).
-pub fn show_popup_menu_with_border(
-    owner_hwnd: usize,
-    is_dark: bool,
-    entries: Vec<MenuEntry>,
-    border: BorderStyle,
-) -> Option<u32> {
-    show_popup_menu_with_anchor(owner_hwnd, is_dark, &entries, border, None)
 }
 
 /// Displays a popup menu with an explicit border style and optional dock/bar anchor.

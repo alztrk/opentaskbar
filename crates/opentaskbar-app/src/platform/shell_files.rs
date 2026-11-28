@@ -13,22 +13,15 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
 use windows_sys::Win32::UI::Shell::{
-    CSIDL_DESKTOPDIRECTORY, SHEmptyRecycleBinW, SHFILEOPSTRUCTW, SHFileOperationW,
-    SHGetFolderPathW, SHQUERYRBINFO, SHQueryRecycleBinW, ShellExecuteW,
+    CSIDL_DESKTOPDIRECTORY, SHFILEOPSTRUCTW, SHFileOperationW, SHGetFolderPathW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows_sys::core::PCWSTR;
 
 const FO_MOVE: u32 = 0x0001;
 const FO_COPY: u32 = 0x0002;
-const FO_DELETE: u32 = 0x0003;
 const FOF_RENAMEONCOLLISION: u16 = 0x0008;
 const FOF_ALLOWUNDO: u16 = 0x0040;
 const FOF_NOCONFIRMMKDIR: u16 = 0x0200;
-const FOF_WANTNUKEWARNING: u16 = 0x4000;
 const ERROR_CANCELLED: i32 = 0x04C7;
-const E_UNEXPECTED_HRESULT: i32 = 0x8000_FFFFu32 as i32;
-const CANCELLED_HRESULT: i32 = 0x8007_04C7u32 as i32;
 
 /// Kullanıcının gerçek Masaüstü dizini (OneDrive yeniden yönlendirmesi dahil).
 fn desktop_directory() -> Option<String> {
@@ -223,70 +216,6 @@ pub fn transfer_to_desktop(paths: &[String], copy: bool) -> Result<(), String> {
     } else {
         Err(format!("SHFileOperation failed: 0x{result:X}"))
     }
-}
-
-/// Masaüstü klasörünü varsayılan kabuk uygulamasıyla (Explorer) açar.
-pub fn open_desktop_folder() -> bool {
-    let Some(desktop) = desktop_directory() else {
-        return false;
-    };
-    if std::fs::metadata(&desktop).is_err() {
-        return false;
-    }
-    let verb: Vec<u16> = "open\0".encode_utf16().collect();
-    let path: Vec<u16> = desktop.encode_utf16().chain(Some(0)).collect();
-    // SAFETY: both strings are NUL-terminated and alive for the duration of the call.
-    let instance = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr() as PCWSTR,
-            path.as_ptr() as PCWSTR,
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    (instance as isize) > 32
-}
-
-/// Tüm sürücülerdeki Geri Dönüş Kutusu öğe sayısı; shell sorgulayamazsa `None`.
-pub fn recycle_bin_count() -> Option<u32> {
-    let mut info = SHQUERYRBINFO {
-        cbSize: size_of::<SHQUERYRBINFO>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: `info` is initialized with the correct cbSize and outlives the call.
-    let hr = unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) };
-    if hr != 0 {
-        return None;
-    }
-    Some(info.i64NumItems.clamp(0, u32::MAX as i64) as u32)
-}
-
-/// Geri Dönüş Kutusunu boşaltır. Windows'un onay diyaloğu korunur.
-///
-/// Kullanıcı onaylamadığında veya kutu zaten boş olduğunda shell'in verdiği
-/// `E_UNEXPECTED` / iptal sonuçları da hata sayılmaz ve `true` döner.
-pub fn empty_recycle_bin() -> bool {
-    // SAFETY: null owner and null root path are valid; all drives are emptied.
-    let hr = unsafe { SHEmptyRecycleBinW(std::ptr::null_mut(), std::ptr::null(), 0) };
-    matches!(hr, 0 | E_UNEXPECTED_HRESULT | CANCELLED_HRESULT)
-}
-
-/// Yolları Explorer üzerinden Geri Dönüş Kutusuna taşır.
-///
-/// `FOF_ALLOWUNDO` kalıcı silme yerine geri dönüş kutusunu zorunlu kılar;
-/// `FOF_WANTNUKEWARNING` kutuya sığmayan dosyalarda uyarı gösterir.
-/// İptal (`aborted`) hata değil, `true` olarak raporlanır (`RecycleBin.Delete` ile aynı).
-pub fn delete_to_recycle_bin(paths: &[String]) -> bool {
-    let normalized: Vec<String> = paths.iter().filter_map(|p| normalize_path(p)).collect();
-    if normalized.is_empty() {
-        return true;
-    }
-    let from = double_null(&normalized);
-    let (result, aborted) =
-        run_file_operation(&from, None, FO_DELETE, FOF_ALLOWUNDO | FOF_WANTNUKEWARNING);
-    result == 0 || aborted
 }
 
 #[cfg(test)]
@@ -494,10 +423,6 @@ pub fn copy_files(from: &[String], to: &[String], ui: UIOption) -> FileOperation
 
 pub fn move_files(from: &[String], to: &[String], ui: UIOption) -> FileOperationOutcome {
     shell_operation(FO_MOVE, from, to, ui)
-}
-
-pub fn delete_files(from: &[String], ui: UIOption) -> FileOperationOutcome {
-    shell_operation(FO_DELETE, from, &[], ui)
 }
 
 /// Resolves a destination folder for a drop, rejecting device paths early.

@@ -2,9 +2,6 @@
 //! the widget-pack resolver. Mirrors the UI types (`Brush`, `Color`, `CornerRadius`,
 //! `Thickness`, `double`, `FontFamily`) used by `WidgetPack.Convert`.
 
-// Public token/API surface shared by the theme resolver, widget packs and dock renderer.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 /// RGBA color; `a` is 255 for opaque colors. Byte order matches `Color.FromArgb`.

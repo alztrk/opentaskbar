@@ -8,12 +8,6 @@
 #[path = "lucide_paths.rs"]
 mod lucide_paths;
 
-use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, HDC, SelectObject,
-    SetTextColor,
-};
-
 // Shared PUA codepoints. Both font families and `MDL2_FALLBACKS` reference these
 // constants so a glyph is written once, not duplicated across three tables.
 const CHEVRON_UP: &str = "\u{E70D}";
@@ -170,60 +164,6 @@ pub fn lucide(name: &str) -> Option<&'static str> {
 /// Every ported Lucide key (93 entries, including the two Lucide-style brand marks).
 pub fn lucide_names() -> impl Iterator<Item = &'static str> {
     lucide_paths::LUCIDE_PATHS.iter().map(|(key, _)| *key)
-}
-
-/// Draws a crisp, ClearType-hinted shell glyph centered at `(cx, cy)` on a Win32 GDI `HDC`.
-pub unsafe fn draw_fluent_icon_gdi(
-    hdc: HDC,
-    icon: AppIcon,
-    cx: i32,
-    cy: i32,
-    size_px: i32,
-    fg_colorref: u32,
-) {
-    let sz = size_px.max(10);
-    let font_name: Vec<u16> = format!("{}\0", icon_font_family()).encode_utf16().collect();
-    let text = glyph_for_icon(icon);
-    if text.is_empty() {
-        return;
-    }
-    let mut glyph: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    let half = sz;
-    let mut rc = RECT {
-        left: cx - half,
-        top: cy - half,
-        right: cx + half,
-        bottom: cy + half,
-    };
-    unsafe {
-        let font = CreateFontW(
-            -sz,
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            4, // ANTIALIASED_QUALITY (grayscale AA, zero RGB ClearType fringing on dark surfaces)
-            0,
-            font_name.as_ptr(),
-        );
-        let old = SelectObject(hdc, font as _);
-        SetTextColor(hdc, fg_colorref);
-        DrawTextW(
-            hdc,
-            glyph.as_mut_ptr(),
-            (glyph.len() - 1) as i32,
-            &mut rc,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(hdc, old);
-        DeleteObject(font as _);
-    }
 }
 
 #[cfg(test)]

@@ -23,26 +23,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
 
-use windows_sys::Win32::Foundation::{LPARAM, WPARAM};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_EXPAND_SZ, REG_SZ, RegCloseKey,
     RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    HWND_BROADCAST, RegisterWindowMessageW, SendNotifyMessageW,
 };
 
 const SETTINGS_KEY: &str = r"Control Panel\NotifyIconSettings";
 const USER_SHELL_FOLDERS: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders";
-
-const SELF_BROADCAST_WPARAM: WPARAM = 1;
-const RESTORE_BROADCAST_WPARAM: WPARAM = 2;
-
-static LAST_SELF_SEQUENCE: AtomicI64 = AtomicI64::new(0);
-static NEXT_SEQUENCE: AtomicI64 = AtomicI64::new(0);
 
 /// Bir arka plan uygulamasının tepsisindeki ikonu temsil eder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -449,61 +438,6 @@ pub fn start_host(pinned_executables: &[String]) -> bool {
 /// Removes all hosted icons and stops the host thread.
 pub fn stop_host() {
     super::tray_icon_host::stop();
-}
-
-pub fn is_running() -> bool {
-    super::tray_icon_host::is_running()
-}
-
-fn next_sequence() -> i64 {
-    NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
-}
-
-/// Tüm pencerelere `TaskbarCreated` yayınlar (`TrayHost.BroadcastTaskbarCreated`).
-///
-/// `wParam = 1` kendi yayınımızı, `lParam` içerilen sıra numarasını taşır;
-/// `is_own_broadcast()` bu sıra ile kendi yayınımızı ayırt eder. İletim
-/// `SendNotifyMessage` ile fire-and-forget yapılır; kilitli bir Explorer
-/// kapatma yolunu bloke edemez.
-pub fn broadcast_taskbar_created() {
-    let message = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
-    if message == 0 {
-        return;
-    }
-    let sequence = next_sequence();
-    LAST_SELF_SEQUENCE.store(sequence, Ordering::Relaxed);
-    // SAFETY: HWND_BROADCAST belgelenmiş bir sabit; wParam/lParam skaler.
-    let _ = unsafe {
-        SendNotifyMessageW(
-            HWND_BROADCAST,
-            message,
-            SELF_BROADCAST_WPARAM,
-            sequence as LPARAM,
-        )
-    };
-}
-
-/// Watchdog / `--restore` yolundan gelen yayın: kendi yayınımız olarak işaretlenmez.
-pub fn broadcast_taskbar_created_restore() {
-    let message = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
-    if message == 0 {
-        return;
-    }
-    // SAFETY: HWND_BROADCAST belgelenmiş bir sabit; wParam/lParam skaler.
-    let _ = unsafe {
-        SendNotifyMessageW(
-            HWND_BROADCAST,
-            message,
-            RESTORE_BROADCAST_WPARAM,
-            next_sequence() as LPARAM,
-        )
-    };
-}
-
-/// `lParam` son kendi `TaskbarCreated` yayınımızın sıra numarasını taşıyorsa doğru.
-pub fn is_own_broadcast(l_param: LPARAM) -> bool {
-    let sequence = LAST_SELF_SEQUENCE.load(Ordering::Relaxed);
-    sequence != 0 && l_param != 0 && sequence as isize == l_param
 }
 
 #[cfg(test)]

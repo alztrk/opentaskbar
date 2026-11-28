@@ -33,25 +33,6 @@ pub enum SurfaceKind {
 
 impl SurfaceKind {
     pub const ALL: [Self; 4] = [Self::Dock, Self::Menu, Self::Widget, Self::Settings];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Dock => "Dock",
-            Self::Menu => "Menu",
-            Self::Widget => "Widget",
-            Self::Settings => "Settings",
-        }
-    }
-
-    /// Resource key prefix for this surface's generated border thickness/color.
-    pub fn stroke_prefix(self) -> &'static str {
-        match self {
-            Self::Dock => "DockBorder",
-            Self::Menu => "MenuStroke",
-            Self::Widget => "WidgetStroke",
-            Self::Settings => "SettingsStroke",
-        }
-    }
 }
 
 /// Style of one surface: background mode, opacity and optional user border override.
@@ -77,17 +58,6 @@ impl SurfaceStyle {
             border_thickness,
             border_color,
         }
-    }
-
-    /// Contract alias: `SurfaceStyle::set_opacity(kind, value)` updates only that
-    /// surface through the shared theme manager.
-    pub fn set_opacity(kind: SurfaceKind, opacity: f64) -> Result<(), &'static str> {
-        ThemeManager::set_opacity(kind, opacity)
-    }
-
-    /// Contract alias: `SurfaceStyle::opacity(kind)` reads only that surface.
-    pub fn opacity(kind: SurfaceKind) -> f64 {
-        ThemeManager::opacity(kind)
     }
 }
 
@@ -804,24 +774,12 @@ impl ThemeManager {
         rx
     }
 
-    pub fn current() -> AppTheme {
-        lock().current
-    }
-
     pub fn effective_theme() -> AppTheme {
         lock().effective
     }
 
-    pub fn effective_is_dark() -> bool {
-        Self::effective_theme() == AppTheme::Dark
-    }
-
     pub fn generation() -> u64 {
         lock().generation
-    }
-
-    pub fn is_initialized() -> bool {
-        lock().initialized
     }
 
     /// Applies a theme and (optionally) all four surface styles from settings.
@@ -1141,11 +1099,6 @@ pub fn apply_pack_tokens_to_palette(tokens: impl Borrow<TokenMap>) {
     ThemeManager::notify_all();
 }
 
-/// Module-level alias of [`ThemeManager::resolve`] for cross-WS callers.
-pub fn resolve_token(key: &str) -> Option<TokenValue> {
-    ThemeManager::resolve(key)
-}
-
 /// Returns `true` whenever `ThemeManager` currently has non-empty theme-pack
 /// tokens or manual editor token overrides loaded.
 pub fn has_active_theme_customization() -> bool {
@@ -1224,15 +1177,6 @@ pub fn sync_from_settings(settings: &DockSettings) {
         .map(token_overrides_from_json)
         .unwrap_or_default();
     apply_token_overrides(overrides);
-}
-
-/// Startup hook: applies the tokens persisted in `settings.extra["ThemeTokens"]`.
-/// Call this right after `ThemeManager::apply` so the real palette is themed
-/// before any window opens (the settings window also calls it on load).
-pub fn apply_saved_token_overrides(settings: &DockSettings) {
-    if let Some(tokens) = settings.extra.get("ThemeTokens").and_then(Value::as_object) {
-        apply_token_overrides(token_overrides_from_json(tokens));
-    }
 }
 
 /// Convenience: parses the JSON object persisted under `extra["ThemeTokens"]`.
@@ -1366,25 +1310,6 @@ fn style_from_settings(
         style.opacity = *opacity;
     }
     style
-}
-
-/// Helper for consumers that need to convert a token to the reference-style mode name.
-pub fn mode_name(value: &TokenValue) -> Option<&str> {
-    match value {
-        TokenValue::Mode(mode) => Some(mode),
-        _ => None,
-    }
-}
-
-/// Parses a `#RRGGBB` / `#AARRGGBB` user border color with the same rules as reference.
-pub fn parse_border_color(text: &str) -> Option<Rgba> {
-    Rgba::from_hex(text)
-}
-
-/// Keeps the compiler from dropping the `TokenKind` import when downstream code only
-/// calls the typed helpers above.
-pub fn token_kind(value: &TokenValue) -> TokenKind {
-    value.kind()
 }
 
 impl ThemeState {

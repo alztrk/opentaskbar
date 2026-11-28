@@ -1020,10 +1020,6 @@ pub fn install_bundled() -> Result<usize, String> {
     Ok(installed)
 }
 
-pub fn install_built_in_themes() -> Result<usize, String> {
-    install_bundled()
-}
-
 fn is_safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && path
@@ -1129,12 +1125,6 @@ pub fn resolve_widget_tokens(
     current: impl Fn(&str) -> Option<crate::design::tokens::TokenKind>,
 ) -> WidgetTokenResolution {
     crate::design::widget_pack::resolve_widget_tokens(manifest, theme, current)
-}
-
-/// Discovers all valid theme folders under the shared root, sorted by display
-/// name. Uses the same safe-id and symlink checks as [`discover`].
-pub fn discover_installed() -> Vec<ThemePack> {
-    discover(&root())
 }
 
 /// Applies a selected theme pack's widget tokens as a layered `TokenMap` for `ThemeManager`.
@@ -1265,28 +1255,6 @@ pub fn save_custom_theme(
         &widgets_json,
     )?;
     ThemePack::load(&target)
-}
-
-/// Cached native Windows logo bytes (`@WLOGO_96x96.png`), or `None` when unavailable.
-pub fn get_native_windows_logo() -> Option<Vec<u8>> {
-    let windows = std::env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-    let mut candidates = vec![windows.join("System32").join("@WLOGO_96x96.png")];
-    let winsxs = windows.join("WinSxS");
-    if let Ok(entries) = fs::read_dir(&winsxs) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("amd64_microsoft-windows-oobe-user_") {
-                candidates.push(entry.path().join("@WLOGO_96x96.png"));
-            }
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .and_then(|path| fs::read(&path).ok())
 }
 
 /// Shape used when clipping an icon onto its plate.
@@ -1472,20 +1440,6 @@ pub fn plate_icon(icon: &RgbaImage, is_dark: bool) -> RgbaImage {
         ..IconPackFallback::default()
     };
     render_plate(icon, &fallback, is_dark)
-}
-
-/// Reads a theme pack image from disk, optionally capped at `target_pixels`.
-pub fn load_pack_image(path: &Path, target_pixels: u32) -> Option<RgbaImage> {
-    let decoder = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?;
-    let image = decoder.decode().ok()?;
-    if target_pixels > 0 && (image.width() > target_pixels || image.height() > target_pixels) {
-        Some(image.thumbnail(target_pixels, target_pixels).to_rgba8())
-    } else {
-        Some(image.to_rgba8())
-    }
 }
 
 #[cfg(test)]

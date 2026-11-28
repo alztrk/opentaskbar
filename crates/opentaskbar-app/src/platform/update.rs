@@ -199,12 +199,9 @@ fn escape_batch(value: &str) -> Result<String, &'static str> {
     escape_batch_value(value).map_err(|_| "ErrorUpdatePath")
 }
 
-fn updater_script(source: &str, target: &str) -> Result<String, &'static str> {
-    generate_updater_script(Path::new(source), Path::new(target))
-}
-
 /// `UpdateChecker` uses `%TEMP%\OpenTaskbar\update`, not LOCALAPPDATA. The
 /// shared `paths` contract has no updater helper, so this literal stays here.
+#[cfg(test)]
 fn update_dir() -> PathBuf {
     std::env::temp_dir().join("OpenTaskbar").join("update")
 }
@@ -220,16 +217,6 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         difference |= a ^ b;
     }
     difference == 0
-}
-
-fn hex_to_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-        .collect()
 }
 
 #[cfg(test)]
@@ -563,15 +550,7 @@ impl UpdateOutcome {
     }
 }
 
-/// Downloads and applies an update. Successful application spawns the updater; call
-/// `exit_for_update()` afterwards to release the running executable.
-pub fn download_and_apply_update(release: &DetailedRelease) -> UpdateOutcome {
-    apply_update(release, false)
-}
-
-/// Same as [`download_and_apply_update`] but always launches the copy/restart
-/// script through `ShellExecuteW("runas")`, even when the install directory
-/// happens to be writable by the current user.
+/// Downloads and applies an update, launching the copy/restart script via `ShellExecuteW("runas")`.
 pub fn apply_with_elevation(release: &DetailedRelease) -> UpdateOutcome {
     apply_update(release, true)
 }
@@ -729,16 +708,6 @@ fn is_directory_writable(dir: &Path) -> bool {
     ok
 }
 
-/// Writes the script, spawns it (elevated with `runas` when needed), returns success.
-pub fn launch_updater_and_restart(temp_exe: &Path, target: &Path) -> bool {
-    launch_updater(temp_exe, target, false)
-}
-
-/// Always elevates the updater via `ShellExecuteW("runas")`.
-pub fn launch_updater_elevated(temp_exe: &Path, target: &Path) -> bool {
-    launch_updater(temp_exe, target, true)
-}
-
 fn launch_updater(temp_exe: &Path, target: &Path, force_elevation: bool) -> bool {
     let Some(parent) = target.parent() else {
         return false;
@@ -791,12 +760,6 @@ fn launch_updater(temp_exe: &Path, target: &Path, force_elevation: bool) -> bool
         let _ = fs::remove_file(temp_exe.with_extension("exe.part"));
     }
     spawned
-}
-
-/// Releases the running executable after a successful update launch. WS-B/lead owns graceful
-/// shutdown; call this from the app's update handler, not from a background worker thread.
-pub fn exit_for_update() -> ! {
-    std::process::exit(0);
 }
 
 /// Minimal synchronous HTTPS GET via the shared WinHTTP core (status + body).

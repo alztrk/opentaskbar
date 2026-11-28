@@ -818,28 +818,6 @@ pub fn build_media_flyout(
     }
 }
 
-/// Builds the standalone vertical volume popover (wheel/tap on the chip's volume glyph).
-pub fn build_volume_popover(volume: u32, muted: bool, device_name: &str) -> FlyoutSpec {
-    FlyoutSpec {
-        title: loc::t("Volume"),
-        subtitle: Some(device_name.to_owned()),
-        width_dips: 260.0,
-        blocks: vec![FlyoutBlock::AudioSliderSection {
-            label: loc::t("AudioOutput"),
-            device_name: device_name.to_owned(),
-            value_text: if muted {
-                loc::t("AudioMuted")
-            } else {
-                super::format_percent(volume)
-            },
-            ratio: volume as f32 / 100.0,
-            muted,
-            mute_id: 1,
-            slider_id: 2,
-        }],
-    }
-}
-
 /// Applies a mouse-wheel remainder: `AudioWidget` uses 120 delta = 10%.
 /// Returns `(new_pct, remainder)` so callers keep the fractional step across events.
 pub fn volume_from_wheel(current_pct: u32, delta: i32, remainder: &mut i32) -> u32 {

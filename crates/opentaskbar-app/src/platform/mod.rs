@@ -5,7 +5,6 @@
 //! [`win32_helpers`]; modules that own a specific API keep their own plumbing.
 
 pub mod app_identity;
-pub mod app_shortcut_resolver;
 pub mod com;
 pub mod core_audio;
 pub mod country_city;
