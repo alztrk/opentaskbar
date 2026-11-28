@@ -1006,8 +1006,11 @@ impl DynamicIslandWindow {
             top_flush,
         )
         .with_theme_tint(tint, rim);
-        let spatial_glass =
-            design::spatial_glass::SpatialGlassHost::attach(hwnd_val, false, glass_cfg);
+        let spatial_glass = if glass_cfg.enabled {
+            design::spatial_glass::SpatialGlassHost::attach(hwnd_val, false, glass_cfg)
+        } else {
+            None
+        };
         let refresh_hz = win32::monitor_refresh_hz(&monitor.device_name);
 
         let mut boxed = Box::new(Self {
@@ -1182,8 +1185,15 @@ impl DynamicIslandWindow {
 
     fn apply_glass_config(&mut self) {
         let cfg = self.glass_config();
-        if let Some(ref mut glass) = self.spatial_glass {
-            glass.apply_config(cfg);
+        if cfg.enabled {
+            if let Some(ref mut glass) = self.spatial_glass {
+                glass.apply_config(cfg);
+            } else {
+                self.spatial_glass =
+                    design::spatial_glass::SpatialGlassHost::attach(self.hwnd, false, cfg);
+            }
+        } else {
+            self.spatial_glass = None;
         }
     }
 

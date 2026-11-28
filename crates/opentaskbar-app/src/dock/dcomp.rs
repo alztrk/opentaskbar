@@ -27,13 +27,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext,
     ID2D1Factory1, ID2D1LinearGradientBrush, ID2D1StrokeStyle,
 };
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
-    D3D_FEATURE_LEVEL_11_1,
-};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-};
+use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Graphics::DirectComposition::{
     DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR, DCOMPOSITION_BORDER_MODE_SOFT,
     DCompositionCreateDevice2, IDCompositionDevice, IDCompositionMatrixTransform,
@@ -656,27 +650,7 @@ fn color_rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
 
 impl DcompEngine {
     pub fn new(hwnd: usize) -> Result<Self> {
-        let mut d3d_device: Option<ID3D11Device> = None;
-        let feature_levels = [
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-        ];
-        // SAFETY: standard D3D11 hardware device creation with BGRA support for Direct2D/DComp.
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&feature_levels),
-                D3D11_SDK_VERSION,
-                Some(&mut d3d_device),
-                None,
-                None,
-            )?;
-        }
-        let d3d_device = d3d_device.unwrap();
+        let d3d_device = design::spatial_glass::shared_d3d11_device()?;
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
 
         let d2d_factory: ID2D1Factory1 =

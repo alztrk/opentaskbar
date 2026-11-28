@@ -136,6 +136,7 @@ impl SpatialGlassConfig {
 mod imp {
     use std::cell::RefCell;
     use std::mem::size_of;
+    use std::sync::{Mutex, OnceLock};
 
     use windows::Foundation::{IPropertyValue, PropertyValue, Size};
     use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
@@ -170,7 +171,7 @@ mod imp {
         D3D_FEATURE_LEVEL_11_1,
     };
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
     };
     use windows::Win32::Graphics::Dxgi::IDXGIDevice;
     use windows::Win32::System::WinRT::Composition::{
@@ -193,6 +194,43 @@ mod imp {
     // the same thread, so multi-monitor docks + Dynamic Islands reuse the thread-local instance).
     thread_local! {
         static THREAD_DISPATCHER: RefCell<Option<DispatcherQueueController>> = const { RefCell::new(None) };
+    }
+
+    static D3D11_DEVICE: OnceLock<Mutex<Option<ID3D11Device>>> = OnceLock::new();
+
+    /// Returns the process-wide D3D11 device used by every DirectComposition surface.
+    /// Per-window devices make GPU drivers allocate a worker pool for every popup and dock.
+    pub(crate) fn shared_d3d11_device() -> WinResult<ID3D11Device> {
+        let device_slot = D3D11_DEVICE.get_or_init(|| Mutex::new(None));
+        let mut device_guard = device_slot
+            .lock()
+            .map_err(|_| windows::Win32::Foundation::E_FAIL)?;
+        if let Some(device) = device_guard.as_ref() {
+            return Ok(device.clone());
+        }
+
+        let levels = [
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+        ];
+        let mut device = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )?;
+        }
+        let device = device.ok_or(windows::Win32::Foundation::E_FAIL)?;
+        *device_guard = Some(device.clone());
+        Ok(device)
     }
 
     fn ensure_dispatcher_queue() -> WinResult<()> {
@@ -501,26 +539,7 @@ mod imp {
                 desktop_interop.CreateDesktopWindowTarget(WinHwnd(hwnd as _), is_topmost)?
             };
 
-            let levels = [
-                D3D_FEATURE_LEVEL_11_1,
-                D3D_FEATURE_LEVEL_11_0,
-                D3D_FEATURE_LEVEL_10_1,
-            ];
-            let mut d3d_dev = None;
-            unsafe {
-                D3D11CreateDevice(
-                    None,
-                    D3D_DRIVER_TYPE_HARDWARE,
-                    windows::Win32::Foundation::HMODULE::default(),
-                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                    Some(&levels),
-                    D3D11_SDK_VERSION,
-                    Some(&mut d3d_dev),
-                    None,
-                    None,
-                )?;
-            }
-            let d3d_dev = d3d_dev.ok_or(windows::Win32::Foundation::E_FAIL)?;
+            let d3d_dev = shared_d3d11_device()?;
             let dxgi: IDXGIDevice = d3d_dev.cast()?;
             let d2d_factory: ID2D1Factory1 =
                 unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
@@ -1255,26 +1274,7 @@ mod imp {
                 DCompositionCreateDevice2, IDCompositionDevice,
             };
 
-            let levels = [
-                D3D_FEATURE_LEVEL_11_1,
-                D3D_FEATURE_LEVEL_11_0,
-                D3D_FEATURE_LEVEL_10_1,
-            ];
-            let mut d3d_dev = None;
-            unsafe {
-                D3D11CreateDevice(
-                    None,
-                    D3D_DRIVER_TYPE_HARDWARE,
-                    windows::Win32::Foundation::HMODULE::default(),
-                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                    Some(&levels),
-                    D3D11_SDK_VERSION,
-                    Some(&mut d3d_dev),
-                    None,
-                    None,
-                )?;
-            }
-            let d3d_dev = d3d_dev.ok_or(windows::Win32::Foundation::E_FAIL)?;
+            let d3d_dev = shared_d3d11_device()?;
             let dxgi: IDXGIDevice = d3d_dev.cast()?;
             let d2d_factory: ID2D1Factory1 =
                 unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
@@ -1464,6 +1464,7 @@ mod imp {
     }
 }
 
+pub(crate) use imp::shared_d3d11_device;
 pub use imp::{DCompForeground, SpatialGlassHost, configure_host_backdrop_window};
 
 #[cfg(test)]

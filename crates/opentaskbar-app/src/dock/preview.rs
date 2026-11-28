@@ -309,10 +309,9 @@ impl PreviewPopup {
             return None;
         }
 
-        let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
-        let default_glass = SpatialGlassConfig::default_glass(true, 0.9).with_theme_tint(tint, rim);
-        configure_host_backdrop_window(hwnd as usize, true, true);
-        let spatial_glass = SpatialGlassHost::attach(hwnd as usize, false, default_glass);
+        let default_glass = SpatialGlassConfig::disabled(true);
+        configure_host_backdrop_window(hwnd as usize, true, false);
+        let spatial_glass = None;
         let dcomp_fg = DCompForeground::new(hwnd as usize);
 
         unsafe {
@@ -332,7 +331,7 @@ impl PreviewPopup {
             card_w_dips: CARD_W_DIPS,
             card_h_dips: CARD_H_DIPS,
             is_dark: true,
-            glass_mode: true,
+            glass_mode: false,
             glass_tint_alpha: default_glass.tint_alpha,
             glass_config: default_glass,
             spatial_glass,
@@ -359,8 +358,14 @@ impl PreviewPopup {
         self.glass_tint_alpha = config.tint_alpha;
         self.glass_config = config;
         configure_host_backdrop_window(self.hwnd as usize, config.is_dark, config.enabled);
-        if let Some(ref mut glass) = self.spatial_glass {
-            glass.apply_config(config);
+        if config.enabled {
+            if let Some(ref mut glass) = self.spatial_glass {
+                glass.apply_config(config);
+            } else {
+                self.spatial_glass = SpatialGlassHost::attach(self.hwnd as usize, false, config);
+            }
+        } else {
+            self.spatial_glass = None;
         }
     }
 

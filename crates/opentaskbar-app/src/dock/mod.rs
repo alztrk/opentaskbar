@@ -1912,7 +1912,11 @@ impl DockState {
             is_dark,
             false,
         );
-        let spatial_glass = design::spatial_glass::SpatialGlassHost::attach(hwnd, false, glass_cfg);
+        let spatial_glass = if glass_cfg.enabled {
+            design::spatial_glass::SpatialGlassHost::attach(hwnd, false, glass_cfg)
+        } else {
+            None
+        };
         let glass_host_active = spatial_glass
             .as_ref()
             .is_some_and(design::spatial_glass::SpatialGlassHost::is_enabled);
@@ -3189,8 +3193,15 @@ impl DockState {
                 design::theme::theme_surface_tint("DockMaterial", "DockBorderMaterial");
             glass_cfg = glass_cfg.with_theme_tint(tint, rim);
         }
-        if let Some(ref mut glass) = self.spatial_glass {
-            glass.apply_config(glass_cfg);
+        if glass_cfg.enabled {
+            if let Some(ref mut glass) = self.spatial_glass {
+                glass.apply_config(glass_cfg);
+            } else {
+                self.spatial_glass =
+                    design::spatial_glass::SpatialGlassHost::attach(self.hwnd, false, glass_cfg);
+            }
+        } else {
+            self.spatial_glass = None;
         }
         let glass_host_active = self
             .spatial_glass
@@ -5131,7 +5142,8 @@ impl DockState {
     ) {
         let dpi = self.dpi;
         let icon_px = icon_cache::ICON_PX as f32;
-        for index in 0..self.stack_visuals.len().min(rects.len()) {
+        for (index, &(left, _, right, _)) in rects.iter().enumerate().take(self.stack_visuals.len())
+        {
             let path = self.stack_visuals[index].path.clone();
             let has_icon = self.icon_surfaces.get(&path).is_some_and(Option::is_some);
             if self.stack_visuals[index].bound_source != path
@@ -5149,7 +5161,6 @@ impl DockState {
                 visual.bound_source = path;
                 visual.bound_has_icon = has_icon;
             }
-            let (left, _, right, _) = rects[index];
             let pressed = self.pressed_stack == Some(index);
             let hovered = self.hovered_stack == Some(index);
             let visual = &self.stack_visuals[index];
