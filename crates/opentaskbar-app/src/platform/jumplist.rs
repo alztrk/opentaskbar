@@ -314,9 +314,6 @@ struct Launch {
     target: String,
     args: String,
     working_dir: String,
-    /// Icon resource retained for diagnostics/future lazy extraction.
-    #[allow(dead_code)]
-    icon: String,
 }
 
 struct Session {
@@ -1090,7 +1087,6 @@ fn read_launch(item: &ComPtr, store: Option<&ComPtr>) -> Launch {
         target,
         args,
         working_dir,
-        icon: icon_location,
     }
 }
 
