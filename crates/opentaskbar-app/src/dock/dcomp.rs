@@ -22,10 +22,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_CAP_STYLE_ROUND,
     D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINE_JOIN_ROUND,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
-    D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Factory1, ID2D1LinearGradientBrush, ID2D1StrokeStyle,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINE_JOIN_ROUND, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1, D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1LinearGradientBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Graphics::DirectComposition::{
@@ -44,7 +43,6 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
 };
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -651,14 +649,9 @@ fn color_rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
 impl DcompEngine {
     pub fn new(hwnd: usize) -> Result<Self> {
         let d3d_device = design::spatial_glass::shared_d3d11_device()?;
-        let dxgi_device: IDXGIDevice = d3d_device.cast()?;
-
-        let d2d_factory: ID2D1Factory1 =
-            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-
-        // Must create `d2d_device` from `d2d_factory` so stroke styles and device contexts share
-        // the exact same factory (otherwise Direct2D fails with D2DERR_WRONG_FACTORY on EndDraw).
-        let d2d_device: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
+        // Stroke styles and device contexts must use the shared device's factory or EndDraw can
+        // fail with D2DERR_WRONG_FACTORY.
+        let (d2d_factory, d2d_device) = design::spatial_glass::shared_d2d_resources()?;
 
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };

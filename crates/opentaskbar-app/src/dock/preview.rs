@@ -312,7 +312,7 @@ impl PreviewPopup {
         let default_glass = SpatialGlassConfig::disabled(true);
         configure_host_backdrop_window(hwnd as usize, true, false);
         let spatial_glass = None;
-        let dcomp_fg = DCompForeground::new(hwnd as usize);
+        let dcomp_fg = None;
 
         unsafe {
             let exclude_peek: u32 = 1;
@@ -364,8 +364,12 @@ impl PreviewPopup {
             } else {
                 self.spatial_glass = SpatialGlassHost::attach(self.hwnd as usize, false, config);
             }
+            if self.dcomp_fg.is_none() {
+                self.dcomp_fg = DCompForeground::new(self.hwnd as usize);
+            }
         } else {
             self.spatial_glass = None;
+            self.dcomp_fg = None;
         }
     }
 

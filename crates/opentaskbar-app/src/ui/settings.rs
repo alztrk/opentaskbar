@@ -1968,7 +1968,6 @@ enum BrushPickerTarget {
 impl SettingsView {
     fn new(settings: DockSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         fonts::apply_settings(&settings);
-        let _ = theme_packs::install_bundled();
         sync_from_settings(&settings);
         let focus = cx.focus_handle();
         focus.focus(window);
@@ -1995,7 +1994,11 @@ impl SettingsView {
         window_chrome::apply_app_icon(hwnd);
         window_chrome::mark_settings_window(hwnd);
         let initial_glass_hwnd_state = Some((is_dark, glass_cfg.enabled));
-        let mut spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
+        let mut spatial_glass = if glass_cfg.enabled {
+            SpatialGlassHost::attach(hwnd, false, glass_cfg)
+        } else {
+            None
+        };
         if let Some(ref mut g) = spatial_glass {
             let dpi = win32::dpi_scale(hwnd);
             let vp = window.viewport_size();
@@ -2515,12 +2518,12 @@ impl SettingsView {
         } else {
             Self::window_hwnd(window)
         };
-        if self.spatial_glass.is_none() && glass_cfg.enabled {
-            self.spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
-        }
-        if let Some(ref mut g) = self.spatial_glass {
-            g.apply_config(glass_cfg);
-            if glass_cfg.enabled {
+        if glass_cfg.enabled {
+            if self.spatial_glass.is_none() {
+                self.spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
+            }
+            if let Some(ref mut g) = self.spatial_glass {
+                g.apply_config(glass_cfg);
                 let dpi = win32::dpi_scale(hwnd);
                 let vp = window.viewport_size();
                 let w_px = (f32::from(vp.width) * dpi).max(2.0);
@@ -2529,6 +2532,8 @@ impl SettingsView {
                     (settings_corner_radius(window_chrome::is_windows_11()) * dpi).round();
                 g.sync_rect(0.0, 0.0, w_px, h_px, radius_px, dpi, 0.0, 0.0);
             }
+        } else {
+            self.spatial_glass = None;
         }
     }
 

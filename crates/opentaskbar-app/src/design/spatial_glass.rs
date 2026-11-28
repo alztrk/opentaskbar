@@ -163,8 +163,8 @@ mod imp {
         CLSID_D2D1ArithmeticComposite, CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation,
         D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BUFFER_PRECISION_8BPC_UNORM,
         D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB, D2D1_EXTEND_MODE_CLAMP,
-        D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-        D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+        D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+        D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
     };
     use windows::Win32::Graphics::Direct3D::{
         D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -197,6 +197,7 @@ mod imp {
     }
 
     static D3D11_DEVICE: OnceLock<Mutex<Option<ID3D11Device>>> = OnceLock::new();
+    static D2D_RESOURCES: OnceLock<Mutex<Option<(ID2D1Factory1, ID2D1Device)>>> = OnceLock::new();
 
     /// Returns the process-wide D3D11 device used by every DirectComposition surface.
     /// Per-window devices make GPU drivers allocate a worker pool for every popup and dock.
@@ -231,6 +232,24 @@ mod imp {
         let device = device.ok_or(windows::Win32::Foundation::E_FAIL)?;
         *device_guard = Some(device.clone());
         Ok(device)
+    }
+
+    /// Returns the process-wide multithreaded Direct2D factory and device.
+    pub(crate) fn shared_d2d_resources() -> WinResult<(ID2D1Factory1, ID2D1Device)> {
+        let resource_slot = D2D_RESOURCES.get_or_init(|| Mutex::new(None));
+        let mut resource_guard = resource_slot
+            .lock()
+            .map_err(|_| windows::Win32::Foundation::E_FAIL)?;
+        if let Some((factory, device)) = resource_guard.as_ref() {
+            return Ok((factory.clone(), device.clone()));
+        }
+
+        let factory: ID2D1Factory1 =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
+        let dxgi_device: IDXGIDevice = shared_d3d11_device()?.cast()?;
+        let device = unsafe { factory.CreateDevice(&dxgi_device)? };
+        *resource_guard = Some((factory.clone(), device.clone()));
+        Ok((factory, device))
     }
 
     fn ensure_dispatcher_queue() -> WinResult<()> {
@@ -539,11 +558,7 @@ mod imp {
                 desktop_interop.CreateDesktopWindowTarget(WinHwnd(hwnd as _), is_topmost)?
             };
 
-            let d3d_dev = shared_d3d11_device()?;
-            let dxgi: IDXGIDevice = d3d_dev.cast()?;
-            let d2d_factory: ID2D1Factory1 =
-                unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-            let d2d_device = unsafe { d2d_factory.CreateDevice(&dxgi)? };
+            let (_, d2d_device) = shared_d2d_resources()?;
 
             let comp_interop: ICompositorInterop = compositor.cast()?;
             let gfx_device = unsafe { comp_interop.CreateGraphicsDevice(&d2d_device)? };
@@ -1274,11 +1289,7 @@ mod imp {
                 DCompositionCreateDevice2, IDCompositionDevice,
             };
 
-            let d3d_dev = shared_d3d11_device()?;
-            let dxgi: IDXGIDevice = d3d_dev.cast()?;
-            let d2d_factory: ID2D1Factory1 =
-                unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-            let d2d_device = unsafe { d2d_factory.CreateDevice(&dxgi)? };
+            let (_, d2d_device) = shared_d2d_resources()?;
             let device: IDCompositionDevice = unsafe { DCompositionCreateDevice2(&d2d_device)? };
             let target = unsafe { device.CreateTargetForHwnd(WinHwnd(hwnd as _), true)? };
             let root = unsafe { device.CreateVisual()? };
@@ -1464,8 +1475,9 @@ mod imp {
     }
 }
 
-pub(crate) use imp::shared_d3d11_device;
 pub use imp::{DCompForeground, SpatialGlassHost, configure_host_backdrop_window};
+#[cfg(windows)]
+pub(crate) use imp::{shared_d2d_resources, shared_d3d11_device};
 
 #[cfg(test)]
 mod tests {
