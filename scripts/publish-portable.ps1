@@ -38,32 +38,15 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
 $finalExe = Join-Path $OutputDir "OpenTaskbar-$arch.exe"
 Copy-Item -LiteralPath $built -Destination $finalExe -Force
 
-# build.rs compiled the watchdog into OUT_DIR for this exact target and embedded
-# it into the EXE. Keep a named copy beside the portable EXE so the release
-# manifest can record its architecture and SHA-256 (and CI can re-verify it).
-$buildRoot = Join-Path $repoRoot "target\$target\release\build"
-$watchdogExe = Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue |
-    ForEach-Object {
-        $buildOutput = Join-Path $_.FullName 'output'
-        if (Test-Path -LiteralPath $buildOutput -PathType Leaf) {
-            $watchdogLine = Get-Content -LiteralPath $buildOutput |
-                Where-Object { $_.StartsWith('cargo:rustc-env=OT_WATCHDOG_EXE=', [StringComparison]::Ordinal) } |
-                Select-Object -Last 1
-            if ($watchdogLine) {
-                $path = $watchdogLine.Substring('cargo:rustc-env=OT_WATCHDOG_EXE='.Length)
-                if (Test-Path -LiteralPath $path -PathType Leaf) {
-                    [pscustomobject]@{
-                        Path = $path
-                        LastWriteTimeUtc = (Get-Item -LiteralPath $buildOutput).LastWriteTimeUtc
-                    }
-                }
-            }
-        }
-    } |
-    Sort-Object LastWriteTimeUtc -Descending |
-    Select-Object -First 1 -ExpandProperty Path
-if (-not $watchdogExe) {
-    throw "No architecture-specific watchdog produced by build.rs under $buildRoot"
+# build.rs embeds the target-matched watchdog in the EXE. Build a distributable
+# copy with the same tool instead of depending on Cargo's private OUT_DIR layout.
+$watchdogBuildScript = Join-Path $repoRoot 'tools\watchdog\build.ps1'
+$watchdogBuildDir = Join-Path $repoRoot "target\$target\release\watchdog-build"
+& $watchdogBuildScript -Architecture $arch -OutputDir $watchdogBuildDir -Force -NoFallback
+if ($LASTEXITCODE -ne 0) { throw "Watchdog build failed for $arch (exit code $LASTEXITCODE)." }
+$watchdogExe = Join-Path $watchdogBuildDir 'OpenTaskbarWatchdog.exe'
+if (-not (Test-Path -LiteralPath $watchdogExe -PathType Leaf)) {
+    throw "Watchdog build did not produce an executable: $watchdogExe"
 }
 $expectedMachine = if ($arch -eq 'x86') { 0x014C } else { 0x8664 }
 $bytes = [IO.File]::ReadAllBytes($watchdogExe)
