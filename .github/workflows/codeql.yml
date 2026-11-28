@@ -31,17 +31,14 @@ jobs:
           rustup default stable
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
+        uses: github/codeql-action/init@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
         with:
           languages: rust
           queries: security-extended
-          build-mode: manual
-
-      - name: Build Rust workspace
-        run: cargo build --workspace
+          build-mode: none
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
+        uses: github/codeql-action/analyze@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
         with:
           category: '/language:rust'
 
@@ -58,7 +55,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
+        uses: github/codeql-action/init@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
         with:
           languages: c-cpp
           queries: security-extended
@@ -75,6 +72,6 @@ jobs:
           }
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
+        uses: github/codeql-action/analyze@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
         with:
           category: '/language:c-cpp'

@@ -116,9 +116,9 @@ fn with_com<T>(work: impl FnOnce() -> Option<T>) -> Option<T> {
 }
 
 fn current_task() -> windows::core::Result<StartupTask> {
-    // `IAsyncOperation<T>::get()` waits for the WinRT operation to complete;
+    // `IAsyncOperation<T>::join()` waits for the WinRT operation to complete;
     // this mirrors the reference `.AsTask().GetAwaiter().GetResult()`.
-    StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK_ID))?.get()
+    StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK_ID))?.join()
 }
 
 /// Reads the actual packaged startup registration.
@@ -147,7 +147,7 @@ pub fn set_startup_task_enabled(enabled: bool) -> Result<bool, &'static str> {
     let state = with_com(|| {
         let task = current_task().ok()?;
         if enabled {
-            Some(task.RequestEnableAsync().ok()?.get().ok()?.0)
+            Some(task.RequestEnableAsync().ok()?.join().ok()?.0)
         } else {
             if task.Disable().is_err() {
                 return None;

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -352,6 +352,20 @@ pub enum DynamicIslandVisibilityMode {
     DesktopOnly,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DynamicIslandStyle {
+    #[default]
+    Notch,
+    Floating,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DynamicIslandLayout {
+    #[default]
+    Paged,
+    Strip,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockWidthMode {
     #[default]
@@ -693,26 +707,55 @@ pub fn is_supported_widget_id(id: &str) -> bool {
 /// Custom IDs always get the lowercase `custom:` prefix: two spellings of the same custom
 /// widget would otherwise become two distinct map keys and trip the case-insensitive duplicate
 /// check in `validate()`, resetting the whole file on the next load.
-pub fn canonical_widget_setting_id(id: &str) -> String {
+/// Zero-allocation comparison under the same compact ASCII alphanumeric key as [`compact_id`].
+fn eq_compact_ascii(a: &str, b: &str) -> bool {
+    let mut ai = a
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| byte.to_ascii_lowercase());
+    let mut bi = b
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| byte.to_ascii_lowercase());
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(ac), Some(bc)) if ac == bc => continue,
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Zero-allocation helper resolving a widget ID to a static canonical ID when it matches
+/// any built-in widget or legacy alias.
+fn canonical_builtin_widget_id(id: &str) -> Option<&'static str> {
     let id = id.trim();
-    if let Some(canonical) = SUPPORTED_WIDGET_IDS
+    if let Some(&canonical) = SUPPORTED_WIDGET_IDS
         .iter()
         .find(|known| known.eq_ignore_ascii_case(id))
     {
-        return (*canonical).to_owned();
+        return Some(canonical);
     }
-    let compact = compact_id(id);
-    if let Some(canonical) = SUPPORTED_WIDGET_IDS
+    if let Some(&canonical) = SUPPORTED_WIDGET_IDS
         .iter()
-        .find(|known| compact_id(known) == compact)
+        .find(|known| eq_compact_ascii(known, id))
     {
-        return (*canonical).to_owned();
+        return Some(canonical);
     }
     // Historic snake_case spellings that do not compact to a catalog ID.
-    match compact.as_str() {
-        "stats" => return "SystemStats".to_owned(),
-        "keyboard" => return "KeyboardLayout".to_owned(),
-        _ => {}
+    if eq_compact_ascii(id, "stats") {
+        return Some("SystemStats");
+    }
+    if eq_compact_ascii(id, "keyboard") {
+        return Some("KeyboardLayout");
+    }
+    None
+}
+
+pub fn canonical_widget_setting_id(id: &str) -> String {
+    let id = id.trim();
+    if let Some(canonical) = canonical_builtin_widget_id(id) {
+        return canonical.to_owned();
     }
     if let Some(slug) = custom_widget_slug(id) {
         return format!("custom:{slug}");
@@ -1453,6 +1496,94 @@ impl DockSettings {
         (digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(raw)
     }
 
+    pub fn dynamic_island_style(&self) -> DynamicIslandStyle {
+        match self
+            .extra
+            .get("DynamicIslandStyle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+        {
+            Some(value) if value.eq_ignore_ascii_case("Floating") => DynamicIslandStyle::Floating,
+            _ => DynamicIslandStyle::Notch,
+        }
+    }
+
+    pub fn set_dynamic_island_style(&mut self, style: DynamicIslandStyle) {
+        let value = match style {
+            DynamicIslandStyle::Notch => "Notch",
+            DynamicIslandStyle::Floating => "Floating",
+        };
+        self.extra.insert(
+            "DynamicIslandStyle".to_owned(),
+            Value::String(value.to_owned()),
+        );
+    }
+
+    pub fn dynamic_island_layout(&self) -> DynamicIslandLayout {
+        match self
+            .extra
+            .get("DynamicIslandLayout")
+            .and_then(Value::as_str)
+            .map(str::trim)
+        {
+            Some(value) if value.eq_ignore_ascii_case("Strip") => DynamicIslandLayout::Strip,
+            _ => DynamicIslandLayout::Paged,
+        }
+    }
+
+    pub fn set_dynamic_island_layout(&mut self, layout: DynamicIslandLayout) {
+        let value = match layout {
+            DynamicIslandLayout::Paged => "Paged",
+            DynamicIslandLayout::Strip => "Strip",
+        };
+        self.extra.insert(
+            "DynamicIslandLayout".to_owned(),
+            Value::String(value.to_owned()),
+        );
+    }
+
+    pub fn dynamic_island_show_focus_widgets(&self) -> bool {
+        self.extra
+            .get("DynamicIslandShowFocusWidgets")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    }
+
+    pub fn set_dynamic_island_show_focus_widgets(&mut self, enabled: bool) {
+        self.extra.insert(
+            "DynamicIslandShowFocusWidgets".to_owned(),
+            Value::Bool(enabled),
+        );
+    }
+
+    pub fn shrink_priority_bias(&self) -> i32 {
+        self.extra
+            .get("ShrinkPriority")
+            .and_then(Value::as_i64)
+            .map_or(0, |value| value.clamp(-10, 10) as i32)
+    }
+
+    pub fn set_shrink_priority_bias(&mut self, value: i32) {
+        self.extra.insert(
+            "ShrinkPriority".to_owned(),
+            Value::from(value.clamp(-10, 10)),
+        );
+    }
+
+    pub fn countdown_default_minutes(&self) -> u32 {
+        self.extra
+            .get("CountdownDefaultMinutes")
+            .and_then(Value::as_i64)
+            .map_or(15, |value| value.clamp(1, 180) as u32)
+    }
+
+    pub fn set_countdown_default_minutes(&mut self, minutes: u32) {
+        self.extra.insert(
+            "CountdownDefaultMinutes".to_owned(),
+            Value::from(minutes.clamp(1, 180)),
+        );
+    }
+
     pub fn is_widget_enabled(&self, id: &str) -> bool {
         let id = canonical_widget_setting_id(id);
         // `WidgetCoordinator.Apply` deactivates every widget while Focus Mode is on. Clock and
@@ -1666,23 +1797,32 @@ pub fn widget_density_for(settings: &DockSettings, id: &str) -> f32 {
 /// `DockWidget.ShrinkPriority`: lower values are compacted first when the dock overflows.
 /// 100 is the `DockWidget` base value for widgets without a specific priority.
 pub fn widget_shrink_priority(id: &str) -> u8 {
+    // The dock passes its chip IDs (`stats`, `keyboard`, `aiusage_claude`), which do not
+    // compact to the PascalCase setting IDs below; canonicalize first without heap allocation
+    // so hot layout passes keep their real priority in O(1) time.
+    if let Some(canonical) = canonical_builtin_widget_id(id) {
+        return match canonical {
+            "Media" => 10,
+            "Weather" => 15,
+            "Audio" => 18,
+            "QuickSettings" => 20,
+            "SystemStats" | "NetSpeed" => 30,
+            "BluetoothBattery" => 32,
+            "Storage" => 35,
+            "Battery" => 36,
+            "Focus" => 50,
+            "DayProgress" => 60,
+            "KeyboardLayout" => 75,
+            "Clock" => 80,
+            other if other.starts_with("AiUsage") => 40,
+            _ => 100,
+        };
+    }
     let compact = compact_id(id);
-    match compact.as_str() {
-        "media" => 10,
-        "weather" => 15,
-        "audio" => 18,
-        "quicksettings" => 20,
-        "systemstats" | "netspeed" => 30,
-        "bluetoothbattery" => 32,
-        "storage" => 35,
-        "battery" => 36,
-        "aiusage" => 40,
-        "focus" => 50,
-        "dayprogress" => 60,
-        "keyboardlayout" => 75,
-        "clock" => 80,
-        _ if compact.starts_with("aiusage") => 40,
-        _ => 100,
+    if compact == "aiusage" || compact.starts_with("aiusage") {
+        40
+    } else {
+        100
     }
 }
 
@@ -2216,19 +2356,32 @@ fn normalize_widget_tokens(list: &mut Vec<String>) {
 }
 
 fn canonicalize_density_map(map: &mut BTreeMap<String, WidgetDensityMode>) {
-    let previous = std::mem::take(map);
+    let mut previous: Vec<_> = std::mem::take(map).into_iter().collect();
+    // Apply canonical keys first so a freshly inserted alias key (e.g. `"stats"` written on top
+    // of a loaded `"SystemStats"` entry) overwrites the stale value deterministically.
+    previous.sort_by(|a, b| {
+        let a_canon = canonical_widget_setting_id(&a.0) == a.0;
+        let b_canon = canonical_widget_setting_id(&b.0) == b.0;
+        b_canon.cmp(&a_canon).then_with(|| a.0.cmp(&b.0))
+    });
     for (key, value) in previous {
         let canonical = canonical_widget_setting_id(&key);
-        map.entry(canonical).or_insert(value);
+        map.insert(canonical, value);
     }
 }
 
 fn canonicalize_placements(map: &mut HashMap<String, String>) {
     let mut previous: Vec<_> = std::mem::take(map).into_iter().collect();
-    previous.sort_by(|a, b| a.0.cmp(&b.0));
+    // Apply canonical keys first so a freshly inserted alias key (e.g. `"stats"` written on top
+    // of a loaded `"SystemStats"` entry) updates the placement cleanly without losing entries.
+    previous.sort_by(|a, b| {
+        let a_canon = canonical_widget_setting_id(&a.0) == a.0;
+        let b_canon = canonical_widget_setting_id(&b.0) == b.0;
+        b_canon.cmp(&a_canon).then_with(|| a.0.cmp(&b.0))
+    });
     for (key, value) in previous {
         let canonical = canonical_widget_setting_id(&key);
-        map.entry(canonical).or_insert(value);
+        map.insert(canonical, value);
     }
 }
 
@@ -2257,6 +2410,14 @@ impl DockSettings {
             repair_widget_lists(&mut profile.enabled_widgets, &mut profile.installed_widgets);
             normalize_widget_ids(&mut profile.widget_order);
             normalize_widget_tokens(&mut profile.dock_item_order);
+        }
+        // Strip stale invalid `extra["SurfaceOpacity"]` entries so they cannot poison saves.
+        if let Some(value) = self.extra.get("SurfaceOpacity")
+            && !value
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && (0.1..=1.0).contains(&n))
+        {
+            self.extra.remove("SurfaceOpacity");
         }
     }
 
@@ -2449,10 +2610,10 @@ fn island_visibility_name(mode: DynamicIslandVisibilityMode) -> &'static str {
 fn is_safe_theme_id(id: &str) -> bool {
     let id = id.trim();
     !id.is_empty()
-        && id.len() <= 120
+        && id.chars().count() <= 120
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         && !id.contains("..")
 }
 
@@ -2460,10 +2621,11 @@ fn is_border_valid(thickness: f64, color: Option<&str>) -> bool {
     is_finite(thickness)
         && (0.0..=12.0).contains(&thickness)
         && color.is_none_or(|value| {
-            value.trim().is_empty()
-                || (value.starts_with('#')
-                    && value.len() == 9
-                    && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+            let trimmed = value.trim();
+            trimmed.is_empty()
+                || (trimmed.starts_with('#')
+                    && matches!(trimmed.len(), 7 | 9)
+                    && trimmed[1..].bytes().all(|byte| byte.is_ascii_hexdigit()))
         })
 }
 
@@ -2586,7 +2748,7 @@ impl DockSettings {
         } else {
             self.surface_opacity
         };
-        if !is_finite(surface_opacity) || !(0.6..=1.0).contains(&surface_opacity) {
+        if !is_finite(surface_opacity) || !(0.1..=1.0).contains(&surface_opacity) {
             errors.push("SurfaceOpacityOutOfRange");
         }
         for (key, value) in [
@@ -2983,45 +3145,92 @@ pub fn backup_manifest_version_supported(manifest: Option<&[u8]>) -> bool {
         == Some(BACKUP_MANIFEST_VERSION)
 }
 
+fn read_to_string_with_retry(path: &Path) -> io::Result<String> {
+    #[cfg(windows)]
+    {
+        const BACKOFF_MS: [u64; 5] = [10, 20, 40, 80, 160];
+        for delay_ms in BACKOFF_MS {
+            match fs::read_to_string(path) {
+                Ok(raw) => return Ok(raw),
+                Err(err)
+                    if err.kind() == io::ErrorKind::PermissionDenied
+                        || matches!(err.raw_os_error(), Some(5 | 32 | 33)) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        fs::read_to_string(path)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::read_to_string(path)
+    }
+}
+
+/// Loads and validates settings from `path`, retrying transient Windows sharing violations.
+/// Unlike [`load_from`], I/O, JSON parse, and validation failures return `Err` instead of
+/// silently falling back to defaults.
+pub fn try_load_from(path: &Path) -> io::Result<DockSettings> {
+    let raw = read_to_string_with_retry(path)?;
+    let clean = raw.trim_start_matches('\u{feff}');
+    let normalized = normalize_legacy_json(clean);
+    let mut settings = serde_json::from_str::<DockSettings>(&normalized).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unreadable settings ({error})"),
+        )
+    })?;
+    settings.migrate_legacy();
+    settings.dock_opacity = settings.dock_opacity.clamp(0.0, 1.0);
+    settings.dock_scale = settings.dock_scale.clamp(0.75, 1.5);
+    settings.dynamic_island_opacity = settings.dynamic_island_opacity.clamp(0.1, 1.0);
+    settings.surface_opacity = settings.surface_opacity.clamp(0.1, 1.0);
+    settings.glass_blur_sigma = settings.glass_blur_sigma.clamp(0.0, 36.0);
+    settings.glass_saturation = settings.glass_saturation.clamp(0.8, 1.8);
+    settings.glass_edge_glow = settings.glass_edge_glow.clamp(0.0, 1.0);
+    settings.ui_font_size = settings.ui_font_size.clamp(9.0, 24.0);
+    let errors = settings.validate();
+    if errors.is_empty() {
+        Ok(settings)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid settings rejected ({errors:?})"),
+        ))
+    }
+}
+
 /// Loads settings from `path`. Corrupt JSON and settings that fail the `IsValid()` rules both
 /// fall back to defaults and leave a timestamped backup of the rejected file behind.
 pub fn load_from(path: &Path) -> DockSettings {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return DockSettings::default();
-    };
-    let clean = raw.trim_start_matches('\u{feff}');
-    let normalized = normalize_legacy_json(clean);
-    match serde_json::from_str::<DockSettings>(&normalized) {
-        Ok(mut settings) => {
-            settings.migrate_legacy();
-            settings.dock_opacity = settings.dock_opacity.clamp(0.0, 1.0);
-            settings.dock_scale = settings.dock_scale.clamp(0.75, 1.5);
-            settings.dynamic_island_opacity = settings.dynamic_island_opacity.clamp(0.1, 1.0);
-            settings.surface_opacity = settings.surface_opacity.clamp(0.1, 1.0);
-            settings.glass_blur_sigma = settings.glass_blur_sigma.clamp(0.0, 36.0);
-            settings.glass_saturation = settings.glass_saturation.clamp(0.8, 1.8);
-            settings.glass_edge_glow = settings.glass_edge_glow.clamp(0.0, 1.0);
-            settings.ui_font_size = settings.ui_font_size.clamp(9.0, 24.0);
-            let errors = settings.validate();
-            if errors.is_empty() {
-                settings
-            } else {
+    match try_load_from(path) {
+        Ok(settings) => settings,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => DockSettings::default(),
+        Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+            let message = err.to_string();
+            if message.starts_with("invalid settings rejected") {
                 crate::log::warn(format!(
-                    "settings: invalid settings rejected ({errors:?}); using defaults from {}",
+                    "settings: {message}; using defaults from {}",
                     path.display()
                 ));
                 crate::log::report_error("ErrorDockSettingsInvalid", &[]);
-                backup_invalid_settings(path);
-                DockSettings::default()
+            } else {
+                crate::log::warn(format!(
+                    "settings: {message}; using defaults from {}",
+                    path.display()
+                ));
+                crate::log::report_error("ErrorDockSettingsRead", &[]);
             }
+            backup_invalid_settings(path);
+            DockSettings::default()
         }
-        Err(error) => {
+        Err(err) => {
             crate::log::warn(format!(
-                "settings: unreadable settings ({error}); using defaults from {}",
+                "settings: failed to read {} ({err}); using defaults",
                 path.display()
             ));
-            crate::log::report_error("ErrorDockSettingsRead", &[]);
-            backup_invalid_settings(path);
             DockSettings::default()
         }
     }
@@ -3115,7 +3324,82 @@ fn unique_settings_tmp(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.{guid}.tmp"))
 }
 
-fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
+#[cfg(windows)]
+fn is_transient_windows_lock_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::PermissionDenied
+        || matches!(err.raw_os_error(), Some(5 | 32 | 33 | 1224))
+}
+
+#[cfg(windows)]
+fn encode_wide_null(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn replace_file_with_retry(tmp: &Path, target: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_READONLY, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
+    };
+
+    const BACKOFF_MS: [u64; 7] = [10, 20, 40, 80, 160, 250, 400];
+    let tmp_wide = encode_wide_null(tmp);
+    let target_wide = encode_wide_null(target);
+
+    let mut last_err = None;
+    for delay_ms in BACKOFF_MS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+    {
+        // SAFETY: `target_wide` is a null-terminated UTF-16 path.
+        unsafe {
+            let attrs = GetFileAttributesW(target_wide.as_ptr());
+            if attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) != 0 {
+                let _ = SetFileAttributesW(target_wide.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY);
+            }
+        }
+
+        // SAFETY: `tmp_wide` and `target_wide` are valid null-terminated UTF-16 paths.
+        let moved = unsafe {
+            MoveFileExW(
+                tmp_wide.as_ptr(),
+                target_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+
+        let err = io::Error::last_os_error();
+        if let Some(ms) = delay_ms
+            && is_transient_windows_lock_error(&err)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            last_err = Some(err);
+            continue;
+        }
+        last_err = Some(err);
+        break;
+    }
+
+    let _ = fs::remove_file(tmp);
+    let err = last_err.unwrap_or_else(|| io::Error::other("unknown replace error"));
+    Err(io::Error::new(
+        err.kind(),
+        format!("replace {} failed: {err}", target.display()),
+    ))
+}
+
+#[cfg(not(windows))]
+fn replace_file_with_retry(tmp: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(tmp, target)
+}
+
+fn write_settings_to(path: &Path, settings: &DockSettings) -> io::Result<()> {
     // Validate the data that will actually be written. Validating the caller's raw spellings
     // first rejected repairable IDs (`"stats"` vs `"SystemStats"`, lowercase island orders,
     // case variants of `custom:` IDs) even though canonicalization fixes them one line later.
@@ -3123,8 +3407,8 @@ fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()
     canonical.canonicalize_widget_keys();
     let errors = canonical.validate();
     if !errors.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             format!("invalid settings rejected ({errors:?})"),
         ));
     }
@@ -3132,20 +3416,20 @@ fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()
         fs::create_dir_all(parent)?;
     }
     let mut value = serde_json::to_value(&canonical)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if let Value::Object(root) = &mut value {
         write_settings_aliases(root, &canonical);
     }
     let json = serde_json::to_string_pretty(&value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let tmp = unique_settings_tmp(path);
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> io::Result<()> {
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, path)
+        replace_file_with_retry(&tmp, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -4248,5 +4532,270 @@ mod tests {
             assert!(!backup_manifest_version_supported(Some(raw)), "{raw:?}");
         }
         assert!(!backup_manifest_version_supported(None));
+    }
+
+    #[test]
+    fn border_color_accepts_rgb_and_argb_hex_and_rejects_invalid() {
+        for valid in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("#112233"),
+            Some("#aAbBcC"),
+            Some("#FF112233"),
+            Some("#80aAbBcC"),
+        ] {
+            let settings = DockSettings {
+                dock_border_color: valid.map(str::to_owned),
+                ..DockSettings::default()
+            };
+            assert!(
+                !settings.validate().contains(&"BorderStyleInvalid"),
+                "expected valid border color {valid:?}"
+            );
+        }
+
+        for invalid in [
+            "#123",
+            "#12345",
+            "#1234567",
+            "#123456789",
+            "112233",
+            "#1122GG",
+            "#ZZ112233",
+        ] {
+            let settings = DockSettings {
+                dock_border_color: Some(invalid.to_owned()),
+                ..DockSettings::default()
+            };
+            assert!(
+                settings.validate().contains(&"BorderStyleInvalid"),
+                "expected BorderStyleInvalid for {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_pack_id_accepts_unicode_and_rejects_traversal() {
+        for valid in [
+            "",
+            "catppuccin",
+            "tokyo-night",
+            "Tema_2",
+            "güneş-teması_1",
+            "İstanbul_Gece",
+            "日本語-theme",
+        ] {
+            let settings = DockSettings {
+                theme_pack: valid.to_owned(),
+                ..DockSettings::default()
+            };
+            assert!(
+                !settings.validate().contains(&"ThemePackInvalid"),
+                "expected valid theme pack id {valid:?}"
+            );
+        }
+
+        for invalid in [
+            "../x",
+            "../escape",
+            "a/b",
+            r"a\b",
+            "a:b",
+            "bad id",
+            ".hidden",
+            "a..b",
+            "bad\0id",
+        ] {
+            let settings = DockSettings {
+                theme_pack: invalid.to_owned(),
+                ..DockSettings::default()
+            };
+            assert!(
+                settings.validate().contains(&"ThemePackInvalid"),
+                "expected ThemePackInvalid for {invalid:?}"
+            );
+        }
+        let too_long = DockSettings {
+            theme_pack: "ğ".repeat(121),
+            ..DockSettings::default()
+        };
+        assert!(too_long.validate().contains(&"ThemePackInvalid"));
+    }
+
+    #[test]
+    fn surface_opacity_validation_matches_load_clamp_range() {
+        let dir = temp_dir("cfg-surface-opacity-range");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"SurfaceOpacity": 0.45}"#).unwrap();
+
+        let loaded = load_from(&path);
+        assert!((loaded.surface_opacity - 0.45).abs() < f64::EPSILON);
+        assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+        save_to(&path, &loaded).unwrap();
+
+        for invalid in [0.05, -0.1, 1.05, f64::NAN, f64::INFINITY] {
+            let s = DockSettings {
+                surface_opacity: invalid,
+                ..DockSettings::default()
+            };
+            assert!(
+                s.validate().contains(&"SurfaceOpacityOutOfRange"),
+                "expected SurfaceOpacityOutOfRange for {invalid}"
+            );
+        }
+
+        // Stale invalid extra["SurfaceOpacity"] is stripped during canonicalization so saves succeed.
+        let mut stale = DockSettings::default();
+        stale
+            .extra
+            .insert("SurfaceOpacity".to_owned(), json!("not-a-number"));
+        save_to(&path, &stale).unwrap();
+        let reloaded = try_load_from(&path).unwrap();
+        assert!(reloaded.validate().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_load_from_returns_errors_instead_of_silently_defaulting() {
+        let dir = temp_dir("cfg-try-load");
+        let missing = dir.join("missing.json");
+        let err = try_load_from(&missing).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        let corrupt = dir.join("corrupt.json");
+        fs::write(&corrupt, "{not valid json").unwrap();
+        let err = try_load_from(&corrupt).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let invalid = dir.join("invalid.json");
+        fs::write(&invalid, r#"{"FocusMinutes": 0}"#).unwrap();
+        let err = try_load_from(&invalid).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_save_and_try_load_stress_has_zero_errors() {
+        let dir = temp_dir("cfg-concurrent-stress");
+        let path = dir.join("settings.json");
+        save_to(&path, &DockSettings::default()).unwrap();
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_done = std::sync::Arc::clone(&done);
+        let reader_path = path.clone();
+
+        let reader = std::thread::spawn(move || -> usize {
+            let mut reads = 0usize;
+            while !reader_done.load(Ordering::Acquire) || reads < 10 {
+                let loaded =
+                    try_load_from(&reader_path).expect("concurrent try_load_from must never fail");
+                assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+                reads += 1;
+            }
+            reads
+        });
+
+        for i in 0..40u32 {
+            let mut settings = DockSettings {
+                weather_city: format!("City-{i}"),
+                ..DockSettings::default()
+            };
+            settings.set_countdown_default_minutes((i % 60) + 1);
+            save_to(&path, &settings).expect("rapid save_to must succeed");
+        }
+        done.store(true, Ordering::Release);
+
+        let reads = reader.join().unwrap();
+        assert!(reads >= 10);
+
+        let final_loaded = try_load_from(&path).unwrap();
+        assert_eq!(final_loaded.weather_city, "City-39");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover tmp files: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_backed_dynamic_island_and_widget_helpers_round_trip() {
+        let dir = temp_dir("cfg-extra-helpers");
+        let path = dir.join("settings.json");
+
+        let mut settings = DockSettings::default();
+        assert_eq!(settings.dynamic_island_style(), DynamicIslandStyle::Notch);
+        assert_eq!(settings.dynamic_island_layout(), DynamicIslandLayout::Paged);
+        assert!(settings.dynamic_island_show_focus_widgets());
+        assert_eq!(settings.shrink_priority_bias(), 0);
+        assert_eq!(settings.countdown_default_minutes(), 15);
+
+        settings.set_dynamic_island_style(DynamicIslandStyle::Floating);
+        settings.set_dynamic_island_layout(DynamicIslandLayout::Strip);
+        settings.set_dynamic_island_show_focus_widgets(false);
+        settings.set_shrink_priority_bias(42);
+        settings.set_countdown_default_minutes(999);
+        assert_eq!(settings.shrink_priority_bias(), 10);
+        assert_eq!(settings.countdown_default_minutes(), 180);
+
+        settings.set_shrink_priority_bias(-42);
+        settings.set_countdown_default_minutes(0);
+        assert_eq!(settings.shrink_priority_bias(), -10);
+        assert_eq!(settings.countdown_default_minutes(), 1);
+
+        settings.set_shrink_priority_bias(3);
+        settings.set_countdown_default_minutes(25);
+        save_to(&path, &settings).unwrap();
+
+        let reloaded = try_load_from(&path).unwrap();
+        assert_eq!(
+            reloaded.dynamic_island_style(),
+            DynamicIslandStyle::Floating
+        );
+        assert_eq!(reloaded.dynamic_island_layout(), DynamicIslandLayout::Strip);
+        assert!(!reloaded.dynamic_island_show_focus_widgets());
+        assert_eq!(reloaded.shrink_priority_bias(), 3);
+        assert_eq!(reloaded.countdown_default_minutes(), 25);
+        assert!(reloaded.validate().is_empty(), "{:?}", reloaded.validate());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn canonicalize_placements_preserves_recent_alias_updates() {
+        let mut settings = DockSettings::default();
+        settings
+            .dynamic_island_placements
+            .insert("SystemStats".to_owned(), "DISPLAY1".to_owned());
+        settings
+            .dynamic_island_placements
+            .insert("Clock".to_owned(), "*".to_owned());
+        // Simulate UI writing a legacy alias key on top of an already-canonical map.
+        settings
+            .dynamic_island_placements
+            .insert("stats".to_owned(), "DISPLAY2".to_owned());
+
+        settings.canonicalize_widget_keys();
+        assert_eq!(settings.dynamic_island_placements.len(), 2);
+        assert_eq!(
+            settings
+                .dynamic_island_placements
+                .get("SystemStats")
+                .map(String::as_str),
+            Some("DISPLAY2")
+        );
+        assert_eq!(
+            settings
+                .dynamic_island_placements
+                .get("Clock")
+                .map(String::as_str),
+            Some("*")
+        );
     }
 }

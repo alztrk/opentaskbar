@@ -26,7 +26,7 @@ pub mod windows_palette;
 pub type Rgb = (u8, u8, u8);
 
 /// Unified semantic color palette for both Dark and Light themes (neutral Zinc/Carbon + Aurora).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub canvas: Rgb,
     pub sidebar: Rgb,
@@ -125,6 +125,134 @@ pub fn parse_hex_rgb(value: &str) -> Option<Rgb> {
 
 pub fn palette_with_border(is_dark: bool, border: Option<Rgb>) -> Palette {
     let mut p = palette(is_dark);
+    if let Some(rgb) = border {
+        p.border_rgb = rgb;
+    }
+    p
+}
+
+fn blend_over(fg: tokens::Rgba, bg: Rgb) -> Rgb {
+    if fg.a == 255 {
+        return (fg.r, fg.g, fg.b);
+    }
+    let a = f32::from(fg.a) / 255.0;
+    let inv = 1.0 - a;
+    let mix = |f: u8, b: u8| -> u8 {
+        (f32::from(f) * a + f32::from(b) * inv)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (mix(fg.r, bg.0), mix(fg.g, bg.1), mix(fg.b, bg.2))
+}
+
+/// Resolves the live palette for `is_dark`, overlaying the active Windows accent
+/// and any loaded theme pack / manual editor token overrides from `ThemeManager`.
+pub fn active_palette(is_dark: bool) -> Palette {
+    let mut p = palette(is_dark);
+
+    let windows_rgb = |key: &str| -> Option<Rgb> {
+        let value = theme::resolve_windows_token(key)?;
+        let rgba = theme::token_rgba(&value)?;
+        (rgba.a > 0).then_some((rgba.r, rgba.g, rgba.b))
+    };
+    if let Some(accent) = windows_rgb("AccentBrush") {
+        p.accent = accent;
+    }
+    if let Some(widget_accent) = windows_rgb("WidgetAccent") {
+        p.widget_accent = widget_accent;
+    }
+
+    if !theme::has_active_theme_customization() {
+        return p;
+    }
+
+    let custom_rgba = |key: &str| -> Option<tokens::Rgba> {
+        let value = theme::resolve_custom_token(key)?;
+        let rgba = theme::token_rgba(&value)?;
+        (rgba.a > 0).then_some(rgba)
+    };
+    let custom_rgb = |keys: &[&str]| -> Option<Rgb> {
+        keys.iter()
+            .copied()
+            .find_map(custom_rgba)
+            .map(|c| (c.r, c.g, c.b))
+    };
+    let custom_surface = |keys: &[&str], bg: Rgb| -> Option<Rgb> {
+        keys.iter()
+            .copied()
+            .find_map(custom_rgba)
+            .map(|c| blend_over(c, bg))
+    };
+
+    if let Some(c) = custom_surface(&["SettingsBackground"], p.canvas) {
+        p.canvas = c;
+    }
+    if let Some(c) = custom_surface(&["SettingsSidebarOverlay"], p.canvas) {
+        p.sidebar = c;
+    } else if custom_rgba("SettingsBackground").is_some() {
+        let darkened = tokens::Rgba::from_rgb(p.canvas.0, p.canvas.1, p.canvas.2).darken(0.14);
+        p.sidebar = (darkened.r, darkened.g, darkened.b);
+    }
+    if let Some(c) = custom_surface(
+        &["SurfacePopup", "MenuMaterial", "SettingsControl"],
+        p.canvas,
+    ) {
+        p.surface = c;
+    }
+    if let Some(c) = custom_surface(&["SettingsControl"], p.surface) {
+        p.elevated = c;
+    }
+    if let Some(c) = custom_surface(&["SettingsControlHover", "SurfaceHover"], p.surface) {
+        p.hover = c;
+    }
+    if let Some(c) = custom_surface(&["DockMaterial"], p.canvas) {
+        p.dock_pill = c;
+    }
+    if let Some(c) = custom_rgb(&["DockBorderMaterial", "StrokeSubtle", "WidgetCardStroke"]) {
+        p.border_rgb = c;
+    }
+    if let Some(c) = custom_rgb(&["DockHighlight"]) {
+        p.specular_top = c;
+    }
+    if let Some(c) = custom_rgb(&["MenuDivider", "StrokeSubtle"]) {
+        p.sep_rgb = c;
+    }
+    if let Some(c) = custom_rgb(&["TextPrimary"]) {
+        p.text_primary = c;
+    }
+    if let Some(c) = custom_rgb(&["TextSecondary"]) {
+        p.text_secondary = c;
+    }
+    if let Some(c) = custom_rgb(&["AccentBrush"]) {
+        p.accent = c;
+    }
+    if let Some(c) = custom_rgb(&["WidgetAccent"]) {
+        p.widget_accent = c;
+    }
+    if let Some(c) = custom_rgb(&["WidgetBlue", "WidgetAccent"]) {
+        p.widget_blue = c;
+    }
+    if let Some(c) = custom_surface(&["WidgetSelectedFill", "SurfaceSelected"], p.surface) {
+        p.selected_fill = c;
+    }
+    if let Some(c) = custom_rgb(&["WidgetSelectedStroke", "StrokeFocus"]) {
+        p.selected_stroke = c;
+    }
+    if let Some(c) = custom_rgb(&["WidgetSelectedForeground", "AccentBrush"]) {
+        p.selected_fg = c;
+    }
+    if let Some(c) = custom_rgb(&["WidgetWarning"]) {
+        p.warning = c;
+    }
+    if let Some(c) = custom_rgb(&["WidgetFocusAccent", "SurfaceDanger"]) {
+        p.danger = c;
+    }
+    p
+}
+
+/// Resolves the live palette for `is_dark` and applies an optional explicit border override.
+pub fn active_palette_with_border(is_dark: bool, border: Option<Rgb>) -> Palette {
+    let mut p = active_palette(is_dark);
     if let Some(rgb) = border {
         p.border_rgb = rgb;
     }

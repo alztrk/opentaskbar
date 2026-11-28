@@ -131,20 +131,10 @@ pub fn legacy_magnification_expands_dock(settings: &DockSettings) -> Option<bool
 /// `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
 /// shared host into one executable-keyed slot instead of grouping by AUMID.
 pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
-    if let Some(value) = settings
+    settings
         .extra
         .get("AggregateByExecutablePath")
         .and_then(|v| v.as_bool())
-    {
-        return value;
-    }
-    serde_json::to_value(settings)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("AggregateByExecutablePath")
-                .and_then(|v| v.as_bool())
-        })
         .unwrap_or(false)
 }
 
@@ -269,7 +259,12 @@ pub const MAX_LIFT_DIPS: f32 = 1.0;
 pub const MIN_NO_OVERLAP_GAP_DIPS: f32 = 4.0;
 pub const SPRING_STIFFNESS: f32 = 280.0;
 pub const SPRING_DAMPING: f32 = 30.0;
-const FULL_ARCH_WEIGHT_SUM: f32 = 2.8;
+/// Crisp tracking spring while the pointer is over the apps strip.
+pub const HOVER_SPRING_STIFFNESS: f32 = 500.0;
+/// Softer decay once the pointer leaves (critically damped, no overshoot).
+pub const RELEASE_SPRING_STIFFNESS: f32 = SPRING_STIFFNESS;
+/// Sum of the raised-cosine weights across a full magnification arch.
+pub const FULL_ARCH_WEIGHT_SUM: f32 = 2.8;
 
 /// Feature flag living in `DockSettings.extra`. Vertical docking is the default;
 /// a JSON `"enable_vertical_dock": false` forces every edge back to `Bottom`.
@@ -746,21 +741,83 @@ pub fn step_spring(
     dt_seconds: f32,
     max_scale: f32,
 ) -> (f32, f32, bool) {
+    step_spring_with(
+        current,
+        target,
+        velocity,
+        dt_seconds,
+        max_scale,
+        SPRING_STIFFNESS,
+        SPRING_DAMPING,
+    )
+}
+
+/// `c = 2 * sqrt(k)`: the fastest response without any overshoot.
+pub fn critical_damping(stiffness: f32) -> f32 {
+    2.0 * stiffness.max(0.0).sqrt()
+}
+
+/// `(stiffness, damping)` for the fisheye spring: crisp and critically damped
+/// while the pointer tracks the strip, softer (still critically damped) on exit.
+pub fn fisheye_spring_params(hovering: bool) -> (f32, f32) {
+    let k = if hovering {
+        HOVER_SPRING_STIFFNESS
+    } else {
+        RELEASE_SPRING_STIFFNESS
+    };
+    (k, critical_damping(k))
+}
+
+/// Closed-form damped spring with explicit stiffness/damping. Handles the
+/// under-, critically- and over-damped regimes exactly, so a critically damped
+/// spring (`c = 2 * sqrt(k)`) never oscillates around the target.
+#[allow(clippy::too_many_arguments)]
+pub fn step_spring_with(
+    current: f32,
+    target: f32,
+    velocity: f32,
+    dt_seconds: f32,
+    max_scale: f32,
+    stiffness: f32,
+    damping: f32,
+) -> (f32, f32, bool) {
     let dt = if dt_seconds.is_finite() {
         dt_seconds.clamp(0.001, 0.05)
     } else {
         0.016
     };
-    let omega = SPRING_STIFFNESS.sqrt();
-    let eta = SPRING_DAMPING * 0.5;
-    let omega_d = (omega * omega - eta * eta).max(1.0).sqrt();
-    let decay = (-eta * dt).exp();
-    let cos = (omega_d * dt).cos();
-    let sin = (omega_d * dt).sin();
+    let omega = stiffness.max(1.0).sqrt();
+    let eta = (damping * 0.5).max(0.0);
     let offset = current - target;
-    let temp = (velocity + eta * offset) / omega_d;
-    let next = target + decay * (offset * cos + temp * sin);
-    let next_velocity = decay * (velocity * cos - (omega_d * offset + eta * temp) * sin);
+    let disc = omega * omega - eta * eta;
+    let (next, next_velocity) = if disc > 1.0 {
+        let omega_d = disc.sqrt();
+        let decay = (-eta * dt).exp();
+        let cos = (omega_d * dt).cos();
+        let sin = (omega_d * dt).sin();
+        let temp = (velocity + eta * offset) / omega_d;
+        (
+            target + decay * (offset * cos + temp * sin),
+            decay * (velocity * cos - (omega_d * offset + eta * temp) * sin),
+        )
+    } else if disc < -1.0 {
+        let s = (-disc).sqrt();
+        let r1 = -eta + s;
+        let r2 = -eta - s;
+        let c2 = (velocity - r1 * offset) / (r2 - r1);
+        let c1 = offset - c2;
+        let e1 = (r1 * dt).exp();
+        let e2 = (r2 * dt).exp();
+        (target + c1 * e1 + c2 * e2, c1 * r1 * e1 + c2 * r2 * e2)
+    } else {
+        // Critically damped: x(t) = (x0 + (v0 + eta*x0) t) e^(-eta t).
+        let decay = (-eta * dt).exp();
+        let b = velocity + eta * offset;
+        (
+            target + (offset + b * dt) * decay,
+            (velocity - eta * b * dt) * decay,
+        )
+    };
     let next = next.clamp(1.0, max_scale.max(1.0) + 0.02);
     if (target - next).abs() < 0.004 && next_velocity.abs() < 0.02 {
         (target, 0.0, true)
@@ -1548,6 +1605,292 @@ pub fn window_snapshot_due(last: Option<Instant>, in_flight: bool, now: Instant)
 pub const WIDGET_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(120);
 pub fn widget_refresh_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|at| now.saturating_duration_since(at) >= WIDGET_REFRESH_MIN_INTERVAL)
+}
+
+// ---------------------------------------------------------------------------
+// Fisheye budget + macOS fixed-point anchoring.
+// ---------------------------------------------------------------------------
+
+/// Horizontal room an expanding dock reserves for a full magnification arch
+/// (`FULL_ARCH_WEIGHT_SUM * peak * stride * SLOT_EXPANSION_FACTOR`).
+pub fn fisheye_expansion_reserve_dips(stride: f32, peak: f32) -> f32 {
+    if !stride.is_finite() || !peak.is_finite() || stride <= 0.0 || peak <= 0.0 {
+        return 0.0;
+    }
+    (FULL_ARCH_WEIGHT_SUM * peak * stride * SLOT_EXPANSION_FACTOR).ceil()
+}
+
+/// Growth budget for the app strip during a hover session.
+///
+/// * Fixed-width (`expands == false`): always `0`, icons magnify in place and the
+///   pill width never changes.
+/// * Expanding: the room between the resting pill and the largest pill the
+///   window/monitor can hold, so expansion can never overflow into scrolling.
+pub fn fisheye_growth_budget(
+    expands: bool,
+    fisheye_on: bool,
+    max_extent: f32,
+    rest_extent: f32,
+) -> f32 {
+    if !expands || !fisheye_on || !max_extent.is_finite() || !rest_extent.is_finite() {
+        return 0.0;
+    }
+    (max_extent - rest_extent).max(0.0)
+}
+
+/// macOS-style fixed-point anchoring. `rest_centers` / `live_centers` are the
+/// slot centers before and after magnification (same order, unshifted). The
+/// live layout maps a rest coordinate `p` to `f(p)` (piecewise linear between
+/// slot centers); returns the strip shift `p - f(p)` that keeps the point under
+/// the cursor fixed, so expansion splits to both sides of the hovered icon.
+pub fn fisheye_fixed_point_shift(rest_centers: &[f32], live_centers: &[f32], pointer: f32) -> f32 {
+    let n = rest_centers.len().min(live_centers.len());
+    if n == 0 || !pointer.is_finite() {
+        return 0.0;
+    }
+    let mapped = if pointer <= rest_centers[0] {
+        pointer + (live_centers[0] - rest_centers[0])
+    } else if pointer >= rest_centers[n - 1] {
+        pointer + (live_centers[n - 1] - rest_centers[n - 1])
+    } else {
+        let mut value = pointer;
+        for i in 0..n - 1 {
+            let (r0, r1) = (rest_centers[i], rest_centers[i + 1]);
+            if pointer >= r0 && pointer <= r1 {
+                let span = (r1 - r0).max(1e-3);
+                let t = (pointer - r0) / span;
+                value = live_centers[i] + (live_centers[i + 1] - live_centers[i]) * t;
+                break;
+            }
+        }
+        value
+    };
+    let shift = pointer - mapped;
+    if shift.is_finite() { shift } else { 0.0 }
+}
+
+// ---------------------------------------------------------------------------
+// Wheel routing de-duplication.
+// ---------------------------------------------------------------------------
+
+/// Where a wheel notch reached the dock from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelSource {
+    /// `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` delivered to the window itself.
+    Window,
+    /// `WH_MOUSE_LL` route (`WM_APP_WHEEL_ROUTE`).
+    Hook,
+}
+
+/// Twin events from the other source are matched inside this window.
+pub const WHEEL_DEDUP_WINDOW: Duration = Duration::from_millis(60);
+
+/// One physical notch can arrive twice: through the low-level hook *and* as a
+/// window message (when Windows "scroll inactive windows" is on). Each accepted
+/// event waits for its twin from the other source; the twin is swallowed.
+/// Several notches from one source are never merged, so fast scrolling keeps
+/// every step.
+#[derive(Debug, Default)]
+pub struct WheelDedup {
+    pending: Vec<(Instant, i16, bool, WheelSource)>,
+}
+
+impl WheelDedup {
+    pub fn accept(
+        &mut self,
+        source: WheelSource,
+        delta: i16,
+        horizontal: bool,
+        now: Instant,
+    ) -> bool {
+        self.pending
+            .retain(|(at, ..)| now.saturating_duration_since(*at) <= WHEEL_DEDUP_WINDOW);
+        if let Some(pos) = self
+            .pending
+            .iter()
+            .position(|&(_, d, h, s)| s != source && d == delta && h == horizontal)
+        {
+            self.pending.remove(pos);
+            return false;
+        }
+        self.pending.push((now, delta, horizontal, source));
+        if self.pending.len() > 32 {
+            self.pending.remove(0);
+        }
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Widget order (`DockSettings::widget_order`) and Quick Settings sub-zones.
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive match of a persisted order entry against a dock widget id
+/// through the canonical settings id (`stats` == `SystemStats`, `Clock` == `clock`).
+pub fn widget_order_matches(order_entry: &str, widget_id: &str) -> bool {
+    use opentaskbar_core::settings::canonical_widget_setting_id;
+    order_entry.eq_ignore_ascii_case(widget_id)
+        || canonical_widget_setting_id(order_entry)
+            .eq_ignore_ascii_case(&canonical_widget_setting_id(widget_id))
+}
+
+/// Orders the visible dock widgets by `widget_order`; widgets not mentioned keep
+/// their catalog order after the ordered ones.
+pub fn apply_widget_order<'a>(ids: &[&'a str], order: &[String]) -> Vec<&'a str> {
+    let mut out: Vec<&'a str> = Vec::with_capacity(ids.len());
+    for entry in order {
+        if let Some(&id) = ids
+            .iter()
+            .find(|&&id| widget_order_matches(entry, id) && !out.contains(&id))
+        {
+            out.push(id);
+        }
+    }
+    for &id in ids {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Swaps `widget_id` one step earlier (`-1`) or later (`+1`) inside the visible
+/// order and returns the new persisted `widget_order` (canonical ids, hidden
+/// entries kept after the visible ones). `None` when the move is impossible.
+pub fn move_widget_in_order(
+    visible: &[&str],
+    order: &[String],
+    widget_id: &str,
+    offset: i32,
+) -> Option<Vec<String>> {
+    use opentaskbar_core::settings::canonical_widget_setting_id;
+    if offset != -1 && offset != 1 {
+        return None;
+    }
+    let pos = visible
+        .iter()
+        .position(|id| widget_order_matches(id, widget_id))?;
+    let target = pos as isize + offset as isize;
+    if target < 0 || target as usize >= visible.len() {
+        return None;
+    }
+    let mut moved: Vec<&str> = visible.to_vec();
+    moved.swap(pos, target as usize);
+    let mut out: Vec<String> = moved
+        .iter()
+        .map(|id| canonical_widget_setting_id(id))
+        .collect();
+    for entry in order {
+        if !out.iter().any(|id| widget_order_matches(id, entry)) {
+            out.push(entry.clone());
+        }
+    }
+    Some(out)
+}
+
+/// Quick Settings chip has four equal hover/click zones: three toggles plus the
+/// Control Center chevron (`3`).
+pub const QUICK_SETTINGS_ZONES: u8 = 4;
+
+pub fn quick_settings_zone(rel_x: f32, width: f32) -> u8 {
+    let w = if width.is_finite() && width > 1.0 {
+        width
+    } else {
+        1.0
+    };
+    let x = if rel_x.is_finite() {
+        rel_x.max(0.0)
+    } else {
+        0.0
+    };
+    ((x / (w / f32::from(QUICK_SETTINGS_ZONES))).floor() as u8).min(QUICK_SETTINGS_ZONES - 1)
+}
+
+// ---------------------------------------------------------------------------
+// Individual folder stacks on the dock.
+// ---------------------------------------------------------------------------
+
+/// Row cap for one folder-stack flyout.
+pub const STACK_FLYOUT_MAX_ITEMS: usize = 40;
+/// Item counts in the hover tooltip are re-read at most this often.
+pub const STACK_COUNT_TTL: Duration = Duration::from_secs(2);
+
+/// One child of a folder stack (pure data, filled by the dock from `read_dir`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    /// Modification time as seconds since the Unix epoch (`0` when unknown).
+    pub modified_secs: u64,
+}
+
+/// Hidden, system, dot, temporary and partial-download entries never appear in
+/// a folder stack.
+pub fn stack_entry_visible(name: &str, hidden: bool, system: bool) -> bool {
+    if hidden || system || name.is_empty() || name.starts_with('.') {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".tmp")
+        || lower.ends_with(".temp")
+        || lower == "desktop.ini"
+        || lower == "thumbs.db"
+    {
+        return false;
+    }
+    is_stack_visible_file(name)
+}
+
+/// Folders first (alphabetical), then files newest-first, capped at `cap`.
+pub fn order_stack_entries(mut entries: Vec<StackEntry>, cap: usize) -> Vec<StackEntry> {
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            if a.is_dir {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            } else {
+                b.modified_secs
+                    .cmp(&a.modified_secs)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            }
+        })
+    });
+    entries.truncate(cap);
+    entries
+}
+
+/// Display label of a stack folder: its last path component, or the path itself
+/// for drive roots (`C:\`).
+pub fn stack_label(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches(['\\', '/']);
+    std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| path.trim().to_owned(), str::to_owned)
+}
+
+/// Hover tooltip `"{label} ({count})"`, or the bare label when the folder is unreadable.
+pub fn stack_tooltip(label: &str, count: Option<usize>) -> String {
+    match count {
+        Some(count) => format!("{label} ({count})"),
+        None => label.to_owned(),
+    }
+}
+
+/// True when a cached `(read_at, count)` pair is still fresh.
+pub fn stack_count_fresh(cached: Option<(Instant, usize)>, now: Instant) -> bool {
+    cached.is_some_and(|(at, _)| now.saturating_duration_since(at) < STACK_COUNT_TTL)
+}
+
+/// Appends `folder` to the stack list unless it is already present (case-insensitive).
+pub fn add_stack_folder(folders: &mut Vec<String>, folder: &str) -> bool {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() || folders.iter().any(|f| f.eq_ignore_ascii_case(trimmed)) {
+        return false;
+    }
+    folders.push(trimmed.to_owned());
+    true
 }
 
 #[cfg(test)]
@@ -2780,5 +3123,203 @@ mod tests {
             secondary_dock_layout(&settings, false),
             SecondaryLayout::PrimaryDock
         );
+    }
+
+    #[test]
+    fn critically_damped_hover_spring_never_overshoots() {
+        let (k, c) = fisheye_spring_params(true);
+        assert_eq!(k, HOVER_SPRING_STIFFNESS);
+        assert!((c - 2.0 * k.sqrt()).abs() < 1e-4);
+        let (release_k, release_c) = fisheye_spring_params(false);
+        assert!(release_k < k);
+        assert!((release_c - critical_damping(release_k)).abs() < 1e-4);
+
+        // Rising towards 1.5: never above the target.
+        let (mut scale, mut velocity) = (1.0_f32, 0.0_f32);
+        for _ in 0..240 {
+            let (next, v, _) = step_spring_with(scale, 1.5, velocity, 1.0 / 120.0, 1.5, k, c);
+            assert!(next <= 1.5 + 1e-4, "overshoot to {next}");
+            scale = next;
+            velocity = v;
+        }
+        assert!((scale - 1.5).abs() < 0.01);
+        // Decaying back to rest: never below 1.0 and settles.
+        let mut settled = false;
+        for _ in 0..240 {
+            let (next, v, done) =
+                step_spring_with(scale, 1.0, velocity, 1.0 / 120.0, 1.5, release_k, release_c);
+            assert!(next >= 1.0);
+            scale = next;
+            velocity = v;
+            settled |= done;
+        }
+        assert!(settled);
+        assert_eq!(scale, 1.0);
+        // The legacy entry point keeps its parameters.
+        assert_eq!(
+            step_spring(1.2, 1.0, 0.0, 0.016, 1.5),
+            step_spring_with(1.2, 1.0, 0.0, 0.016, 1.5, SPRING_STIFFNESS, SPRING_DAMPING)
+        );
+    }
+
+    #[test]
+    fn fixed_width_fisheye_never_grows_and_expanding_uses_the_free_room() {
+        assert_eq!(fisheye_growth_budget(false, true, 900.0, 600.0), 0.0);
+        assert_eq!(fisheye_growth_budget(true, false, 900.0, 600.0), 0.0);
+        assert_eq!(fisheye_growth_budget(true, true, 900.0, 600.0), 300.0);
+        assert_eq!(fisheye_growth_budget(true, true, 500.0, 600.0), 0.0);
+
+        let stride = 44.0 + 9.0;
+        let reserve = fisheye_expansion_reserve_dips(stride, 0.5);
+        assert!(reserve >= FULL_ARCH_WEIGHT_SUM * 0.5 * stride * SLOT_EXPANSION_FACTOR);
+        assert_eq!(fisheye_expansion_reserve_dips(stride, 0.0), 0.0);
+
+        // A fixed-width dock has no budget, so the peak falls back to the
+        // no-overlap scale; an expanding dock with room reaches the configured peak.
+        let fixed = capture_expansion_budget(stride, 34.0, 1.5, 0.0, 0.0, 0.0, 1.5);
+        assert!(
+            (fixed.effective_max_scale - compute_no_overlap_max_scale(stride, 34.0, 1.5)).abs()
+                < 1e-4
+        );
+        let expanding = capture_expansion_budget(stride, 34.0, 1.5, reserve, 0.0, 0.0, 1.5);
+        assert!((expanding.effective_max_scale - 1.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fixed_point_shift_keeps_the_hovered_point_under_the_cursor() {
+        let rest = [100.0, 150.0, 200.0, 250.0];
+        // Uniform growth of 10 DIP per slot from the left edge.
+        let live = [105.0, 165.0, 225.0, 285.0];
+        let p = 175.0;
+        let shift = fisheye_fixed_point_shift(&rest, &live, p);
+        // f(175) = 165 + (225 - 165) * 0.5 = 195 -> shift -20.
+        assert!((shift + 20.0).abs() < 1e-4);
+        // Applying the shift maps the pointer exactly onto itself.
+        let shifted: Vec<f32> = live.iter().map(|c| c + shift).collect();
+        assert!((fisheye_fixed_point_shift(&rest, &shifted, p)).abs() < 1e-4);
+        // No magnification: no shift.
+        assert_eq!(fisheye_fixed_point_shift(&rest, &rest, p), 0.0);
+        assert_eq!(fisheye_fixed_point_shift(&[], &[], p), 0.0);
+        // Outside the strip the edge offset is used.
+        assert!((fisheye_fixed_point_shift(&rest, &live, 50.0) + 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn wheel_twins_from_hook_and_window_fire_once() {
+        let mut dedup = WheelDedup::default();
+        let t0 = Instant::now();
+        assert!(dedup.accept(WheelSource::Hook, 120, false, t0));
+        assert!(!dedup.accept(
+            WheelSource::Window,
+            120,
+            false,
+            t0 + Duration::from_millis(3)
+        ));
+        // Two fast notches from the hook alone are both kept.
+        assert!(dedup.accept(WheelSource::Hook, 120, false, t0 + Duration::from_millis(5)));
+        assert!(dedup.accept(WheelSource::Hook, 120, false, t0 + Duration::from_millis(8)));
+        // Different axis or direction never pairs.
+        assert!(dedup.accept(
+            WheelSource::Window,
+            -120,
+            false,
+            t0 + Duration::from_millis(9)
+        ));
+        assert!(dedup.accept(
+            WheelSource::Window,
+            120,
+            true,
+            t0 + Duration::from_millis(9)
+        ));
+        // A stale twin outside the window is a new notch.
+        let late = t0 + WHEEL_DEDUP_WINDOW + Duration::from_millis(200);
+        assert!(dedup.accept(WheelSource::Window, 60, false, late));
+        assert!(dedup.accept(
+            WheelSource::Hook,
+            60,
+            false,
+            late + WHEEL_DEDUP_WINDOW + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn widget_order_is_canonical_and_case_insensitive() {
+        let ids = ["clock", "stats", "audio", "media"];
+        let order = vec!["Audio".to_owned(), "SystemStats".to_owned()];
+        assert_eq!(
+            apply_widget_order(&ids, &order),
+            vec!["audio", "stats", "clock", "media"]
+        );
+        assert!(widget_order_matches("SystemStats", "stats"));
+        assert!(widget_order_matches("CLOCK", "clock"));
+
+        let visible = apply_widget_order(&ids, &order);
+        let moved = move_widget_in_order(&visible, &order, "clock", -1).expect("movable");
+        let moved_ids: Vec<&str> = ids.to_vec();
+        let reordered = apply_widget_order(&moved_ids, &moved);
+        assert_eq!(reordered, vec!["audio", "clock", "stats", "media"]);
+        assert!(move_widget_in_order(&visible, &order, "audio", -1).is_none());
+        assert!(move_widget_in_order(&visible, &order, "media", 1).is_none());
+        assert!(move_widget_in_order(&visible, &order, "missing", 1).is_none());
+    }
+
+    #[test]
+    fn quick_settings_has_four_equal_zones_with_the_chevron_last() {
+        assert_eq!(quick_settings_zone(0.0, 120.0), 0);
+        assert_eq!(quick_settings_zone(31.0, 120.0), 1);
+        assert_eq!(quick_settings_zone(61.0, 120.0), 2);
+        assert_eq!(quick_settings_zone(91.0, 120.0), 3);
+        assert_eq!(quick_settings_zone(500.0, 120.0), 3);
+        assert_eq!(quick_settings_zone(-5.0, 120.0), 0);
+    }
+
+    #[test]
+    fn folder_stack_entries_skip_hidden_system_and_temp_items() {
+        assert!(stack_entry_visible("Report.pdf", false, false));
+        assert!(stack_entry_visible("Projects", false, false));
+        assert!(!stack_entry_visible("secret.txt", true, false));
+        assert!(!stack_entry_visible("pagefile.sys", false, true));
+        assert!(!stack_entry_visible(".git", false, false));
+        assert!(!stack_entry_visible("desktop.ini", false, false));
+        assert!(!stack_entry_visible("build.tmp", false, false));
+        assert!(!stack_entry_visible("movie.mkv.crdownload", false, false));
+        assert!(!stack_entry_visible("~$draft.docx", false, false));
+
+        let entry = |name: &str, is_dir: bool, modified_secs: u64| StackEntry {
+            name: name.to_owned(),
+            path: format!(r"C:\Stack\{name}"),
+            is_dir,
+            modified_secs,
+        };
+        let ordered = order_stack_entries(
+            vec![
+                entry("old.txt", false, 10),
+                entry("beta", true, 0),
+                entry("new.txt", false, 99),
+                entry("Alpha", true, 0),
+            ],
+            3,
+        );
+        let names: Vec<&str> = ordered.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "beta", "new.txt"]);
+
+        assert_eq!(stack_label(r"C:\Users\Me\Downloads\"), "Downloads");
+        assert_eq!(stack_label(r"D:\"), r"D:\");
+        assert_eq!(stack_tooltip("Downloads", Some(4)), "Downloads (4)");
+        assert_eq!(stack_tooltip("Downloads", None), "Downloads");
+
+        let now = Instant::now();
+        assert!(stack_count_fresh(
+            Some((now, 3)),
+            now + Duration::from_millis(500)
+        ));
+        assert!(!stack_count_fresh(Some((now, 3)), now + STACK_COUNT_TTL));
+        assert!(!stack_count_fresh(None, now));
+
+        let mut folders = vec![r"C:\Users\Me\Downloads".to_owned()];
+        assert!(!add_stack_folder(&mut folders, r"c:\users\me\downloads"));
+        assert!(add_stack_folder(&mut folders, r"C:\Projects"));
+        assert!(!add_stack_folder(&mut folders, "  "));
+        assert_eq!(folders.len(), 2);
     }
 }

@@ -9,13 +9,15 @@
 //! production drivers so the budgets are not left as dead constants.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetClassNameW, GetMessageW, IsWindowVisible, MSG, SW_SHOW, ShowWindow,
+    DispatchMessageW, GetClassNameW, GetMessageW, IsWindowVisible, MSG, PM_NOREMOVE, PeekMessageW,
+    PostThreadMessageW, SW_SHOW, ShowWindow, WM_QUIT,
 };
 
 use opentaskbar_core::log;
@@ -287,6 +289,11 @@ pub fn reconcile_once(
     reason: &str,
 ) -> bool {
     let start = std::time::Instant::now();
+    // After teardown a late TaskbarCreated / hook pass must not re-register
+    // the AppBar or hide the taskbar that shutdown just restored.
+    if !replacement_active() {
+        return false;
+    }
     if native_tray::try_acquire().is_none() {
         log::result("Reconcile", reason, false, false, &[]);
         return false;
@@ -353,6 +360,60 @@ impl RuntimeState {
 static RUNTIME: Mutex<RuntimeState> = Mutex::new(RuntimeState::new());
 static HIDE_RETRY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DEGRADED_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// True between `configure_replacement` (with a dock) and
+/// `end_replacement_session`. Every hide path checks it, so nothing can hide
+/// Explorer's taskbar again once shutdown has started restoring it.
+static REPLACEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Slice used by the background workers so a teardown is observed quickly
+/// instead of after a full 250-2000 ms backoff sleep.
+const WORKER_SLEEP_SLICE_MS: u64 = 25;
+/// Upper bound `end_replacement_session` waits for in-flight workers.
+const WORKER_STOP_TIMEOUT_MS: u64 = 1500;
+
+/// Whether a replacement session currently owns Explorer's taskbar.
+pub fn replacement_active() -> bool {
+    REPLACEMENT_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Sleeps up to `ms`, returning `false` as soon as the session is torn down.
+fn sleep_while_active(ms: u64) -> bool {
+    let mut remaining = ms;
+    while remaining > 0 {
+        if !replacement_active() {
+            return false;
+        }
+        let slice = remaining.min(WORKER_SLEEP_SLICE_MS);
+        std::thread::sleep(Duration::from_millis(slice));
+        remaining -= slice;
+    }
+    replacement_active()
+}
+
+/// Tears the replacement session down before Explorer's taskbar is restored:
+/// disarms every hide path, unhooks the WinEvent watcher and waits (bounded)
+/// for the hide-retry / degraded-reconcile workers to leave. Without this the
+/// `EVENT_OBJECT_SHOW` raised by the restore itself re-armed the hide timer
+/// and hid the taskbar again right after shutdown. Idempotent.
+pub fn end_replacement_session() {
+    REPLACEMENT_ACTIVE.store(false, Ordering::SeqCst);
+    {
+        let mut state = runtime();
+        state.config = ReplacementConfig::default();
+        state.hide_attempts = 0;
+        state.hide_clean = 0;
+        state.hide_stable_settle = false;
+        state.degraded_attempts = 0;
+    }
+    uninstall_shell_hooks();
+    let deadline = std::time::Instant::now() + Duration::from_millis(WORKER_STOP_TIMEOUT_MS);
+    while (HIDE_RETRY_ACTIVE.load(Ordering::Acquire)
+        || DEGRADED_ACTIVE.load(Ordering::Acquire)
+        || SHELL_HOOK_RUNNING.load(Ordering::Acquire))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(WORKER_SLEEP_SLICE_MS));
+    }
+}
 
 fn runtime() -> std::sync::MutexGuard<'static, RuntimeState> {
     RUNTIME
@@ -372,6 +433,7 @@ pub fn configure_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px
     state.hide_attempts = 0;
     state.hide_clean = 0;
     state.degraded_attempts = 0;
+    REPLACEMENT_ACTIVE.store(dock_hwnd != 0, Ordering::SeqCst);
 }
 
 /// Drops the HWND/PID bound to the *old* Explorer instance. A recycled HWND
@@ -402,6 +464,9 @@ pub const fn reset_budgets() -> (u32, u32) {
 /// reset the 45-attempt degraded budget, then run the two bounded reconcile
 /// passes reference uses so a secondary tray recreated mid-pass is caught too.
 pub fn reconcile_after_taskbar_created() -> bool {
+    if !replacement_active() {
+        return false;
+    }
     let config = {
         let mut state = runtime();
         let (degraded, hide) = reset_budgets();
@@ -432,6 +497,16 @@ pub fn reconcile_after_taskbar_created() -> bool {
 /// 20/40-attempt budgets. Returns the decision so a timer can schedule the next
 /// delay; `stop_timer` means the streak settled or the budget ended.
 pub fn run_hide_retry_step() -> HideRetryStep {
+    if !replacement_active() {
+        return HideRetryStep {
+            stop_timer: true,
+            settled: false,
+            needs_degraded_reconcile: false,
+            exhausted: false,
+            next_delay_ms: 0,
+            next_consecutive_clean: 0,
+        };
+    }
     let (attempt, clean, stable) = {
         let state = runtime();
         (
@@ -460,6 +535,9 @@ pub fn run_hide_retry_step() -> HideRetryStep {
 /// Starts the bounded hide timer (250/500 ms initial delay). Idempotent: a
 /// second trigger while the worker is running only refreshes the config.
 pub fn start_hide_retry(require_stable_settle: bool) {
+    if !replacement_active() {
+        return;
+    }
     {
         let mut state = runtime();
         state.hide_attempts = 0;
@@ -473,13 +551,13 @@ pub fn start_hide_retry(require_stable_settle: bool) {
         .name("opentaskbar-hide-retry".into())
         .spawn(|| {
             let initial = hide_retry_initial_delay_ms(runtime().hide_stable_settle);
-            std::thread::sleep(Duration::from_millis(u64::from(initial)));
-            loop {
+            let mut active = sleep_while_active(u64::from(initial));
+            while active {
                 let step = run_hide_retry_step();
                 if step.stop_timer {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(u64::from(step.next_delay_ms)));
+                active = sleep_while_active(u64::from(step.next_delay_ms));
             }
             HIDE_RETRY_ACTIVE.store(false, Ordering::Release);
         })
@@ -511,18 +589,20 @@ pub fn run_degraded_reconcile_step() -> RetryDecision {
 }
 
 fn start_degraded_reconcile(_reason: &str) {
+    if !replacement_active() {
+        return;
+    }
     if DEGRADED_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
     }
     if thread::Builder::new()
         .name("opentaskbar-degraded-reconcile".into())
         .spawn(|| {
-            loop {
+            while replacement_active() {
                 let decision = run_degraded_reconcile_step();
-                if !decision.should_retry {
+                if !decision.should_retry || !sleep_while_active(u64::from(decision.delay_ms)) {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(u64::from(decision.delay_ms)));
             }
             DEGRADED_ACTIVE.store(false, Ordering::Release);
         })
@@ -561,6 +641,12 @@ unsafe extern "system" {
 static SHELL_CHANGE_CALLBACK: Mutex<Option<fn()>> = Mutex::new(None);
 static HOOKS_INSTALLED: AtomicBool = AtomicBool::new(false);
 static HOOK_INSTALL_PENDING: AtomicBool = AtomicBool::new(false);
+/// True while the WinEvent pump thread is alive (until `UnhookWinEvent` returns).
+static SHELL_HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Thread id of the WinEvent pump, so shutdown can post `WM_QUIT` to it.
+static SHELL_HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+/// Set by `uninstall_shell_hooks` so a concurrent install stops before entering `GetMessageW`.
+static HOOK_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Raw WinEvent handle. The pump thread installs it and unhooks it exactly
 /// once when its message loop ends, so sharing it through a mutex is safe.
@@ -594,9 +680,9 @@ fn set_shell_change_callback(callback: Option<fn()>) {
 /// the full two-pass reconcile; a re-shown tray of the *same* instance only
 /// needs the bounded hide-retry timer (20/40 attempts).
 fn on_shell_tray_change() {
-    // Before `configure_replacement` (startup heal / --restore / tests) there is
-    // no dock to reconcile: do not arm any background budget.
-    if runtime().config.dock_hwnd == 0 {
+    // Before `configure_replacement` or after `end_replacement_session` there is
+    // no active replacement session: do not arm any background budget or re-hide.
+    if !replacement_active() || runtime().config.dock_hwnd == 0 {
         return;
     }
     let Some(tray) = native_tray::try_acquire() else {
@@ -716,17 +802,40 @@ pub fn install_shell_hooks(on_shell_change: fn()) {
     if HOOKS_INSTALLED.load(Ordering::SeqCst) || HOOK_INSTALL_PENDING.swap(true, Ordering::SeqCst) {
         return;
     }
+    HOOK_STOP_REQUESTED.store(false, Ordering::SeqCst);
+    SHELL_HOOK_RUNNING.store(true, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("opentaskbar-shell-events".into())
         .spawn(|| {
-            if !install_win_event_hook() {
-                HOOK_INSTALL_PENDING.store(false, Ordering::Release);
+            struct RunningGuard;
+            impl Drop for RunningGuard {
+                fn drop(&mut self) {
+                    SHELL_HOOK_THREAD.store(0, Ordering::SeqCst);
+                    SHELL_HOOK_RUNNING.store(false, Ordering::Release);
+                    HOOK_INSTALL_PENDING.store(false, Ordering::Release);
+                }
+            }
+            let _running = RunningGuard;
+            let mut message: MSG = unsafe { std::mem::zeroed() };
+            // Force OS message queue creation before publishing our thread ID
+            // so `PostThreadMessageW(WM_QUIT)` from `uninstall_shell_hooks`
+            // never races a queue-less thread.
+            // SAFETY: owned MSG on this thread's message queue.
+            unsafe {
+                PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+            }
+            // SAFETY: plain thread-id query.
+            SHELL_HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+            if HOOK_STOP_REQUESTED.load(Ordering::SeqCst) || !install_win_event_hook() {
                 return;
             }
             HOOK_INSTALL_PENDING.store(false, Ordering::Release);
-            let mut message: MSG = unsafe { std::mem::zeroed() };
+            // A teardown that raced the hook installation is observed here.
             // SAFETY: owned MSG on this thread's message queue.
-            while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+            while HOOKS_INSTALLED.load(Ordering::SeqCst)
+                && !HOOK_STOP_REQUESTED.load(Ordering::SeqCst)
+                && unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0
+            {
                 // SAFETY: message was retrieved from our own queue.
                 unsafe {
                     DispatchMessageW(&message);
@@ -739,6 +848,24 @@ pub fn install_shell_hooks(on_shell_change: fn()) {
             "Shell-event hook thread could not be started: {err}"
         ));
         HOOK_INSTALL_PENDING.store(false, Ordering::Release);
+        SHELL_HOOK_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+/// Stops the WinEvent watcher installed by [`install_shell_hooks`]: clears the
+/// app callback and posts `WM_QUIT` to the pump thread, which unhooks itself.
+pub fn uninstall_shell_hooks() {
+    set_shell_change_callback(None);
+    HOOK_STOP_REQUESTED.store(true, Ordering::SeqCst);
+    let was_installed = HOOKS_INSTALLED.swap(false, Ordering::SeqCst);
+    let thread_id = SHELL_HOOK_THREAD.swap(0, Ordering::SeqCst);
+    if thread_id != 0 {
+        // SAFETY: posting WM_QUIT to our own pump thread; failure (no queue
+        // yet) is covered by the HOOK_STOP_REQUESTED / HOOKS_INSTALLED checks.
+        unsafe {
+            PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
+        }
+    } else if !was_installed {
     }
 }
 
@@ -905,5 +1032,29 @@ mod tests {
             true,
         );
         assert!(exhausted.stop_timer && exhausted.exhausted && !exhausted.settled);
+    }
+
+    #[test]
+    fn end_replacement_session_disarms_all_hide_and_reconcile_paths() {
+        let _serial = serial();
+        configure_replacement(0x1234, false, 64);
+        assert!(replacement_active());
+
+        end_replacement_session();
+        assert!(!replacement_active());
+        assert_eq!(runtime().config, ReplacementConfig::default());
+
+        // Every hide/reconcile entry point must be a no-op once torn down.
+        assert!(!reconcile_once(0x1234, false, 64, "LateHook"));
+        assert!(!reconcile_after_taskbar_created());
+        let step = run_hide_retry_step();
+        assert!(step.stop_timer);
+        assert!(!step.needs_degraded_reconcile);
+        start_hide_retry(true);
+        assert!(!HIDE_RETRY_ACTIVE.load(Ordering::Acquire));
+
+        // Repeated teardown is idempotent.
+        end_replacement_session();
+        assert!(!replacement_active());
     }
 }

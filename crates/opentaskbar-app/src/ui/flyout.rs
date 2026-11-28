@@ -59,6 +59,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DrawTextW, HDC,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_BACK, VK_DELETE, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RETURN,
@@ -82,7 +83,7 @@ use super::menu::BorderStyle;
 use crate::design::spatial_glass::{
     DCompForeground, SpatialGlassHost, configure_host_backdrop_window,
 };
-use crate::design::{self, Rgb, gdi_rgb};
+use crate::design::{self, Rgb};
 use crate::platform::win32;
 use crate::ui::text_input::{MAX_TEXT_CHARS, normalize_numeric, push_char};
 use crate::widgets::telemetry;
@@ -159,11 +160,44 @@ pub fn external_context_menu_active() -> bool {
     EXTERNAL_MENU_ACTIVE.load(Ordering::Acquire)
 }
 
-/// Dock edge the flyout is anchored to (side docks open sideways instead of upward).
+/// Physical work area (`rcWork`) of the monitor nearest to `(x, y)`, plus that
+/// monitor's effective DPI scale when it can be read. The work area excludes the
+/// Windows taskbar and other app bars, so popups sized and clamped against it never
+/// hide their bottom controls behind them or past a screen edge.
+pub(crate) fn monitor_work_area_at(x: i32, y: i32) -> (RECT, Option<f32>) {
+    // SAFETY: plain monitor queries into stack-owned out-parameters.
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let work = if !hmon.is_null() && GetMonitorInfoW(hmon, &mut info) != 0 {
+            info.rcWork
+        } else {
+            let (w, h) = win32::primary_screen_px();
+            RECT {
+                right: w,
+                bottom: h,
+                ..Default::default()
+            }
+        };
+        let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+        let dpi = (!hmon.is_null()
+            && GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == 0
+            && dpi_x > 0)
+            .then_some(dpi_x as f32 / 96.0);
+        (work, dpi)
+    }
+}
+
+/// Dock edge the flyout is anchored to. `Bottom` docks open upward, `Top` docks
+/// (Dynamic Island) open downward directly below the anchor, side docks sideways.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FlyoutEdge {
     #[default]
     Bottom,
+    Top,
     Left,
     Right,
 }
@@ -173,16 +207,27 @@ pub enum FlyoutEdge {
 #[derive(Clone, Copy, Debug)]
 pub struct FlyoutOptions {
     pub stays_open: bool,
+    /// Set by [`FlyoutOptions::with_edge`]: the explicit dock/island anchor wins over a
+    /// stale journaled position, and the popup only uses the room on its side of it.
+    use_anchor_position: bool,
     pub retain_for_external_context_menu: bool,
     pub edge: FlyoutEdge,
-    /// Number of soft shadow rings drawn along the popup edge.
+    /// Soft-shadow preference kept for call-site compatibility. The popup never
+    /// uses `CS_DROPSHADOW` (a square shadow behind rounded corners); its shadow
+    /// comes from the DWM rounded-corner frame.
     pub shadow_rings: u8,
 }
+
+/// Window class of every dock flyout.
+const FLYOUT_CLASS_NAME: &str = "OpenTaskBarFlyout";
+/// Class style of every dock flyout: deliberately without `CS_DROPSHADOW`.
+const FLYOUT_CLASS_STYLE: u32 = 0;
 
 impl Default for FlyoutOptions {
     fn default() -> Self {
         Self {
             stays_open: false,
+            use_anchor_position: false,
             retain_for_external_context_menu: false,
             edge: FlyoutEdge::Bottom,
             shadow_rings: 4,
@@ -201,21 +246,88 @@ impl FlyoutOptions {
         }
     }
 
-    /// Folder stack / app group flyout: clicking a row launches an app and the
-    /// popup is expected to survive transient focus changes (WS-6 stacks).
+    /// Folder stack / app group flyout: clicking outside or re-clicking the
+    /// dock item dismisses the popup cleanly like any other dock flyout.
     #[must_use]
     pub fn stack() -> Self {
         Self {
-            stays_open: true,
+            stays_open: false,
             ..Self::default()
         }
     }
 
-    /// Fluent builder for side docks.
+    /// Fluent builder: anchor the popup to the invoking dock `edge`. The explicit
+    /// anchor then takes precedence over any journaled position for this tag.
     #[must_use]
     pub const fn with_edge(mut self, edge: FlyoutEdge) -> Self {
         self.edge = edge;
+        self.use_anchor_position = true;
         self
+    }
+
+    /// Whether the explicit anchor wins over a journaled position.
+    #[must_use]
+    pub const fn uses_anchor_position(&self) -> bool {
+        self.use_anchor_position
+    }
+}
+
+/// Largest flyout height (physical px) that keeps the whole popup, including its
+/// bottom controls, inside the work area `work` (inset by `margin`). An anchored
+/// popup only gets the room on its own side of the anchor, but never less than a
+/// usable minimum: below that it is better to slide over the anchor than to shrink.
+fn flyout_available_height(
+    edge: FlyoutEdge,
+    anchored: bool,
+    work: &RECT,
+    anchor_y: i32,
+    margin: i32,
+    min_h: i32,
+) -> i32 {
+    let work_h = (work.bottom - work.top - 2 * margin).max(1);
+    let room = match edge {
+        FlyoutEdge::Top => work.bottom - margin - anchor_y,
+        FlyoutEdge::Bottom if anchored => anchor_y - work.top - margin,
+        _ => work_h,
+    };
+    room.max(min_h.min(work_h)).clamp(1, work_h)
+}
+
+/// Top-left corner (physical px) of a `width` x `height` flyout anchored at
+/// `(anchor_x, anchor_y)` on `edge`, clamped inside the work area `work`.
+fn flyout_origin(
+    edge: FlyoutEdge,
+    work: &RECT,
+    anchor_x: i32,
+    anchor_y: i32,
+    width: i32,
+    height: i32,
+    margin: i32,
+) -> (i32, i32) {
+    let left = work.left + margin;
+    let top = work.top + margin;
+    let max_x = (work.right - width - margin).max(left);
+    let max_y = (work.bottom - height - margin).max(top);
+    match edge {
+        // Bottom dock: open upward, the popup's bottom edge sits on the anchor.
+        FlyoutEdge::Bottom => (
+            (anchor_x - width / 2).clamp(left, max_x),
+            (anchor_y - height).clamp(top, max_y),
+        ),
+        // Top dock / Dynamic Island: open downward directly below the anchor.
+        FlyoutEdge::Top => (
+            (anchor_x - width / 2).clamp(left, max_x),
+            anchor_y.clamp(top, max_y),
+        ),
+        // Side docks: open beside the anchor, vertically centred on it.
+        FlyoutEdge::Left => (
+            anchor_x.clamp(left, max_x),
+            (anchor_y - height / 2).clamp(top, max_y),
+        ),
+        FlyoutEdge::Right => (
+            (anchor_x - width).clamp(left, max_x),
+            (anchor_y - height / 2).clamp(top, max_y),
+        ),
     }
 }
 
@@ -285,13 +397,13 @@ fn wm_close_action(msg: u32, already_closing: bool) -> WmCloseAction {
 }
 
 /// Only widgets with time-varying state accept a periodic tick. Other live
-/// flyouts (audio, media, quick settings, device lists) deliberately answer
+/// flyouts (audio, quick settings, device lists) deliberately answer
 /// unknown events with `LiveOutcome::Close`; ticking them would dismiss them.
 #[must_use]
 fn live_tick_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "clock" | "stats" | "focus" | "stopwatch" | "countdown" | "netspeed"
+        "clock" | "stats" | "focus" | "stopwatch" | "countdown" | "netspeed" | "media"
     )
 }
 
@@ -347,15 +459,30 @@ fn preserve_calendar_navigation(current: &FlyoutSpec, next: &mut FlyoutSpec) {
     }
 }
 
+/// Short localized weekday label (`Sun`, `Mon`, ...) for a .NET day index
+/// under an explicit language tag, avoiding Turkish 3-char collisions
+/// (`Pazar`/`Pazartesi` -> `Paz`/`Pzt`, `Cuma`/`Cumartesi` -> `Cum`/`Cmt`).
+#[must_use]
+fn weekday_short_label_for_lang(day_of_week: u32, lang: &str) -> String {
+    if lang.to_ascii_lowercase().starts_with("tr") {
+        return match day_of_week % 7 {
+            0 => "Paz",
+            1 => "Pzt",
+            2 => "Sal",
+            3 => "Çar",
+            4 => "Per",
+            5 => "Cum",
+            _ => "Cmt",
+        }
+        .to_owned();
+    }
+    telemetry::weekday_short_name(day_of_week)
+}
+
 /// Short localized weekday label (`Sun`, `Mon`, ...) for a .NET day index.
 #[must_use]
 fn weekday_short_label(day_of_week: u32) -> String {
-    let name = telemetry::weekday_name(day_of_week % 7);
-    if name.chars().count() <= 3 {
-        name
-    } else {
-        name.chars().take(3).collect()
-    }
+    weekday_short_label_for_lang(day_of_week, loc::language())
 }
 
 /// Straight BGRA32 icon payload for `FlyoutBlock::ActionRow` / `AppRow`.
@@ -623,6 +750,7 @@ struct HitTarget {
 
 struct FlyoutState<'a> {
     hwnd: HWND,
+    tag: String,
     dpi: f32,
     is_dark: bool,
     spec: FlyoutSpec,
@@ -666,6 +794,7 @@ struct FlyoutState<'a> {
     hover_left_since: Option<Instant>,
     prev_buttons_mask: u8,
     selected: Option<FlyoutAction>,
+    recorded_close: bool,
     done: AtomicBool,
 }
 
@@ -1024,7 +1153,7 @@ impl FlyoutD2d {
         }
         // Direct2D expects premultiplied BGRA for `D2D1_ALPHA_MODE_PREMULTIPLIED`.
         let mut premul = Vec::with_capacity(icon.bgra.len());
-        for px in icon.bgra.chunks_exact(4) {
+        for px in icon.bgra.as_chunks::<4>().0 {
             let a = u16::from(px[3]);
             premul.push(((u16::from(px[0]) * a + 127) / 255) as u8);
             premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
@@ -1070,7 +1199,7 @@ impl FlyoutD2d {
             return None;
         }
         let mut premul = Vec::with_capacity(w as usize * h as usize * 4);
-        for px in img.as_raw().chunks_exact(4) {
+        for px in img.as_raw().as_chunks::<4>().0 {
             let a = u16::from(px[3]);
             premul.push(((u16::from(px[2]) * a + 127) / 255) as u8);
             premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
@@ -1153,14 +1282,17 @@ fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
+/// Background-app row: `[app | pin | close]`. The two actions are 30 DIP square pills
+/// separated by a 5 DIP gap; the gap belongs to no target.
 fn app_row_targets(left: i32, right: i32, top: i32, dpi: f32) -> [RECT; 3] {
-    let action_w = (36.0 * dpi).round() as i32;
+    let action_w = (30.0 * dpi).round() as i32;
+    let gap = (5.0 * dpi).round() as i32;
     let bottom = top + (42.0 * dpi).round() as i32;
-    let pin_left = right - action_w * 2;
+    let pin_left = right - action_w * 2 - gap;
     let close_left = right - action_w;
     [
         (left, pin_left),
-        (pin_left, close_left),
+        (pin_left, close_left - gap),
         (close_left, right),
     ]
     .map(|(left, right)| RECT {
@@ -1189,7 +1321,8 @@ fn is_audio_input_label(label: &str) -> bool {
 fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<HitTarget>) {
     let s = |v: f32| (v * dpi).round() as i32;
     let pad = s(FLYOUT_PAD_DIPS);
-    let content_right_pad = pad + s(4.0);
+    // Equal 16 DIP margins on both sides (the scrollbar overlays the right margin).
+    let content_right_pad = pad;
     let has_header = !spec.title.is_empty();
     let header_h = if !has_header {
         0
@@ -1583,6 +1716,11 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
             FlyoutBlock::Note(_) => y += s(24.0),
         }
     }
+    // A trailing button bar sits on the outer padding, so drop its inter-block gap
+    // to keep the footer padding equal to the header/side padding.
+    if matches!(spec.blocks.last(), Some(FlyoutBlock::ButtonBar(_))) {
+        y -= s(6.0);
+    }
     (content_top_px, (y - content_top_px).max(s(24.0)), targets)
 }
 
@@ -1616,7 +1754,29 @@ pub fn show_flyout_with_border(
     spec: FlyoutSpec,
     border: BorderStyle,
 ) -> Option<u32> {
-    match show_flyout_interactive_with_border(
+    show_primary_with_options(
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        border,
+        FlyoutOptions::default(),
+    )
+}
+
+/// [`show_flyout_with_border`] with explicit placement options, e.g.
+/// `FlyoutOptions::default().with_edge(edge)` for the invoking dock edge.
+pub fn show_primary_with_options(
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    border: BorderStyle,
+    options: FlyoutOptions,
+) -> Option<u32> {
+    match show_flyout_interactive_with_options(
         &spec.title.clone(),
         owner_hwnd,
         is_dark,
@@ -1625,6 +1785,7 @@ pub fn show_flyout_with_border(
         spec,
         None,
         border,
+        options,
     ) {
         Some(FlyoutAction::Primary(id)) => Some(id),
         _ => None,
@@ -1991,10 +2152,15 @@ fn show_flyout_impl<'a>(
     // popup took it, so closing the flyout hands focus back to the dock widget.
     let previous_foreground = unsafe { GetForegroundWindow() };
 
-    let class_name = wide("OpenTaskBarFlyout");
+    // No `CS_DROPSHADOW`: that legacy class shadow is a rectangle, so it stuck
+    // out as a square frame behind the 8 DIP rounded corners. `DWMWCP_ROUND`
+    // (set below on every path) gives the native Win11 shadow that follows the
+    // rounded outline, exactly like the dock context menu.
+    let class_name = wide(FLYOUT_CLASS_NAME);
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
+        style: FLYOUT_CLASS_STYLE,
         lpfnWndProc: Some(flyout_wnd_proc),
         hInstance: hinstance,
         hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
@@ -2005,64 +2171,58 @@ fn show_flyout_impl<'a>(
         RegisterClassExW(&wc);
     }
 
-    let dpi = win32::dpi_scale(owner_hwnd);
+    // Size and clamp against the anchor monitor's *work area* (never behind the
+    // taskbar) at that monitor's DPI, so multi-monitor flyouts are not scaled for
+    // the dock's display when they open on another one.
+    let (screen, monitor_dpi) = monitor_work_area_at(anchor_center_x_px, anchor_bottom_y_px);
+    let dpi = monitor_dpi
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .unwrap_or_else(|| win32::dpi_scale(owner_hwnd))
+        .max(0.5);
     let s = |v: f32| (v * dpi).round() as i32;
-    let width_px = s(spec.width_dips.clamp(240.0, 380.0));
+    let margin = s(10.0);
+    let work_w = (screen.right - screen.left - 2 * margin).max(1);
+    let width_px = s(spec.width_dips.clamp(240.0, 380.0)).min(work_w);
     let pad = s(FLYOUT_PAD_DIPS);
     let (content_top_px, content_h_px, targets) = layout_flyout(&spec, width_px, dpi);
-    let max_h_px = s(MAX_FLYOUT_H_DIPS);
-    let height_px = (content_top_px + content_h_px + pad).min(max_h_px);
-    let viewport_h_px = (height_px - content_top_px - pad).max(s(40.0));
+    let available_h = flyout_available_height(
+        options.edge,
+        options.use_anchor_position,
+        &screen,
+        anchor_bottom_y_px,
+        margin,
+        s(160.0),
+    );
+    let height_px = (content_top_px + content_h_px + pad)
+        .min(s(MAX_FLYOUT_H_DIPS))
+        .min(available_h);
+    // The viewport may be shorter than its content: the flyout then scrolls instead
+    // of pushing the bottom controls off-screen.
+    let viewport_h_px = (height_px - content_top_px - pad).max(1);
 
     let is_tray = tag == "tray";
-    let (scr_w, scr_h) = win32::primary_screen_px();
-    let mut monitor = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    let screen = if unsafe {
-        let anchor = POINT {
-            x: anchor_center_x_px,
-            y: anchor_bottom_y_px,
-        };
-        GetMonitorInfoW(
-            MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST),
-            &mut monitor,
-        ) != 0
-    } {
-        monitor.rcMonitor
+    let (x, top_y) = flyout_origin(
+        options.edge,
+        &screen,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        width_px,
+        height_px,
+        margin,
+    );
+    // A journaled position wins over the computed placement, unless the caller passed
+    // an explicit dock/island anchor (a stale saved spot must not move it away).
+    let (x, top_y) = if options.use_anchor_position {
+        (x, top_y)
     } else {
-        RECT {
-            right: scr_w,
-            bottom: scr_h,
-            ..Default::default()
-        }
+        let left = screen.left + margin;
+        let top = screen.top + margin;
+        let max_x = (screen.right - width_px - margin).max(left);
+        let max_y = (screen.bottom - height_px - margin).max(top);
+        opentaskbar_shell::flyout_journal::read_tag(tag).map_or((x, top_y), |(sx, sy)| {
+            (sx.clamp(left, max_x), sy.clamp(top, max_y))
+        })
     };
-    let margin = s(10.0);
-    let left = screen.left + margin;
-    let top = screen.top + margin;
-    let max_x = (screen.right - width_px - margin).max(left);
-    let max_y = (screen.bottom - height_px - margin).max(top);
-    let (mut x, mut top_y) = match options.edge {
-        FlyoutEdge::Bottom => (
-            (anchor_center_x_px - width_px / 2).clamp(left, max_x),
-            (anchor_bottom_y_px - height_px).clamp(top, max_y),
-        ),
-        // Side docks: open beside the anchor, vertically centred on it.
-        FlyoutEdge::Left => (
-            anchor_center_x_px.clamp(left, max_x),
-            (anchor_bottom_y_px - height_px / 2).clamp(top, max_y),
-        ),
-        FlyoutEdge::Right => (
-            (anchor_center_x_px - width_px).clamp(left, max_x),
-            (anchor_bottom_y_px - height_px / 2).clamp(top, max_y),
-        ),
-    };
-    // A previously journaled position wins over the freshly computed edge placement.
-    if let Some((saved_x, saved_y)) = opentaskbar_shell::flyout_journal::read_tag(tag) {
-        x = saved_x.clamp(left, max_x);
-        top_y = saved_y.clamp(top, max_y);
-    }
     opentaskbar_shell::flyout_journal::write_tag(tag, x, top_y);
 
     let animate = win32::client_area_animations_enabled()
@@ -2098,14 +2258,36 @@ fn show_flyout_impl<'a>(
 
     let (spatial_glass, dcomp_fg) = if use_glass_backdrop {
         configure_host_backdrop_window(hwnd as usize, is_dark, true);
-        let mut host = SpatialGlassHost::attach(hwnd as usize, false, border.glass_config);
+        // Apply Windows 11 native rounded corners (with DWM border disabled so only
+        // SpatialGlassHost's crisp rim renders) to get clean OS drop shadow elevation
+        // and match the 8 DIP glass capsule cleanly with zero exposed corner gap.
+        unsafe {
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let border_none = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border_none as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
+        // Active theme packs tint the glass body and rim; stock themes stay neutral.
+        let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
+        let glass_config = border.glass_config.with_theme_tint(tint, rim);
+        let mut host = SpatialGlassHost::attach(hwnd as usize, false, glass_config);
         if let Some(ref mut g) = host {
             g.sync_rect(
                 0.0,
                 0.0,
                 width_px as f32,
                 height_px as f32,
-                (14.0 * dpi).round(),
+                (8.0 * dpi).round(),
                 dpi,
                 0.0,
                 0.0,
@@ -2150,11 +2332,15 @@ fn show_flyout_impl<'a>(
                 (&corner as *const u32).cast(),
                 size_of::<u32>() as u32,
             );
-            let border_c = if border.width_dips > 0.0 {
-                gdi_rgb(border.rgb)
-            } else {
-                DWMWA_COLOR_NONE
-            };
+        }
+        (None, None)
+    };
+    if dcomp_fg.is_none() {
+        // Without the DComp glass host `paint` draws one crisp rounded border that
+        // follows the `DWMWCP_ROUND` corners; suppress DWM's own frame so the
+        // popup never shows a doubled outline.
+        let border_c = DWMWA_COLOR_NONE;
+        unsafe {
             let _ = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_BORDER_COLOR as u32,
@@ -2162,14 +2348,14 @@ fn show_flyout_impl<'a>(
                 size_of::<u32>() as u32,
             );
         }
-        (None, None)
-    };
+    }
 
     let hover_anchor = NEXT_HOVER_ANCHOR.with(|slot| slot.borrow_mut().take());
     let has_live_callback = on_live.is_some();
     let tick_enabled = has_live_callback && live_tick_tag(tag);
     let mut state = Box::new(FlyoutState {
         hwnd,
+        tag: tag.to_owned(),
         dpi,
         is_dark,
         spec,
@@ -2205,6 +2391,7 @@ fn show_flyout_impl<'a>(
         hover_left_since: None,
         prev_buttons_mask: mouse_buttons_mask(),
         selected: None,
+        recorded_close: false,
         done: AtomicBool::new(false),
     });
     let ptr = (&mut *state) as *mut FlyoutState<'_> as isize;
@@ -2283,7 +2470,7 @@ fn show_flyout_impl<'a>(
             SetForegroundWindow(previous_foreground);
         }
     }
-    if selected.is_none() {
+    if selected.is_none() && !state.recorded_close {
         record_closed(tag);
     }
     selected
@@ -2424,6 +2611,12 @@ impl FlyoutState<'_> {
             return;
         }
         self.closing = true;
+        // Arm reopen suppression immediately when dismissal starts so a fast
+        // click releasing during `CLOSE_ANIM_MS` cannot reopen the flyout.
+        if self.selected.is_none() && !self.recorded_close {
+            record_closed(&self.tag);
+            self.recorded_close = true;
+        }
         if self.slide_px == 0 {
             self.done.store(true, Ordering::Release);
             return;
@@ -2543,7 +2736,7 @@ impl FlyoutState<'_> {
         let s = |v: f32| (v * dpi).round() as i32;
         let pad = s(FLYOUT_PAD_DIPS);
         let pad_f = pad as f32;
-        let right_pad = pad + s(4.0);
+        let right_pad = pad;
         let card_r = sf(10.0);
         let pill_r = sf(8.0);
         let mut client = RECT::default();
@@ -2553,19 +2746,30 @@ impl FlyoutState<'_> {
         let wf = w as f32;
         let use_spatial_glass = self.dcomp_fg.is_some() && self.border.glass_config.enabled;
         if let Some(ref mut glass) = self.spatial_glass {
-            glass.sync_rect(0.0, 0.0, wf, h as f32, sf(14.0).round(), dpi, 0.0, 0.0);
+            glass.sync_rect(0.0, 0.0, wf, h as f32, sf(8.0).round(), dpi, 0.0, 0.0);
         }
         let content_w = (w - pad - right_pad).max(s(120.0));
         let content_wf = content_w as f32;
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
-        let pal = design::palette_with_border(self.is_dark, Some(self.border.rgb));
+        let pal = design::active_palette_with_border(self.is_dark, Some(self.border.rgb));
+        // Theme packs / editor tokens tint glass cards and hovers with the live palette;
+        // the stock theme keeps the neutral white veils below.
+        let themed = design::theme::has_active_theme_customization();
         let border_w = (self.border.width_dips * dpi).clamp(1.0, 2.0);
         let surface_c = if use_spatial_glass {
-            d2d_rgba((0, 0, 0), 0.0)
+            // Faint contrast tint so dark glass keeps text legible over bright wallpapers;
+            // themed packs tint it with their own surface colour.
+            if themed {
+                d2d_rgba(pal.surface, if self.is_dark { 0.24 } else { 0.12 })
+            } else {
+                d2d_rgba((30, 33, 40), if self.is_dark { 0.18 } else { 0.0 })
+            }
         } else if self.border.glass_mode {
-            let tint = if self.is_dark {
-                (0x10_u8, 0x12_u8, 0x18_u8)
+            let tint = if themed {
+                pal.surface
+            } else if self.is_dark {
+                (0x1c_u8, 0x1f_u8, 0x26_u8)
             } else {
                 (0xf6_u8, 0xf8_u8, 0xfc_u8)
             };
@@ -2574,7 +2778,9 @@ impl FlyoutState<'_> {
             d2d_rgba(pal.surface, 1.0)
         };
         let card_bg = if self.border.glass_mode {
-            if self.is_dark {
+            if themed {
+                d2d_rgba(pal.elevated, if self.is_dark { 0.42 } else { 0.62 })
+            } else if self.is_dark {
                 d2d_rgba((0xff, 0xff, 0xff), 0.08)
             } else {
                 d2d_rgba((0xff, 0xff, 0xff), 0.56)
@@ -2583,7 +2789,9 @@ impl FlyoutState<'_> {
             d2d_rgba(pal.elevated, 1.0)
         };
         let hover_bg = if self.border.glass_mode {
-            if self.is_dark {
+            if themed {
+                d2d_rgba(pal.hover, if self.is_dark { 0.62 } else { 0.80 })
+            } else if self.is_dark {
                 d2d_rgba((0xff, 0xff, 0xff), 0.14)
             } else {
                 d2d_rgba((0xff, 0xff, 0xff), 0.76)
@@ -2598,8 +2806,16 @@ impl FlyoutState<'_> {
         let sel_fill = d2d_rgba(pal.selected_fill, 1.0);
         let sel_stroke = d2d_rgba(pal.selected_stroke, 1.0);
         let sel_fg = d2d_rgba(pal.selected_fg, 1.0);
-        let primary_fill = if self.is_dark { sel_fill } else { accent_blue };
-        let primary_stroke = if self.is_dark {
+        let primary_fill = if themed {
+            d2d_rgba(pal.accent, if self.is_dark { 0.30 } else { 1.0 })
+        } else if self.is_dark {
+            sel_fill
+        } else {
+            accent_blue
+        };
+        let primary_stroke = if themed {
+            d2d_rgba(pal.accent, 1.0)
+        } else if self.is_dark {
             sel_stroke
         } else {
             accent_blue
@@ -2621,7 +2837,9 @@ impl FlyoutState<'_> {
         let danger_fg = d2d_rgba(pal.danger_fg, 1.0);
         let sep_col = d2d_rgba(pal.sep_rgb, if self.is_dark { 0.85 } else { 1.0 });
         let scroll_col = d2d_rgba(pal.text_secondary, 0.45);
-        let track_col = if self.is_dark {
+        let track_col = if themed {
+            d2d_rgba(pal.border_rgb, 1.0)
+        } else if self.is_dark {
             d2d_rgba((0x34, 0x39, 0x45), 1.0)
         } else {
             d2d_rgba((0xdc, 0xe1, 0xe8), 1.0)
@@ -2687,7 +2905,14 @@ impl FlyoutState<'_> {
             }
             unsafe {
                 d2d.target.BeginDraw();
-                d2d.target.Clear(Some(&surface_c));
+                if use_spatial_glass {
+                    d2d.target.Clear(Some(&d2d_rgba((0, 0, 0), 0.0)));
+                } else {
+                    d2d.target.Clear(Some(&surface_c));
+                }
+            }
+            if use_spatial_glass {
+                d2d.fill_rrect(0.0, 0.0, wf, h as f32, sf(8.0), surface_c);
             }
 
             // Crisp top specular highlight along the upper flyout rim.
@@ -2696,7 +2921,7 @@ impl FlyoutState<'_> {
                 0.5,
                 (wf - sf(12.0)).max(sf(12.0)),
                 0.5,
-                d2d_rgba(pal.specular_top, if self.is_dark { 0.45 } else { 0.8 }),
+                d2d_rgba(pal.specular_top, if self.is_dark { 0.22 } else { 0.5 }),
                 1.0,
             );
 
@@ -4020,17 +4245,19 @@ impl FlyoutState<'_> {
                             || self.hovered_id == Some(*pin_id)
                             || (*close_id).is_some_and(|cid| self.hovered_id == Some(cid));
                         if row_hovered {
+                            // The hover pill bleeds 4 DIP into the side margins so the
+                            // icon and the action pills stay aligned with the header.
                             d2d.fill_rrect(
-                                app.left as f32,
+                                app.left as f32 - sf(4.0),
                                 yf,
-                                close.right as f32,
+                                close.right as f32 + sf(4.0),
                                 app.bottom as f32,
                                 pill_r,
                                 hover_bg,
                             );
                         }
                         let icon_size = sf(22.0);
-                        let icon_x = app.left as f32 + sf(10.0);
+                        let icon_x = app.left as f32;
                         let icon_y = yf + ((app.bottom - y) as f32 - icon_size) * 0.5;
                         if let Some(icon) = icon {
                             d2d.draw_bgra_icon(
@@ -4048,7 +4275,7 @@ impl FlyoutState<'_> {
                         d2d.draw_text(
                             title,
                             d2d_rect(
-                                app.left as f32 + sf(42.0),
+                                app.left as f32 + sf(32.0),
                                 yf,
                                 app.right as f32 - sf(6.0),
                                 app.bottom as f32,
@@ -4074,12 +4301,14 @@ impl FlyoutState<'_> {
                             let Some(btn_id) = btn_id else { continue };
                             let active =
                                 self.hovered_id == Some(btn_id) || focused_id == Some(btn_id);
-                            let inset = sf(4.0);
+                            // 30x30 DIP pill: full target width, 6 DIP vertical inset
+                            // inside the 42 DIP row. Close uses the danger (red) fill.
+                            let inset = sf(6.0);
                             if active || selected {
                                 d2d.fill_rrect(
-                                    rect.left as f32 + inset,
+                                    rect.left as f32,
                                     yf + inset,
-                                    rect.right as f32 - inset,
+                                    rect.right as f32,
                                     rect.bottom as f32 - inset,
                                     sf(7.0),
                                     fill,
@@ -4502,8 +4731,10 @@ impl FlyoutState<'_> {
             let max_s = self.max_scroll();
             if max_s > 0 && self.content_h_px > 0 {
                 let track_h = self.viewport_h_px as f32;
-                let thumb_h =
-                    (track_h * track_h / self.content_h_px as f32).clamp(sf(24.0), track_h);
+                // A work-area-capped viewport can be shorter than the 24 DIP minimum
+                // thumb; `clamp` panics when min > max.
+                let thumb_h = (track_h * track_h / self.content_h_px as f32)
+                    .clamp(sf(24.0).min(track_h), track_h);
                 let ratio = self.scroll_y as f32 / max_s as f32;
                 let thumb_top = self.content_top_px as f32 + (track_h - thumb_h) * ratio;
                 let sb_w = sf(4.0).max(3.0);
@@ -4515,6 +4746,20 @@ impl FlyoutState<'_> {
                     thumb_top + thumb_h,
                     sb_w * 0.5,
                     scroll_col,
+                );
+            }
+
+            // Non-glass / glass-fallback popups: one crisp border on whole pixels,
+            // radius matching Win11 `DWMWCP_ROUND` (DWM's own border is disabled).
+            if !use_spatial_glass {
+                d2d.stroke_rrect(
+                    0.0,
+                    0.0,
+                    wf,
+                    h as f32,
+                    sf(8.0),
+                    d2d_rgba(self.border.rgb, 1.0),
+                    (self.border.width_dips * dpi).round(),
                 );
             }
 
@@ -4875,15 +5120,16 @@ unsafe extern "system" fn flyout_wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, Duration, FlyoutBlock, FlyoutEdge,
-        FlyoutOptions, FlyoutSpec, Instant, LiveEvent, LiveOutcome, MENU_CLASS_CACHE_TTL,
-        MENU_CLASS_PROBE, MenuClassProbe, POINT, RECT, REOPEN_SUPPRESSION_WINDOW,
-        WM_APP_MENU_CANDIDATE, WmCloseAction, anim_interval_for_fps, app_row_targets, blend_rgb,
-        calendar_leading_blanks, calendar_weekday_order, draw_gdi_text, format_clock,
-        is_native_menu_class, layout_flyout, live_tick_allowed, live_tick_tag, pack_point,
-        post_menu_candidate, preserve_calendar_navigation, pt_in_rect, record_closed,
-        resolve_live_outcome, should_suppress_reopen, stays_open_for_external_menu,
-        suppression_window_hit, unpack_point, weekday_short_label, wm_close_action,
+        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, Duration, FLYOUT_CLASS_NAME,
+        FLYOUT_CLASS_STYLE, FlyoutBlock, FlyoutEdge, FlyoutOptions, FlyoutSpec, Instant, LiveEvent,
+        LiveOutcome, MENU_CLASS_CACHE_TTL, MENU_CLASS_PROBE, MenuClassProbe, POINT, RECT,
+        REOPEN_SUPPRESSION_WINDOW, WM_APP_MENU_CANDIDATE, WmCloseAction, anim_interval_for_fps,
+        app_row_targets, blend_rgb, calendar_leading_blanks, calendar_weekday_order, draw_gdi_text,
+        flyout_available_height, flyout_origin, format_clock, is_native_menu_class, layout_flyout,
+        live_tick_allowed, live_tick_tag, pack_point, post_menu_candidate,
+        preserve_calendar_navigation, pt_in_rect, record_closed, resolve_live_outcome,
+        should_suppress_reopen, stays_open_for_external_menu, suppression_window_hit, unpack_point,
+        weekday_short_label, wm_close_action,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_KEYDOWN, WM_PAINT};
@@ -5001,6 +5247,19 @@ mod tests {
     }
 
     #[test]
+    fn flyout_class_has_no_rectangular_drop_shadow() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::CS_DROPSHADOW;
+        assert_eq!(FLYOUT_CLASS_STYLE & CS_DROPSHADOW, 0);
+        assert_eq!(FLYOUT_CLASS_NAME, "OpenTaskBarFlyout");
+        let code = include_str!("flyout.rs");
+        let register = code
+            .find("let wc = WNDCLASSEXW {")
+            .expect("flyout class registration");
+        let window: String = code[register..].chars().take(400).collect();
+        assert!(window.contains("style: FLYOUT_CLASS_STYLE"));
+    }
+
+    #[test]
     fn flyout_options_defaults_match_the_shared_dock_flyout() {
         let options = FlyoutOptions::default();
         assert!(!options.stays_open);
@@ -5010,14 +5269,70 @@ mod tests {
         // Presets for the WS-6 tray / folder-stack call sites.
         assert!(super::FlyoutOptions::tray().retain_for_external_context_menu);
         assert!(!super::FlyoutOptions::tray().stays_open);
-        assert!(super::FlyoutOptions::stack().stays_open);
+        assert!(!super::FlyoutOptions::stack().stays_open);
         assert_eq!(
             super::FlyoutOptions::default()
                 .with_edge(FlyoutEdge::Left)
                 .edge,
             FlyoutEdge::Left
         );
+        // Only an explicit edge anchor overrides a journaled position.
+        assert!(!options.uses_anchor_position());
+        assert!(!super::FlyoutOptions::tray().uses_anchor_position());
+        let top = super::FlyoutOptions::tray().with_edge(FlyoutEdge::Top);
+        assert_eq!(top.edge, FlyoutEdge::Top);
+        assert!(top.uses_anchor_position());
+        assert!(top.retain_for_external_context_menu);
         assert_eq!(blend_rgb(0x000000, 0xffffff, 0.5), 0x808080);
+    }
+
+    #[test]
+    fn flyout_placement_stays_inside_the_work_area() {
+        // 1920x1080 monitor whose taskbar reserves the bottom 48 px.
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1032,
+        };
+        let margin = 10;
+
+        // Top edge (Dynamic Island): opens directly below the anchor.
+        let h = flyout_available_height(FlyoutEdge::Top, true, &work, 60, margin, 160);
+        assert_eq!(h, 1032 - margin - 60);
+        assert_eq!(
+            flyout_origin(FlyoutEdge::Top, &work, 960, 60, 300, 400, margin),
+            (810, 60)
+        );
+
+        // Bottom edge, anchored: only the room above the anchor is usable.
+        let h = flyout_available_height(FlyoutEdge::Bottom, true, &work, 700, margin, 160);
+        assert_eq!(h, 700 - margin);
+        let (_, y) = flyout_origin(FlyoutEdge::Bottom, &work, 960, 700, 300, h, margin);
+        assert_eq!(y + h, 700);
+
+        // Unanchored: the whole work area, and the bottom edge never passes rcWork.
+        let h = flyout_available_height(FlyoutEdge::Bottom, false, &work, 1080, margin, 160);
+        assert_eq!(h, 1032 - 2 * margin);
+        let (x, y) = flyout_origin(FlyoutEdge::Bottom, &work, 1910, 1080, 300, h, margin);
+        assert!(y + h <= work.bottom - margin, "{y}+{h}");
+        assert!(x + 300 <= work.right - margin);
+
+        // A wrong-side anchor keeps a usable minimum instead of a 1 px popup.
+        assert_eq!(
+            flyout_available_height(FlyoutEdge::Top, true, &work, 1030, margin, 160),
+            160
+        );
+
+        // Negative virtual-desktop origin (monitor left of the primary).
+        let left_work = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1032,
+        };
+        let (x, _) = flyout_origin(FlyoutEdge::Bottom, &left_work, -5, 1000, 300, 200, margin);
+        assert_eq!(x, -300 - margin);
     }
 
     #[test]
@@ -5175,6 +5490,22 @@ mod tests {
     }
 
     #[test]
+    fn stack_flyout_allows_outside_dismiss_and_suppresses_immediate_reopen() {
+        let stack_opts = FlyoutOptions::stack();
+        assert!(!stack_opts.stays_open);
+        assert!(!stays_open_for_external_menu(false, stack_opts.stays_open));
+
+        let tag = "stack-toggle-close-test";
+        assert!(!should_suppress_reopen(tag));
+        record_closed(tag);
+        assert!(
+            should_suppress_reopen(tag),
+            "closing a stack flyout must immediately suppress reopen for the same tag"
+        );
+        assert!(!should_suppress_reopen(tag));
+    }
+
+    #[test]
     fn redesigned_flyout_blocks_layout_without_truncation() {
         let spec = FlyoutSpec {
             title: "Redesign".to_owned(),
@@ -5246,18 +5577,13 @@ mod tests {
             "stopwatch",
             "countdown",
             "netspeed",
+            "media",
         ] {
             assert!(live_tick_tag(tag), "{tag} must tick");
         }
-        // Audio/media/quick-settings callbacks close on unknown events: ticking
+        // Audio/quick-settings callbacks close on unknown events: ticking
         // them would dismiss the flyout after one second.
-        for tag in [
-            "audio",
-            "media",
-            "quicksettings",
-            "bluetoothbattery",
-            "tray",
-        ] {
+        for tag in ["audio", "quicksettings", "bluetoothbattery", "tray"] {
             assert!(!live_tick_tag(tag), "{tag} must not tick");
         }
 
@@ -5372,10 +5698,17 @@ mod tests {
         let order = calendar_weekday_order(first);
         assert_eq!(order[0], first);
         assert_eq!(order[6], (first + 6) % 7);
-        let expected: String = super::telemetry::weekday_name(first)
-            .chars()
-            .take(3)
-            .collect();
+        let expected = super::telemetry::weekday_short_name(first);
         assert_eq!(weekday_short_label(first), expected);
+    }
+
+    #[test]
+    fn turkish_weekday_short_labels_are_distinct() {
+        let labels: Vec<String> = (0..7)
+            .map(|day| super::weekday_short_label_for_lang(day, "tr-TR"))
+            .collect();
+        assert_eq!(labels, ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"]);
+        let unique: std::collections::HashSet<&str> = labels.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), 7);
     }
 }

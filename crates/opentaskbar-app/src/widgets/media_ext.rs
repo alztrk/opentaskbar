@@ -699,7 +699,7 @@ pub fn format_time(secs: u64) -> String {
 
 /// Segoe Fluent Icons glyph for the transport button, matching reference playing state.
 pub fn playing_glyph(playing: bool) -> &'static str {
-    if playing { "\u{E711}" } else { "\u{E768}" } // Pause / Play
+    if playing { "\u{E769}" } else { "\u{E768}" } // Pause / Play
 }
 
 pub fn seek_ratio(position: u64, duration: u64) -> f32 {
@@ -739,11 +739,7 @@ pub fn build_media_flyout(
         },
         centered: false,
         large: false,
-        right_meta: Some(if details.playing {
-            playing_glyph(true).to_owned()
-        } else {
-            playing_glyph(false).to_owned()
-        }),
+        right_meta: None,
     });
     if details.duration_secs > 0 {
         // C2 FlyoutBlock::SeekSlider + LiveEvent::Seek.
@@ -781,7 +777,7 @@ pub fn build_media_flyout(
         value_text: if details.muted {
             loc::t("AudioMuted")
         } else {
-            format!("{}%", details.volume)
+            super::format_percent(details.volume)
         },
         ratio: details.volume as f32 / 100.0,
         muted: details.muted,
@@ -805,7 +801,7 @@ pub fn build_media_flyout(
                 value_text: if session.muted {
                     loc::t("AudioMuted")
                 } else {
-                    format!("{}%", session.volume)
+                    super::format_percent(session.volume)
                 },
                 ratio: session.volume as f32 / 100.0,
                 muted: session.muted,
@@ -834,7 +830,7 @@ pub fn build_volume_popover(volume: u32, muted: bool, device_name: &str) -> Flyo
             value_text: if muted {
                 loc::t("AudioMuted")
             } else {
-                format!("{volume}%")
+                super::format_percent(volume)
             },
             ratio: volume as f32 / 100.0,
             muted,
@@ -851,6 +847,21 @@ pub fn volume_from_wheel(current_pct: u32, delta: i32, remainder: &mut i32) -> u
     let steps = total / 12; // 120 / 10% = 12 delta per percent
     *remainder = total % 12;
     (current_pct as i32 + steps).clamp(0, 100) as u32
+}
+
+/// Applies a mouse-wheel delta with a configurable percentage per 120-unit detent
+/// (e.g. `pct_per_detent = 5` gives ±5% per standard wheel click with fractional carry).
+pub fn volume_from_wheel_step(
+    current_pct: u32,
+    delta: i32,
+    remainder: &mut i32,
+    pct_per_detent: i32,
+) -> u32 {
+    let pct = pct_per_detent.clamp(1, 20);
+    let total = *remainder + delta;
+    let detents = total / 120;
+    *remainder = total % 120;
+    (current_pct as i32 + detents * pct).clamp(0, 100) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,7 +1263,7 @@ mod tests {
 
     #[test]
     fn playing_glyph_switches() {
-        assert_eq!(playing_glyph(true), "\u{E711}");
+        assert_eq!(playing_glyph(true), "\u{E769}");
         assert_eq!(playing_glyph(false), "\u{E768}");
     }
 

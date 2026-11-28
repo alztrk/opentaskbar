@@ -25,6 +25,9 @@ const RESTORE_BROADCAST_WPARAM: usize = 2;
 
 static REGISTERED_APPBAR: AtomicUsize = AtomicUsize::new(0);
 static BROADCAST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+/// Prevents duplicate restore/cleanup passes when both a UI exit handler and
+/// `main()` invoke `end_replacement()`. Reset by `begin_replacement()`.
+static END_REPLACEMENT_DONE: AtomicBool = AtomicBool::new(false);
 /// Result of the most recent restore attempt. Kept internal because app call
 /// sites use `restore_from_journal()` as a statement; only `end_replacement`
 /// consumes it to authorize the clean-exit signal.
@@ -161,6 +164,11 @@ fn unregister_appbar() {
 }
 
 pub fn ensure_hidden() -> bool {
+    // Once shutdown has torn the session down, no caller (dock poll timer,
+    // hide-retry worker, reconcile) may hide Explorer's taskbar again.
+    if !session::replacement_active() {
+        return false;
+    }
     let mut hid = false;
     let tray = find_primary_tray();
     if !tray.is_null() {
@@ -177,6 +185,7 @@ pub fn ensure_hidden() -> bool {
 }
 
 pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i32) {
+    END_REPLACEMENT_DONE.store(false, Ordering::SeqCst);
     let prev = active_state();
     // Arm the shell-hook drivers used by the 20/40 hide budget and the
     // 45-attempt degraded budget before any Explorer state is changed.
@@ -345,6 +354,15 @@ pub fn hide_observation() -> session::HideObservation {
 }
 
 pub fn end_replacement() {
+    // Always tear the replacement session down first (hooks, hide timers,
+    // reconcile workers) before restoring: otherwise the SHOW event of the
+    // restore re-arms the hide timer and the taskbar disappears again.
+    session::end_replacement_session();
+    // Idempotent: a second shutdown path (e.g. ContextAction::Exit followed by
+    // main() cleanup) must not run a redundant journal restore.
+    if END_REPLACEMENT_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
     // Restore first, verify second, signal third. The legacy notify call in
     // main.rs runs before this function and is intentionally a no-op.
     restore_from_journal();
@@ -614,5 +632,37 @@ mod tests {
             classify_hide_observation(true, true, false),
             HideObservation::StillVisible
         );
+    }
+
+    #[test]
+    fn ensure_hidden_is_noop_after_session_teardown() {
+        session::end_replacement_session();
+        assert!(!session::replacement_active());
+        assert!(!ensure_hidden());
+    }
+
+    #[test]
+    fn end_replacement_order_tears_down_session_before_restore() {
+        let src = include_str!("taskbar.rs");
+        let fn_start = src
+            .find("pub fn end_replacement()")
+            .expect("end_replacement function");
+        let fn_end = (fn_start + 1200).min(src.len());
+        let body = &src[fn_start..fn_end];
+        let teardown = body
+            .find("session::end_replacement_session()")
+            .expect("session teardown call");
+        let guard = body
+            .find("END_REPLACEMENT_DONE.swap(true")
+            .expect("idempotent guard");
+        let restore = body
+            .find("restore_from_journal()")
+            .expect("restore_from_journal call");
+        let clean = body
+            .find("watchdog::notify_clean_exit()")
+            .expect("notify_clean_exit call");
+        assert!(teardown < guard);
+        assert!(guard < restore);
+        assert!(restore < clean);
     }
 }
