@@ -786,7 +786,7 @@ pub struct DockAppGroup {
 
 /// A `DockProfile` snapshot. All reference properties are typed with defaults, and any future
 /// property is preserved in `extra` for a lossless round-trip.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct DockProfile {
     pub name: String,
@@ -794,15 +794,15 @@ pub struct DockProfile {
     pub size: DockSize,
     pub auto_hide: AutoHideMode,
     /// reference calls this `Widgets`; the port's historic name is `EnabledWidgets`.
-    #[serde(alias = "Widgets", deserialize_with = "null_as_empty")]
+    #[serde(alias = "Widgets", deserialize_with = "deserialize_null_default")]
     pub enabled_widgets: Vec<String>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub hidden_apps: Vec<String>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub installed_widgets: Vec<String>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub widget_order: Vec<String>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub dock_item_order: Vec<String>,
     pub dock_width_mode: Option<DockWidthMode>,
     pub dock_width_pixels: Option<i32>,
@@ -817,33 +817,6 @@ pub struct DockProfile {
     /// Unknown keys from newer/older builds preserved on round-trip save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
-}
-
-impl Default for DockProfile {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            position: DockPosition::default(),
-            size: DockSize::default(),
-            auto_hide: AutoHideMode::default(),
-            enabled_widgets: Vec::new(),
-            hidden_apps: Vec::new(),
-            installed_widgets: Vec::new(),
-            widget_order: Vec::new(),
-            dock_item_order: Vec::new(),
-            dock_width_mode: None,
-            dock_width_pixels: None,
-            dock_width_percent: None,
-            theme: None,
-            theme_pack: None,
-            theme_application_icons: None,
-            launcher_hotkey: None,
-            dock_hotkey: None,
-            custom_launcher_hotkey: None,
-            custom_dock_hotkey: None,
-            extra: Map::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -972,25 +945,25 @@ pub struct DockSettings {
     #[serde(alias = "ShowSystemStats")]
     pub show_system_stats_widget: bool,
     /// Explicitly enabled widget IDs. reference writes this key as `Widgets`.
-    #[serde(alias = "Widgets", deserialize_with = "null_as_empty")]
+    #[serde(alias = "Widgets", deserialize_with = "deserialize_null_default")]
     pub enabled_widgets: Vec<String>,
     pub weather_city: String,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub stack_folders: Vec<String>,
-    #[serde(deserialize_with = "null_as_empty_groups")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub app_groups: Vec<DockAppGroup>,
-    #[serde(deserialize_with = "null_as_empty_profiles")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub profiles: Vec<DockProfile>,
     pub active_profile: Option<String>,
     pub pin_order: Option<Vec<String>>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub user_pinned_apps: Vec<String>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub user_unpinned_apps: Vec<String>,
     /// reference persistent tray pins (`PinnedTrayIcons`) map onto this historic port field.
     #[serde(
         alias = "PinnedTrayIcons",
-        deserialize_with = "null_as_empty",
+        deserialize_with = "deserialize_null_default",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub user_pinned_background_apps: Vec<String>,
@@ -1001,7 +974,7 @@ pub struct DockSettings {
     pub menu_opacity: f64,
     pub widget_opacity: f64,
     pub settings_opacity: f64,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub installed_widgets: Vec<String>,
     pub content_alignment: DockContentAlignment,
     pub show_media: bool,
@@ -1019,12 +992,12 @@ pub struct DockSettings {
     pub target_display: Option<String>,
     pub secondary_apps: SecondaryAppScope,
     pub secondary_widgets: bool,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub widget_order: Vec<String>,
     pub theme_application_icons: bool,
-    #[serde(deserialize_with = "null_as_density_map")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub widget_density_overrides: BTreeMap<String, WidgetDensityMode>,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub dock_item_order: Vec<String>,
     #[serde(
         deserialize_with = "deserialize_ai_providers",
@@ -1049,9 +1022,9 @@ pub struct DockSettings {
     pub dock_height_percent: i32,
     pub wireless_battery_poll_seconds: i32,
     pub wireless_battery_low_threshold: i32,
-    #[serde(deserialize_with = "null_as_empty")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub ignored_wireless_devices: Vec<String>,
-    #[serde(deserialize_with = "null_as_alias_map")]
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub wireless_device_aliases: BTreeMap<String, String>,
     pub wireless_battery_listen_only: bool,
     pub weather_unit: TemperatureUnit,
@@ -1245,53 +1218,13 @@ impl Default for DockSettings {
     }
 }
 
-// ---- serde helpers: reference writes `null` for unset lists/maps and `Layout` as an enum string ----
-
-fn null_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-fn null_as_empty_groups<'de, D>(deserializer: D) -> Result<Vec<DockAppGroup>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<Vec<DockAppGroup>>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-fn null_as_empty_profiles<'de, D>(deserializer: D) -> Result<Vec<DockProfile>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<Vec<DockProfile>>::deserialize(deserializer)?.unwrap_or_default())
-}
+// ---- serde helpers: reference writes `null` for unset values and `Layout` as an enum string ----
 
 fn null_as_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: Deserializer<'de>,
 {
     Ok(Option::<i32>::deserialize(deserializer)?.unwrap_or(6))
-}
-
-fn null_as_density_map<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<String, WidgetDensityMode>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(
-        Option::<BTreeMap<String, WidgetDensityMode>>::deserialize(deserializer)?
-            .unwrap_or_default(),
-    )
-}
-
-fn null_as_alias_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<BTreeMap<String, String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn deserialize_layout_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -1444,39 +1377,27 @@ fn sanitize_ai_provider_flags(map: &mut Map<String, Value>) {
     }
 }
 
+fn resolve_hotkey_binding(custom: Option<&str>, choice: HotkeyChoice) -> Option<HotkeyBinding> {
+    if custom.is_some_and(is_disabled_hotkey) {
+        return None;
+    }
+    custom
+        .filter(|text| !text.trim().is_empty())
+        .and_then(crate::hotkey::parse)
+        .or_else(|| HotkeyBinding::from_choice(choice))
+}
+
 impl DockSettings {
     /// Effective launcher hotkey: custom text wins over the persisted enum choice.
     /// `"Disabled"`, `"Backspace"`, `"Esc"` and `"Escape"` are explicit opt-outs and never
     /// fall back to the legacy binding (WIP behavior).
     pub fn launcher_binding(&self) -> Option<crate::hotkey::HotkeyBinding> {
-        if self
-            .custom_launcher_hotkey
-            .as_deref()
-            .is_some_and(is_disabled_hotkey)
-        {
-            return None;
-        }
-        self.custom_launcher_hotkey
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-            .and_then(crate::hotkey::parse)
-            .or_else(|| HotkeyBinding::from_choice(self.launcher_hotkey))
+        resolve_hotkey_binding(self.custom_launcher_hotkey.as_deref(), self.launcher_hotkey)
     }
 
     /// Effective dock hotkey: custom text wins over the persisted enum choice.
     pub fn dock_binding(&self) -> Option<crate::hotkey::HotkeyBinding> {
-        if self
-            .custom_dock_hotkey
-            .as_deref()
-            .is_some_and(is_disabled_hotkey)
-        {
-            return None;
-        }
-        self.custom_dock_hotkey
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-            .and_then(crate::hotkey::parse)
-            .or_else(|| HotkeyBinding::from_choice(self.dock_hotkey))
+        resolve_hotkey_binding(self.custom_dock_hotkey.as_deref(), self.dock_hotkey)
     }
 
     /// Effective island background colour (`DynamicIslandBackgroundColor`). The typed field
@@ -1999,6 +1920,63 @@ fn is_retired_list_widget(id: &str) -> bool {
     is_retired_widget(id) || is_retired_ai_provider_widget(id)
 }
 
+fn is_retired_dock_item(id: &str) -> bool {
+    is_retired_ai_provider_widget(id)
+        || RETIRED_WIDGET_IDS
+            .iter()
+            .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
+}
+
+fn strip_retired_json_arrays(obj: &mut Map<String, Value>) {
+    for key in [
+        "Widgets",
+        "EnabledWidgets",
+        "InstalledWidgets",
+        "WidgetOrder",
+    ] {
+        if let Some(value) = obj.get_mut(key) {
+            map_string_array(value, |id| {
+                if is_retired_list_widget(id) {
+                    Vec::new()
+                } else {
+                    vec![id.to_owned()]
+                }
+            });
+        }
+    }
+    if let Some(value) = obj.get_mut("DockItemOrder") {
+        map_string_array(value, |id| {
+            if is_retired_dock_item(id) {
+                Vec::new()
+            } else {
+                vec![id.to_owned()]
+            }
+        });
+    }
+}
+
+fn expand_ai_usage_json_arrays(obj: &mut Map<String, Value>, enabled: &[String], all: &[String]) {
+    for key in ["Widgets", "EnabledWidgets"] {
+        if let Some(value) = obj.get_mut(key) {
+            map_string_array(value, |id| ai_replacement(id, enabled));
+        }
+    }
+    for key in ["InstalledWidgets", "WidgetOrder"] {
+        if let Some(value) = obj.get_mut(key) {
+            map_string_array(value, |id| ai_replacement(id, all));
+        }
+    }
+    if let Some(value) = obj.get_mut("DockItemOrder") {
+        map_string_array(value, |id| {
+            if id.eq_ignore_ascii_case("widget:AiUsage") {
+                all.iter().map(|w| format!("widget:{w}")).collect()
+            } else {
+                vec![id.to_owned()]
+            }
+        });
+    }
+}
+
 fn migrate_widget_lists(map: &mut Map<String, Value>) {
     // Remember what the legacy widget meant before removing it (reference mirrors these into buttons).
     let mentioned = |id: &str| {
@@ -2012,95 +1990,32 @@ fn migrate_widget_lists(map: &mut Map<String, Value>) {
         .iter()
         .any(|key| array_mentions(map.get(*key), id))
     };
-    let mentioned_search = mentioned("Search");
-    let mentioned_desktops = mentioned("Desktops");
-    let mentioned_tray = mentioned("Tray");
-    let enabled_search = array_mentions(map.get("Widgets"), "Search")
-        || array_mentions(map.get("EnabledWidgets"), "Search");
-    let enabled_desktops = array_mentions(map.get("Widgets"), "Desktops")
-        || array_mentions(map.get("EnabledWidgets"), "Desktops");
-    let enabled_tray = array_mentions(map.get("Widgets"), "Tray")
-        || array_mentions(map.get("EnabledWidgets"), "Tray");
+    let legacy_buttons = [
+        ("Search", "ShowSearchButton"),
+        ("Desktops", "ShowTaskViewButton"),
+        ("Tray", "ShowTrayButton"),
+    ]
+    .map(|(widget, key)| {
+        let seen = mentioned(widget);
+        let enabled = array_mentions(map.get("Widgets"), widget)
+            || array_mentions(map.get("EnabledWidgets"), widget);
+        (key, seen, enabled)
+    });
 
-    for key in [
-        "Widgets",
-        "EnabledWidgets",
-        "InstalledWidgets",
-        "WidgetOrder",
-    ] {
-        if let Some(value) = map.get_mut(key) {
-            map_string_array(value, |id| {
-                if is_retired_list_widget(id) {
-                    Vec::new()
-                } else {
-                    vec![id.to_owned()]
-                }
-            });
-        }
-    }
-    if let Some(value) = map.get_mut("DockItemOrder") {
-        map_string_array(value, |id| {
-            if is_retired_ai_provider_widget(id)
-                || RETIRED_WIDGET_IDS
-                    .iter()
-                    .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
-            {
-                Vec::new()
-            } else {
-                vec![id.to_owned()]
-            }
-        });
-    }
+    strip_retired_json_arrays(map);
     if let Some(value) = map.get_mut("WidgetDensityOverrides") {
         filter_object_keys(value, |key| !is_retired_list_widget(key));
     }
     if let Some(profiles) = map.get_mut("Profiles").and_then(Value::as_array_mut) {
-        for profile in profiles.iter_mut() {
-            if let Some(p) = profile.as_object_mut() {
-                for key in [
-                    "Widgets",
-                    "EnabledWidgets",
-                    "InstalledWidgets",
-                    "WidgetOrder",
-                ] {
-                    if let Some(value) = p.get_mut(key) {
-                        map_string_array(value, |id| {
-                            if is_retired_list_widget(id) {
-                                Vec::new()
-                            } else {
-                                vec![id.to_owned()]
-                            }
-                        });
-                    }
-                }
-                if let Some(value) = p.get_mut("DockItemOrder") {
-                    map_string_array(value, |id| {
-                        if is_retired_ai_provider_widget(id)
-                            || RETIRED_WIDGET_IDS
-                                .iter()
-                                .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
-                        {
-                            Vec::new()
-                        } else {
-                            vec![id.to_owned()]
-                        }
-                    });
-                }
-            }
+        for profile in profiles.iter_mut().filter_map(Value::as_object_mut) {
+            strip_retired_json_arrays(profile);
         }
     }
 
-    if mentioned_search {
-        map.insert("ShowSearchButton".to_owned(), Value::Bool(enabled_search));
-    }
-    if mentioned_desktops {
-        map.insert(
-            "ShowTaskViewButton".to_owned(),
-            Value::Bool(enabled_desktops),
-        );
-    }
-    if mentioned_tray {
-        map.insert("ShowTrayButton".to_owned(), Value::Bool(enabled_tray));
+    for (key, seen, enabled) in legacy_buttons {
+        if seen {
+            map.insert(key.to_owned(), Value::Bool(enabled));
+        }
     }
 }
 
@@ -2130,25 +2045,7 @@ fn migrate_ai_usage(map: &mut Map<String, Value>) {
         .map(|(_, id)| (*id).to_owned())
         .collect();
 
-    for key in ["Widgets", "EnabledWidgets"] {
-        if let Some(value) = map.get_mut(key) {
-            map_string_array(value, |id| ai_replacement(id, &enabled));
-        }
-    }
-    for key in ["InstalledWidgets", "WidgetOrder"] {
-        if let Some(value) = map.get_mut(key) {
-            map_string_array(value, |id| ai_replacement(id, &all));
-        }
-    }
-    if let Some(value) = map.get_mut("DockItemOrder") {
-        map_string_array(value, |id| {
-            if id.eq_ignore_ascii_case("widget:AiUsage") {
-                all.iter().map(|id| format!("widget:{id}")).collect()
-            } else {
-                vec![id.to_owned()]
-            }
-        });
-    }
+    expand_ai_usage_json_arrays(map, &enabled, &all);
     if let Some(densities) = map
         .get_mut("WidgetDensityOverrides")
         .and_then(Value::as_object_mut)
@@ -2159,28 +2056,8 @@ fn migrate_ai_usage(map: &mut Map<String, Value>) {
         }
     }
     if let Some(profiles) = map.get_mut("Profiles").and_then(Value::as_array_mut) {
-        for profile in profiles.iter_mut() {
-            if let Some(p) = profile.as_object_mut() {
-                for key in ["Widgets", "EnabledWidgets"] {
-                    if let Some(value) = p.get_mut(key) {
-                        map_string_array(value, |id| ai_replacement(id, &enabled));
-                    }
-                }
-                for key in ["InstalledWidgets", "WidgetOrder"] {
-                    if let Some(value) = p.get_mut(key) {
-                        map_string_array(value, |id| ai_replacement(id, &all));
-                    }
-                }
-                if let Some(value) = p.get_mut("DockItemOrder") {
-                    map_string_array(value, |id| {
-                        if id.eq_ignore_ascii_case("widget:AiUsage") {
-                            all.iter().map(|id| format!("widget:{id}")).collect()
-                        } else {
-                            vec![id.to_owned()]
-                        }
-                    });
-                }
-            }
+        for profile in profiles.iter_mut().filter_map(Value::as_object_mut) {
+            expand_ai_usage_json_arrays(profile, &enabled, &all);
         }
     }
     if mentioned {
@@ -2315,17 +2192,22 @@ fn replace_ai_usage_in(list: &mut Vec<String>, replacement: &[String]) {
     *list = next;
 }
 
-/// Canonicalizes saved widget IDs and drops case-insensitive duplicates, matching the reference /// `Distinct(StringComparer.OrdinalIgnoreCase)` on widget lists.
-fn normalize_widget_ids(list: &mut Vec<String>) {
+fn normalize_dedup(list: &mut Vec<String>, canonicalize: fn(&str) -> String) {
     let mut seen = BTreeSet::new();
     let mut next = Vec::with_capacity(list.len());
-    for id in list.drain(..) {
-        let canonical = canonical_widget_setting_id(&id);
+    for item in list.drain(..) {
+        let canonical = canonicalize(&item);
         if seen.insert(ordinal_ignore_case_key(&canonical)) {
             next.push(canonical);
         }
     }
     *list = next;
+}
+
+/// Canonicalizes saved widget IDs and drops case-insensitive duplicates, matching the reference
+/// `Distinct(StringComparer.OrdinalIgnoreCase)` on widget lists.
+fn normalize_widget_ids(list: &mut Vec<String>) {
+    normalize_dedup(list, canonical_widget_setting_id);
 }
 
 /// Repairs `enabled ⊆ installed` by deriving installed from enabled, mirroring reference
@@ -2344,43 +2226,32 @@ fn repair_widget_lists(enabled: &mut Vec<String>, installed: &mut Vec<String>) {
 /// Same as `normalize_widget_ids` for free-form order lists: `widget:clock` and
 /// `Widget:Clock` both become `widget:Clock`, with no case-insensitive duplicates.
 fn normalize_widget_tokens(list: &mut Vec<String>) {
-    let mut seen = BTreeSet::new();
-    let mut next = Vec::with_capacity(list.len());
-    for item in list.drain(..) {
-        let canonical = canonicalize_widget_token(&item);
-        if seen.insert(ordinal_ignore_case_key(&canonical)) {
-            next.push(canonical);
-        }
-    }
-    *list = next;
+    normalize_dedup(list, canonicalize_widget_token);
 }
 
-fn canonicalize_density_map(map: &mut BTreeMap<String, WidgetDensityMode>) {
-    let mut previous: Vec<_> = std::mem::take(map).into_iter().collect();
-    // Apply canonical keys first so a freshly inserted alias key (e.g. `"stats"` written on top
-    // of a loaded `"SystemStats"` entry) overwrites the stale value deterministically.
+/// Applies canonical keys first so a freshly inserted alias key (e.g. `"stats"` written on top
+/// of a loaded `"SystemStats"` entry) overwrites the stale value deterministically.
+fn sorted_canonical_entries<V>(entries: impl IntoIterator<Item = (String, V)>) -> Vec<(String, V)> {
+    let mut previous: Vec<_> = entries.into_iter().collect();
     previous.sort_by(|a, b| {
         let a_canon = canonical_widget_setting_id(&a.0) == a.0;
         let b_canon = canonical_widget_setting_id(&b.0) == b.0;
         b_canon.cmp(&a_canon).then_with(|| a.0.cmp(&b.0))
     });
-    for (key, value) in previous {
-        let canonical = canonical_widget_setting_id(&key);
+    previous
+        .into_iter()
+        .map(|(key, value)| (canonical_widget_setting_id(&key), value))
+        .collect()
+}
+
+fn canonicalize_density_map(map: &mut BTreeMap<String, WidgetDensityMode>) {
+    for (canonical, value) in sorted_canonical_entries(std::mem::take(map)) {
         map.insert(canonical, value);
     }
 }
 
 fn canonicalize_placements(map: &mut HashMap<String, String>) {
-    let mut previous: Vec<_> = std::mem::take(map).into_iter().collect();
-    // Apply canonical keys first so a freshly inserted alias key (e.g. `"stats"` written on top
-    // of a loaded `"SystemStats"` entry) updates the placement cleanly without losing entries.
-    previous.sort_by(|a, b| {
-        let a_canon = canonical_widget_setting_id(&a.0) == a.0;
-        let b_canon = canonical_widget_setting_id(&b.0) == b.0;
-        b_canon.cmp(&a_canon).then_with(|| a.0.cmp(&b.0))
-    });
-    for (key, value) in previous {
-        let canonical = canonical_widget_setting_id(&key);
+    for (canonical, value) in sorted_canonical_entries(std::mem::take(map)) {
         map.insert(canonical, value);
     }
 }
@@ -2393,6 +2264,40 @@ fn canonicalize_island_orders(map: &mut HashMap<String, Vec<String>>) {
         normalize_widget_ids(&mut ids);
         map.entry(monitor).or_insert(ids);
     }
+}
+
+fn strip_retired_lists(
+    enabled: &mut Vec<String>,
+    installed: &mut Vec<String>,
+    widget_order: &mut Vec<String>,
+    dock_item_order: &mut Vec<String>,
+) {
+    enabled.retain(|id| !is_retired_list_widget(id));
+    installed.retain(|id| !is_retired_list_widget(id));
+    widget_order.retain(|id| !is_retired_list_widget(id));
+    dock_item_order.retain(|id| !is_retired_dock_item(id));
+}
+
+fn expand_ai_usage_lists(
+    enabled_list: &mut Vec<String>,
+    installed: &mut Vec<String>,
+    widget_order: &mut Vec<String>,
+    dock_item_order: &mut Vec<String>,
+    enabled: &[String],
+    all_ids: &[String],
+) {
+    replace_ai_usage_in(enabled_list, enabled);
+    replace_ai_usage_in(installed, all_ids);
+    replace_ai_usage_in(widget_order, all_ids);
+    let mut next = Vec::with_capacity(dock_item_order.len());
+    for id in dock_item_order.iter() {
+        if id.eq_ignore_ascii_case("widget:AiUsage") {
+            next.extend(all_ids.iter().map(|w| format!("widget:{w}")));
+        } else {
+            next.push(id.clone());
+        }
+    }
+    *dock_item_order = next;
 }
 
 impl DockSettings {
@@ -2423,80 +2328,51 @@ impl DockSettings {
 
     /// Re-applies the legacy migrations to already-deserialized settings (no raw JSON needed).
     pub fn migrate_legacy(&mut self) {
-        let mentioned_search = self
-            .enabled_widgets
-            .iter()
-            .chain(self.installed_widgets.iter())
-            .chain(self.widget_order.iter())
-            .chain(self.dock_item_order.iter())
-            .any(|id| id.eq_ignore_ascii_case("Search"));
-        let mentioned_desktops = self
-            .enabled_widgets
-            .iter()
-            .chain(self.installed_widgets.iter())
-            .chain(self.widget_order.iter())
-            .chain(self.dock_item_order.iter())
-            .any(|id| id.eq_ignore_ascii_case("Desktops"));
-        let mentioned_tray = self
-            .enabled_widgets
-            .iter()
-            .chain(self.installed_widgets.iter())
-            .chain(self.widget_order.iter())
-            .chain(self.dock_item_order.iter())
-            .any(|id| id.eq_ignore_ascii_case("Tray"));
-        let enabled_search = self
-            .enabled_widgets
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case("Search"));
-        let enabled_desktops = self
-            .enabled_widgets
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case("Desktops"));
-        let enabled_tray = self
-            .enabled_widgets
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case("Tray"));
+        let mentioned = |needle: &str| {
+            self.enabled_widgets
+                .iter()
+                .chain(self.installed_widgets.iter())
+                .chain(self.widget_order.iter())
+                .chain(self.dock_item_order.iter())
+                .any(|id| id.eq_ignore_ascii_case(needle))
+        };
+        let enabled_in = |needle: &str| {
+            self.enabled_widgets
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(needle))
+        };
+        let legacy = [
+            (mentioned("Search"), enabled_in("Search")),
+            (mentioned("Desktops"), enabled_in("Desktops")),
+            (mentioned("Tray"), enabled_in("Tray")),
+        ];
 
-        self.enabled_widgets
-            .retain(|id| !is_retired_list_widget(id));
-        self.installed_widgets
-            .retain(|id| !is_retired_list_widget(id));
-        self.widget_order.retain(|id| !is_retired_list_widget(id));
-        self.dock_item_order.retain(|id| {
-            !is_retired_ai_provider_widget(id)
-                && !RETIRED_WIDGET_IDS
-                    .iter()
-                    .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
-        });
+        strip_retired_lists(
+            &mut self.enabled_widgets,
+            &mut self.installed_widgets,
+            &mut self.widget_order,
+            &mut self.dock_item_order,
+        );
         self.widget_density_overrides
             .retain(|id, _| !is_retired_list_widget(id));
         for profile in &mut self.profiles {
-            profile
-                .enabled_widgets
-                .retain(|id| !is_retired_list_widget(id));
-            profile
-                .installed_widgets
-                .retain(|id| !is_retired_list_widget(id));
-            profile
-                .widget_order
-                .retain(|id| !is_retired_list_widget(id));
-            profile.dock_item_order.retain(|id| {
-                !is_retired_ai_provider_widget(id)
-                    && !RETIRED_WIDGET_IDS
-                        .iter()
-                        .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
-            });
+            strip_retired_lists(
+                &mut profile.enabled_widgets,
+                &mut profile.installed_widgets,
+                &mut profile.widget_order,
+                &mut profile.dock_item_order,
+            );
         }
         // A retired provider flag must not survive into `validate()`.
         self.ai_usage_providers &= !ai_providers::RETIRED_BIT;
-        if mentioned_search {
-            self.show_search_button = enabled_search;
+        if legacy[0].0 {
+            self.show_search_button = legacy[0].1;
         }
-        if mentioned_desktops {
-            self.show_task_view_button = enabled_desktops;
+        if legacy[1].0 {
+            self.show_task_view_button = legacy[1].1;
         }
-        if mentioned_tray {
-            self.show_tray_button = enabled_tray;
+        if legacy[2].0 {
+            self.show_tray_button = legacy[2].1;
         }
 
         // AiUsage -> one widget per provider.
@@ -2521,36 +2397,28 @@ impl DockSettings {
                 .iter()
                 .map(|(_, id)| (*id).to_owned())
                 .collect();
-            replace_ai_usage_in(&mut self.enabled_widgets, &enabled);
-            replace_ai_usage_in(&mut self.installed_widgets, &all_ids);
-            replace_ai_usage_in(&mut self.widget_order, &all_ids);
-            let mut next = Vec::new();
-            for id in &self.dock_item_order {
-                if id.eq_ignore_ascii_case("widget:AiUsage") {
-                    next.extend(all_ids.iter().map(|id| format!("widget:{id}")));
-                } else {
-                    next.push(id.clone());
-                }
-            }
-            self.dock_item_order = next;
+            expand_ai_usage_lists(
+                &mut self.enabled_widgets,
+                &mut self.installed_widgets,
+                &mut self.widget_order,
+                &mut self.dock_item_order,
+                &enabled,
+                &all_ids,
+            );
             if let Some(density) = self.widget_density_overrides.remove("AiUsage") {
                 for (_, id) in ai_providers::WIDGETS {
                     self.widget_density_overrides.insert(id.to_owned(), density);
                 }
             }
             for profile in &mut self.profiles {
-                replace_ai_usage_in(&mut profile.enabled_widgets, &enabled);
-                replace_ai_usage_in(&mut profile.installed_widgets, &all_ids);
-                replace_ai_usage_in(&mut profile.widget_order, &all_ids);
-                let mut next = Vec::new();
-                for id in &profile.dock_item_order {
-                    if id.eq_ignore_ascii_case("widget:AiUsage") {
-                        next.extend(all_ids.iter().map(|id| format!("widget:{id}")));
-                    } else {
-                        next.push(id.clone());
-                    }
-                }
-                profile.dock_item_order = next;
+                expand_ai_usage_lists(
+                    &mut profile.enabled_widgets,
+                    &mut profile.installed_widgets,
+                    &mut profile.widget_order,
+                    &mut profile.dock_item_order,
+                    &enabled,
+                    &all_ids,
+                );
             }
             self.ai_usage_providers = 0;
         }
@@ -2704,41 +2572,68 @@ impl DockSettings {
         let mut errors: Vec<&'static str> = Vec::new();
         let turkish = self.language.trim().to_ascii_lowercase().starts_with("tr");
 
-        // Width / height / spacing ranges (reference sliders).
-        if !(100..=5000).contains(&self.dock_width_pixels) {
-            errors.push("DockWidthPixelsOutOfRange");
-        }
-        if !(10..=100).contains(&self.dock_width_percent) {
-            errors.push("DockWidthPercentOutOfRange");
-        }
-        if !(24..=400).contains(&self.dock_height_pixels) {
-            errors.push("DockHeightPixelsOutOfRange");
-        }
-        if !(2..=25).contains(&self.dock_height_percent) {
-            errors.push("DockHeightPercentOutOfRange");
-        }
-        if !(0..=200).contains(&self.dock_top_gap_pixels) {
-            errors.push("DockTopGapPixelsOutOfRange");
-        }
-        if !(0..=100).contains(&self.dock_top_gap_percent) {
-            errors.push("DockTopGapPercentOutOfRange");
-        }
-        if !(0..=200).contains(&self.dock_bottom_gap_pixels) {
-            errors.push("DockBottomGapPixelsOutOfRange");
-        }
-        if !(0..=100).contains(&self.dock_bottom_gap_percent) {
-            errors.push("DockBottomGapPercentOutOfRange");
-        }
-
-        // Focus timer ranges.
-        if !(1..=90).contains(&self.focus_minutes) {
-            errors.push("FocusMinutesOutOfRange");
-        }
-        if !(1..=30).contains(&self.focus_break_minutes) {
-            errors.push("FocusBreakMinutesOutOfRange");
-        }
-        if !(1..=8).contains(&self.focus_sessions) {
-            errors.push("FocusSessionsOutOfRange");
+        // Width / height / spacing & focus ranges (reference sliders).
+        for (value, lo, hi, code) in [
+            (
+                self.dock_width_pixels,
+                100,
+                5000,
+                "DockWidthPixelsOutOfRange",
+            ),
+            (
+                self.dock_width_percent,
+                10,
+                100,
+                "DockWidthPercentOutOfRange",
+            ),
+            (
+                self.dock_height_pixels,
+                24,
+                400,
+                "DockHeightPixelsOutOfRange",
+            ),
+            (
+                self.dock_height_percent,
+                2,
+                25,
+                "DockHeightPercentOutOfRange",
+            ),
+            (
+                self.dock_top_gap_pixels,
+                0,
+                200,
+                "DockTopGapPixelsOutOfRange",
+            ),
+            (
+                self.dock_top_gap_percent,
+                0,
+                100,
+                "DockTopGapPercentOutOfRange",
+            ),
+            (
+                self.dock_bottom_gap_pixels,
+                0,
+                200,
+                "DockBottomGapPixelsOutOfRange",
+            ),
+            (
+                self.dock_bottom_gap_percent,
+                0,
+                100,
+                "DockBottomGapPercentOutOfRange",
+            ),
+            (self.focus_minutes, 1, 90, "FocusMinutesOutOfRange"),
+            (
+                self.focus_break_minutes,
+                1,
+                30,
+                "FocusBreakMinutesOutOfRange",
+            ),
+            (self.focus_sessions, 1, 8, "FocusSessionsOutOfRange"),
+        ] {
+            if !(lo..=hi).contains(&value) {
+                errors.push(code);
+            }
         }
 
         // Surface opacity/border rules. The WIP port has typed fields; reference JSON values that were
@@ -2751,19 +2646,14 @@ impl DockSettings {
         if !is_finite(surface_opacity) || !(0.1..=1.0).contains(&surface_opacity) {
             errors.push("SurfaceOpacityOutOfRange");
         }
-        for (key, value) in [
-            ("DockOpacity", self.dock_opacity),
-            ("MenuOpacity", self.menu_opacity),
-            ("WidgetOpacity", self.widget_opacity),
-            ("SettingsOpacity", self.settings_opacity),
+        for (code, value) in [
+            ("DockOpacityOutOfRange", self.dock_opacity),
+            ("MenuOpacityOutOfRange", self.menu_opacity),
+            ("WidgetOpacityOutOfRange", self.widget_opacity),
+            ("SettingsOpacityOutOfRange", self.settings_opacity),
         ] {
             if !is_finite(value) || !(0.0..=1.0).contains(&value) {
-                match key {
-                    "DockOpacity" => errors.push("DockOpacityOutOfRange"),
-                    "MenuOpacity" => errors.push("MenuOpacityOutOfRange"),
-                    "WidgetOpacity" => errors.push("WidgetOpacityOutOfRange"),
-                    _ => errors.push("SettingsOpacityOutOfRange"),
-                }
+                errors.push(code);
             }
         }
         for (thickness, color) in [
@@ -3240,44 +3130,40 @@ pub fn load_from(path: &Path) -> DockSettings {
 /// produced by the port loses nothing when the reference build reads it. Profiles use `Widgets` as their
 /// only alias in `DockProfile`.
 fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings) {
-    root.insert("EnabledWidgets".to_owned(), json!(settings.enabled_widgets));
-    root.insert("Widgets".to_owned(), json!(settings.enabled_widgets));
-    root.insert(
-        "ShowClockWidget".to_owned(),
-        json!(settings.show_clock_widget),
-    );
-    root.insert("ShowClock".to_owned(), json!(settings.show_clock_widget));
-    root.insert(
-        "ShowSystemStatsWidget".to_owned(),
-        json!(settings.show_system_stats_widget),
-    );
-    root.insert(
-        "ShowSystemStats".to_owned(),
-        json!(settings.show_system_stats_widget),
-    );
-    root.insert("FullWidth".to_owned(), json!(settings.full_width));
-    root.insert(
-        "Layout".to_owned(),
-        json!(if settings.full_width {
-            "FullWidth"
-        } else {
-            "Floating"
-        }),
-    );
-    root.insert("FocusMode".to_owned(), json!(settings.focus_mode));
-    root.insert("FocusModeEnabled".to_owned(), json!(settings.focus_mode));
-    root.insert(
-        "UserPinnedBackgroundApps".to_owned(),
-        json!(settings.user_pinned_background_apps),
-    );
-    root.insert(
-        "PinnedTrayIcons".to_owned(),
-        json!(settings.user_pinned_background_apps),
-    );
-    root.insert(
-        "DynamicIslandEnabled".to_owned(),
-        json!(settings.dynamic_island_enable),
-    );
+    let layout = if settings.full_width {
+        "FullWidth"
+    } else {
+        "Floating"
+    };
+    for (key, val) in [
+        ("EnabledWidgets", json!(settings.enabled_widgets)),
+        ("Widgets", json!(settings.enabled_widgets)),
+        ("ShowClockWidget", json!(settings.show_clock_widget)),
+        ("ShowClock", json!(settings.show_clock_widget)),
+        (
+            "ShowSystemStatsWidget",
+            json!(settings.show_system_stats_widget),
+        ),
+        ("ShowSystemStats", json!(settings.show_system_stats_widget)),
+        ("FullWidth", json!(settings.full_width)),
+        ("Layout", json!(layout)),
+        ("FocusMode", json!(settings.focus_mode)),
+        ("FocusModeEnabled", json!(settings.focus_mode)),
+        (
+            "UserPinnedBackgroundApps",
+            json!(settings.user_pinned_background_apps),
+        ),
+        (
+            "PinnedTrayIcons",
+            json!(settings.user_pinned_background_apps),
+        ),
+        (
+            "DynamicIslandEnabled",
+            json!(settings.dynamic_island_enable),
+        ),
+    ] {
+        root.insert(key.to_owned(), val);
+    }
 
     if let Some(Value::Array(profiles)) = root.get_mut("Profiles") {
         for (entry, profile) in profiles.iter_mut().zip(settings.profiles.iter()) {
