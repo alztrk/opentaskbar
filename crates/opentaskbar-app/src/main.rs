@@ -38,6 +38,8 @@ mod dock;
 mod platform;
 #[cfg(windows)]
 mod ui;
+#[cfg(all(test, windows))]
+mod verification_suite;
 #[cfg(windows)]
 mod widgets;
 #[cfg(windows)]
@@ -118,18 +120,8 @@ fn apply_startup_context(
     settings: &opentaskbar_core::settings::DockSettings,
 ) -> design::windows_palette::PaletteListener {
     let _ = platform::theme_packs::install_bundled();
-    design::theme::ThemeManager::apply(settings.theme, Some(settings));
-    // Theme-pack token overrides saved by the in-app editor must reach the
-    // live palette before any window is created.
-    design::theme::apply_saved_token_overrides(settings);
-    let palette_listener = design::windows_palette::install_listener();
-    platform::icon_pack::set_active_pack(None);
-    if !settings.theme_pack.trim().is_empty() {
-        // Shared (uppercase) `Themes` root — same folder as the reference build.
-        let dir = opentaskbar_core::paths::theme_root().join(&settings.theme_pack);
-        platform::icon_pack::set_active_pack(Some(dir.as_path()));
-    }
-    palette_listener
+    crate::design::theme::sync_from_settings(settings);
+    design::windows_palette::install_listener()
 }
 
 fn main() {
