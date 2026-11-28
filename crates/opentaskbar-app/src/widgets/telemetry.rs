@@ -2859,6 +2859,88 @@ pub fn reverse_geocode(latitude: f64, longitude: f64, language: &str) -> Option<
     parse_reverse_geocode(&body, latitude, longitude)
 }
 
+/// Splits `"City, Country"` (or `"City, Region, Country"`) into `(city_query, country_hint)`
+/// because Open-Meteo's `/v1/search` returns empty results when a comma-qualified string is
+/// passed verbatim in `name=`.
+fn parse_weather_query(raw: &str) -> (&str, Option<&str>) {
+    let trimmed = raw.trim();
+    let Some((city, rest)) = trimmed.split_once(',') else {
+        return (trimmed, None);
+    };
+    let city = city.trim();
+    let country = rest
+        .rsplit(',')
+        .map(str::trim)
+        .find(|part| !part.is_empty());
+    if city.is_empty() {
+        (trimmed, None)
+    } else {
+        (city, country)
+    }
+}
+
+fn build_weather_geocode_path(raw_city: &str, lang_prefix: &str) -> (String, Option<String>) {
+    let (city_query, country_hint) = parse_weather_query(raw_city);
+    let iso_code = country_hint.and_then(|hint| {
+        crate::platform::country_city::country_code_for(hint)
+            .map(str::to_owned)
+            .or_else(|| {
+                (hint.len() == 2 && hint.chars().all(|c| c.is_ascii_alphabetic()))
+                    .then(|| hint.to_ascii_uppercase())
+            })
+    });
+    let count = if country_hint.is_some() && iso_code.is_none() {
+        10
+    } else {
+        1
+    };
+    let mut path = format!(
+        "/v1/search?count={count}&format=json&language={lang_prefix}&name={}",
+        urlencode_query(city_query)
+    );
+    if let Some(code) = iso_code {
+        path.push_str("&countryCode=");
+        path.push_str(&code);
+    }
+    (path, country_hint.map(str::to_owned))
+}
+
+fn select_geocode_result(
+    body: &str,
+    fallback_name: &str,
+    country_hint: Option<&str>,
+) -> Option<(String, f64, f64)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let results = v.get("results")?.as_array()?;
+    let chosen = country_hint
+        .and_then(|hint| {
+            let h = hint.trim().to_ascii_lowercase();
+            results.iter().find(|entry| {
+                entry
+                    .get("country_code")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(|cc| cc.eq_ignore_ascii_case(&h))
+                    || entry
+                        .get("country")
+                        .and_then(|s| s.as_str())
+                        .is_some_and(|c| c.to_ascii_lowercase().contains(&h))
+                    || entry
+                        .get("admin1")
+                        .and_then(|s| s.as_str())
+                        .is_some_and(|a| a.to_ascii_lowercase().contains(&h))
+            })
+        })
+        .or_else(|| results.first())?;
+    let name = chosen
+        .get("name")
+        .and_then(|s| s.as_str())
+        .unwrap_or(fallback_name)
+        .to_owned();
+    let lat = chosen.get("latitude")?.as_f64()?;
+    let lon = chosen.get("longitude")?.as_f64()?;
+    Some((name, lat, lon))
+}
+
 pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool) {
     let city = if city.trim().is_empty() {
         "Istanbul"
@@ -2909,23 +2991,11 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
     let _ = std::thread::Builder::new()
         .name("opentaskbar-weather".into())
         .spawn(move || {
-            let geo_path = format!(
-                "/v1/search?count=1&format=json&language={lang_prefix}&name={}",
-                urlencode_query(&city_owned)
-            );
+            let (geo_path, country_hint) = build_weather_geocode_path(&city_owned, &lang_prefix);
             let geo = winhttp_get("geocoding-api.open-meteo.com", &geo_path, &[])
                 .filter(|(st, _)| *st == 200)
-                .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(&body).ok())
-                .and_then(|v| {
-                    let first = v.get("results")?.as_array()?.first()?;
-                    let name = first
-                        .get("name")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or(&city_owned)
-                        .to_owned();
-                    let lat = first.get("latitude")?.as_f64()?;
-                    let lon = first.get("longitude")?.as_f64()?;
-                    Some((name, lat, lon))
+                .and_then(|(_, body)| {
+                    select_geocode_result(&body, &city_owned, country_hint.as_deref())
                 });
 
             let parsed = geo.and_then(|(place_name, lat, lon)| {
@@ -5452,6 +5522,51 @@ mod sweep_parity_tests {
         assert_eq!(weather_kind_from_wmo(61), WeatherKind::Rain);
         assert_eq!(weather_kind_from_wmo(73), WeatherKind::Snow);
         assert_eq!(weather_kind_from_wmo(95), WeatherKind::Storm);
+    }
+
+    #[test]
+    fn weather_geocode_strips_country_and_attaches_country_code() {
+        let (tr_path, tr_hint) = build_weather_geocode_path("İstanbul, Turkey", "tr");
+        assert!(tr_path.contains("name=%C4%B0stanbul"));
+        assert!(!tr_path.contains("Turkey"));
+        assert!(tr_path.ends_with("&countryCode=TR"));
+        assert_eq!(tr_hint.as_deref(), Some("Turkey"));
+
+        let (us_path, _) = build_weather_geocode_path("Paris, Texas, United States", "en");
+        assert!(us_path.contains("name=Paris"));
+        assert!(us_path.ends_with("&countryCode=US"));
+
+        let (iso_path, _) = build_weather_geocode_path("Vienna, AT", "de");
+        assert!(iso_path.contains("name=Vienna"));
+        assert!(iso_path.ends_with("&countryCode=AT"));
+
+        let (other_path, other_hint) = build_weather_geocode_path("Paris, Austria", "en");
+        assert!(other_path.contains("count=10"));
+        assert!(!other_path.contains("countryCode="));
+        assert_eq!(other_hint.as_deref(), Some("Austria"));
+
+        let (plain_path, plain_hint) = build_weather_geocode_path("Istanbul", "tr");
+        assert!(plain_path.contains("count=1"));
+        assert!(!plain_path.contains("countryCode="));
+        assert_eq!(plain_hint, None);
+    }
+
+    #[test]
+    fn weather_geocode_selection_prefers_matching_country_hint() {
+        let payload = r#"{"results":[
+            {"name":"Paris","latitude":48.85,"longitude":2.35,"country_code":"FR","country":"France"},
+            {"name":"Paris","latitude":33.66,"longitude":-95.55,"country_code":"US","country":"United States","admin1":"Texas"}
+        ]}"#;
+        let (name, lat, lon) =
+            select_geocode_result(payload, "Paris", Some("United States")).unwrap();
+        assert_eq!(name, "Paris");
+        assert!((lat - 33.66).abs() < 0.01);
+        assert!((lon - (-95.55)).abs() < 0.01);
+
+        let (fallback_name, fb_lat, _) =
+            select_geocode_result(payload, "Paris", Some("Unknown")).unwrap();
+        assert_eq!(fallback_name, "Paris");
+        assert!((fb_lat - 48.85).abs() < 0.01);
     }
 
     #[test]

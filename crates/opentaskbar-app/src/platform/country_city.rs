@@ -159,6 +159,11 @@ fn is_turkey(country: &str) -> bool {
     matches!(c.as_str(), "tr" | "tur" | "turkey" | "türkiye" | "turkiye")
 }
 
+/// Resolves a country name or ISO code from the built-in catalogue to its two-letter ISO code.
+pub fn country_code_for(country: &str) -> Option<&'static str> {
+    code_for(country)
+}
+
 fn code_for(country: &str) -> Option<&'static str> {
     let c = country.trim().to_ascii_lowercase();
     COUNTRIES
