@@ -3391,53 +3391,42 @@ impl DcompEngine {
                             }
                             let used_ratio = crate::widgets::chip_storage_ratio(letter);
                             let bar_col = match used_ratio {
-                                Some(r) if r >= 0.95 => pal.danger,
-                                Some(r) if r >= 0.85 => pal.warning,
+                                Some(r) if r >= 0.90 => pal.danger,
+                                Some(r) if r >= 0.75 => pal.warning,
                                 _ => pal.accent,
                             };
-                            draw_fluent_str_d2d(
-                                &self.dwrite_factory,
-                                dc,
-                                "\u{EDA2}",
+                            let percent_label = used_ratio.map_or_else(
+                                || "—".to_owned(),
+                                |r| crate::widgets::format_percent((r * 100.0).round() as u32),
+                            );
+                            draw_text(
+                                letter,
+                                &fmt_11_b_l,
                                 D2D_RECT_F {
                                     left: sx,
-                                    top: cy - 8.5,
-                                    right: sx + 14.0,
-                                    bottom: cy + 5.5,
-                                },
-                                12.5,
-                                if used_ratio.is_some_and(|r| r >= 0.85) {
-                                    bar_col
-                                } else {
-                                    pal.text_secondary
-                                },
-                                0.92,
-                            )?;
-                            let tx = sx + 16.0;
-                            let top_label = match used_ratio {
-                                Some(r) => format!(
-                                    "{letter} {}",
-                                    crate::widgets::format_percent((r * 100.0).round() as u32)
-                                ),
-                                None => letter.clone(),
-                            };
-                            draw_text(
-                                &top_label,
-                                &fmt_10_b_l,
-                                D2D_RECT_F {
-                                    left: tx,
                                     top: 3.0,
-                                    right: sx + seg_w,
-                                    bottom: 15.0,
+                                    right: sx + (seg_w * 0.55),
+                                    bottom: 16.0,
                                 },
                                 &p_brush,
+                            );
+                            draw_text(
+                                &percent_label,
+                                &fmt_11_b_r,
+                                D2D_RECT_F {
+                                    left: sx + (seg_w * 0.45),
+                                    top: 3.0,
+                                    right: sx + seg_w,
+                                    bottom: 16.0,
+                                },
+                                &s_brush,
                             );
                             draw_text(
                                 pair,
                                 &fmt_10_l,
                                 D2D_RECT_F {
-                                    left: tx,
-                                    top: 14.0,
+                                    left: sx,
+                                    top: 15.0,
                                     right: sx + seg_w,
                                     bottom: bar_y - 1.0,
                                 },
