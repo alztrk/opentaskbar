@@ -1705,6 +1705,46 @@ impl WidgetRuntime {
         let id = canonical.as_str();
         let title = widget_name(id);
         let has_full_flyout = widget_has_flyout(id);
+        fn row(l: impl Into<String>, v: impl Into<String>, r: Option<f32>) -> IslandDetailRow {
+            WidgetRuntime::island_detail_row(l, v, r)
+        }
+        fn act(
+            id: impl Into<String>,
+            label: impl Into<String>,
+            primary: bool,
+        ) -> IslandDetailAction {
+            WidgetRuntime::island_detail_action(id, label, primary)
+        }
+        let dash_or = |s: &str| {
+            if s.is_empty() {
+                "—".to_owned()
+            } else {
+                s.to_owned()
+            }
+        };
+        let run_label = |running: bool| {
+            loc::t(if running {
+                "WidgetDetailRunning"
+            } else {
+                "WidgetDetailPaused"
+            })
+        };
+        let vol_label = |vol: u32, muted: bool| {
+            if muted {
+                loc::t("AudioMuted")
+            } else {
+                format_percent(vol)
+            }
+        };
+        let make_spec = |headline, subtitle, rows, actions| IslandDetailSpec {
+            widget_id: canonical.clone(),
+            title: title.clone(),
+            headline,
+            subtitle,
+            rows,
+            actions,
+            has_full_flyout,
+        };
 
         if custom_widgets::is_custom(id) {
             let chip = custom_widgets::chip(id);
@@ -1719,28 +1759,21 @@ impl WidgetRuntime {
             let mut rows: Vec<IslandDetailRow> = details
                 .into_iter()
                 .take(4)
-                .map(|(k, v)| Self::island_detail_row(k, v, None))
+                .map(|(k, v)| row(k, v, None))
                 .collect();
             if rows.is_empty() {
-                rows.push(Self::island_detail_row(
+                rows.push(row(
                     loc::t("WidgetDetailStatus"),
                     headline.clone(),
                     chip.and_then(|c| c.ratio),
                 ));
             }
-            return IslandDetailSpec {
-                widget_id: canonical,
-                title,
+            return make_spec(
                 headline,
                 subtitle,
                 rows,
-                actions: vec![Self::island_detail_action(
-                    "refresh",
-                    loc::t("AiUsageRefresh"),
-                    false,
-                )],
-                has_full_flyout,
-            };
+                vec![act("refresh", loc::t("AiUsageRefresh"), false)],
+            );
         }
 
         if let Some(ai) = telemetry::ai_provider_meta(id) {
@@ -1757,19 +1790,17 @@ impl WidgetRuntime {
                 } else {
                     date
                 };
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: time,
-                    subtitle: info.full_date,
-                    rows: vec![
-                        Self::island_detail_row(loc::t("Today"), date_val, None),
-                        Self::island_detail_row(
+                make_spec(
+                    time,
+                    info.full_date,
+                    vec![
+                        row(loc::t("Today"), date_val, None),
+                        row(
                             loc::t("WidgetDetailDay"),
                             format!("{} · {}", info.tz_name, info.tz_label),
                             None,
                         ),
-                        Self::island_detail_row(
+                        row(
                             loc::t("DayProgressDay"),
                             format!(
                                 "{} · {}",
@@ -1779,13 +1810,8 @@ impl WidgetRuntime {
                             Some(day),
                         ),
                     ],
-                    actions: vec![Self::island_detail_action(
-                        "open_settings",
-                        loc::t("LauncherDateTime"),
-                        false,
-                    )],
-                    has_full_flyout,
-                }
+                    vec![act("open_settings", loc::t("LauncherDateTime"), false)],
+                )
             }
             "weather" => {
                 let snap = self
@@ -1805,23 +1831,20 @@ impl WidgetRuntime {
                 } else {
                     snap.condition.clone()
                 };
-                let unit = weather_unit(settings);
-                let wind = snap.formatted_wind(unit);
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: if snap.temp_c.is_empty() {
+                let wind = snap.formatted_wind(weather_unit(settings));
+                make_spec(
+                    if snap.temp_c.is_empty() {
                         "—".to_owned()
                     } else {
                         temp
                     },
-                    subtitle: if city.is_empty() {
+                    if city.is_empty() {
                         cond
                     } else {
                         format!("{city} · {cond}")
                     },
-                    rows: vec![
-                        Self::island_detail_row(
+                    vec![
+                        row(
                             loc::t("FeelsLikeLabel"),
                             if snap.feels_like.is_empty() {
                                 "—".to_owned()
@@ -1830,105 +1853,59 @@ impl WidgetRuntime {
                             },
                             None,
                         ),
-                        Self::island_detail_row(
-                            loc::t("WeatherHumidity"),
-                            if snap.humidity.is_empty() {
-                                "—".to_owned()
-                            } else {
-                                snap.humidity
-                            },
-                            None,
-                        ),
-                        Self::island_detail_row(
-                            loc::t("WeatherWind"),
-                            if wind.is_empty() {
-                                "—".to_owned()
-                            } else {
-                                wind
-                            },
-                            None,
-                        ),
-                        Self::island_detail_row(
-                            loc::t("WeatherToday"),
-                            if range.is_empty() {
-                                "—".to_owned()
-                            } else {
-                                range
-                            },
-                            None,
-                        ),
+                        row(loc::t("WeatherHumidity"), dash_or(&snap.humidity), None),
+                        row(loc::t("WeatherWind"), dash_or(&wind), None),
+                        row(loc::t("WeatherToday"), dash_or(&range), None),
                     ],
-                    actions: vec![Self::island_detail_action(
-                        "refresh",
-                        loc::t("AiUsageRefresh"),
-                        true,
-                    )],
-                    has_full_flyout,
-                }
+                    vec![act("refresh", loc::t("AiUsageRefresh"), true)],
+                )
             }
             "dayprogress" => {
                 let (day, week, year, left) = day_progress_metrics();
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: day_progress_percent_text(day),
-                    subtitle: loc::t_fmt("DayProgressRemaining", &[&left.to_string()]),
-                    rows: vec![
-                        Self::island_detail_row(
+                make_spec(
+                    day_progress_percent_text(day),
+                    loc::t_fmt("DayProgressRemaining", &[&left.to_string()]),
+                    vec![
+                        row(
                             loc::t("DayProgressDay"),
                             day_progress_percent_text(day),
                             Some(day),
                         ),
-                        Self::island_detail_row(
+                        row(
                             loc::t("DayProgressWeek"),
                             day_progress_percent_text(week),
                             Some(week),
                         ),
-                        Self::island_detail_row(
+                        row(
                             loc::t("DayProgressYear"),
                             day_progress_percent_text(year),
                             Some(year),
                         ),
                     ],
-                    actions: Vec::new(),
-                    has_full_flyout,
-                }
+                    Vec::new(),
+                )
             }
             "stopwatch" => {
-                let state = loc::t(if self.stopwatch_running {
-                    "WidgetDetailRunning"
-                } else {
-                    "WidgetDetailPaused"
-                });
-                let mut rows = vec![Self::island_detail_row(
-                    loc::t("WidgetDetailState"),
-                    state.clone(),
-                    None,
-                )];
+                let state = run_label(self.stopwatch_running);
+                let mut rows = vec![row(loc::t("WidgetDetailState"), state.clone(), None)];
                 if self.stopwatch_laps.is_empty() {
-                    rows.push(Self::island_detail_row(
-                        loc::t("StopwatchLap"),
-                        loc::t("StopwatchNoLaps"),
-                        None,
-                    ));
+                    rows.push(row(loc::t("StopwatchLap"), loc::t("StopwatchNoLaps"), None));
                 } else {
                     for (i, &(secs, cs)) in self.stopwatch_laps.iter().rev().take(3).enumerate() {
                         let num = self.stopwatch_laps.len() - i;
-                        rows.push(Self::island_detail_row(
+                        rows.push(row(
                             format!("{} #{num:02}", loc::t("StopwatchLap")),
                             format_mm_ss_cs(secs, cs),
                             None,
                         ));
                     }
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: format_mm_ss_cs(self.stopwatch_secs, self.stopwatch_cs),
-                    subtitle: state,
+                make_spec(
+                    format_mm_ss_cs(self.stopwatch_secs, self.stopwatch_cs),
+                    state,
                     rows,
-                    actions: vec![
-                        Self::island_detail_action(
+                    vec![
+                        act(
                             "toggle",
                             loc::t(if self.stopwatch_running {
                                 "TimedWidgetPause"
@@ -1937,11 +1914,10 @@ impl WidgetRuntime {
                             }),
                             true,
                         ),
-                        Self::island_detail_action("lap", loc::t("StopwatchLap"), false),
-                        Self::island_detail_action("reset", loc::t("Reset"), false),
+                        act("lap", loc::t("StopwatchLap"), false),
+                        act("reset", loc::t("Reset"), false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "countdown" => {
                 let ratio = if self.countdown_total_secs > 0 {
@@ -1950,18 +1926,12 @@ impl WidgetRuntime {
                 } else {
                     0.0
                 };
-                let state = loc::t(if self.countdown_running {
-                    "WidgetDetailRunning"
-                } else {
-                    "WidgetDetailPaused"
-                });
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: format_mm_secs(self.countdown_remaining_secs),
-                    subtitle: state.clone(),
-                    rows: vec![
-                        Self::island_detail_row(
+                let state = run_label(self.countdown_running);
+                make_spec(
+                    format_mm_secs(self.countdown_remaining_secs),
+                    state.clone(),
+                    vec![
+                        row(
                             loc::t("WidgetCountdown"),
                             format!(
                                 "{} / {}",
@@ -1970,10 +1940,10 @@ impl WidgetRuntime {
                             ),
                             Some(ratio),
                         ),
-                        Self::island_detail_row(loc::t("WidgetDetailState"), state, None),
+                        row(loc::t("WidgetDetailState"), state, None),
                     ],
-                    actions: vec![
-                        Self::island_detail_action(
+                    vec![
+                        act(
                             "toggle",
                             loc::t(if self.countdown_running {
                                 "TimedWidgetPause"
@@ -1982,41 +1952,33 @@ impl WidgetRuntime {
                             }),
                             true,
                         ),
-                        Self::island_detail_action("add_1m", "+1m", false),
-                        Self::island_detail_action("reset", loc::t("Reset"), false),
+                        act("add_1m", "+1m", false),
+                        act("reset", loc::t("Reset"), false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "focus" => {
                 self.focus.with_mut(|s| s.sync_from_settings(settings));
                 self.sync_focus_mirrors();
                 let snap = self.focus.snapshot();
-                let state = loc::t(if snap.running {
-                    "WidgetDetailRunning"
-                } else {
-                    "WidgetDetailPaused"
-                });
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: format_mm_secs(snap.remaining_secs),
-                    subtitle: snap.status_text(),
-                    rows: vec![
-                        Self::island_detail_row(
+                make_spec(
+                    format_mm_secs(snap.remaining_secs),
+                    snap.status_text(),
+                    vec![
+                        row(
                             snap.phase.label(),
                             format_mm_secs(snap.remaining_secs),
                             Some(snap.progress_ratio()),
                         ),
-                        Self::island_detail_row(
+                        row(
                             loc::t("FocusSessionsLabel"),
                             format!("{}/{}", snap.session_number, snap.sessions_target),
                             Some(snap.session_number as f32 / snap.sessions_target.max(1) as f32),
                         ),
-                        Self::island_detail_row(loc::t("WidgetDetailState"), state, None),
+                        row(loc::t("WidgetDetailState"), run_label(snap.running), None),
                     ],
-                    actions: vec![
-                        Self::island_detail_action(
+                    vec![
+                        act(
                             "toggle",
                             loc::t(if snap.running {
                                 "FocusPause"
@@ -2025,21 +1987,20 @@ impl WidgetRuntime {
                             }),
                             true,
                         ),
-                        Self::island_detail_action("skip", loc::t("FocusSkip"), false),
-                        Self::island_detail_action("reset", loc::t("FocusReset"), false),
+                        act("skip", loc::t("FocusSkip"), false),
+                        act("reset", loc::t("FocusReset"), false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "stats" => {
                 let (_, used_gib, total_gib) = telemetry::sample_ram_info();
                 let mut rows = vec![
-                    Self::island_detail_row(
+                    row(
                         loc::t("Cpu"),
                         format_percent(self.cpu_pct),
                         Some(self.cpu_pct as f32 / 100.0),
                     ),
-                    Self::island_detail_row(
+                    row(
                         loc::t("Memory"),
                         format!(
                             "{} ({used_gib:.1}/{total_gib:.0} GB)",
@@ -2049,35 +2010,32 @@ impl WidgetRuntime {
                     ),
                 ];
                 if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("Gpu"),
                         format_percent(self.gpu_pct),
                         Some(self.gpu_pct as f32 / 100.0),
                     ));
                 }
                 if let Some(c) = self.gpu_temp_c {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("GpuTemperature"),
                         telemetry::format_temperature(f64::from(c), weather_unit(settings)),
                         Some(c as f32 / 100.0),
                     ));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: format!(
+                make_spec(
+                    format!(
                         "CPU {} · RAM {}",
                         format_percent(self.cpu_pct),
                         format_percent(self.ram_pct)
                     ),
-                    subtitle: format!("{} · {}", loc::t("StatsUptime"), self.stats_uptime),
+                    format!("{} · {}", loc::t("StatsUptime"), self.stats_uptime),
                     rows,
-                    actions: vec![
-                        Self::island_detail_action("refresh", loc::t("AiUsageRefresh"), false),
-                        Self::island_detail_action("taskmgr", loc::t("TaskManager"), false),
+                    vec![
+                        act("refresh", loc::t("AiUsageRefresh"), false),
+                        act("taskmgr", loc::t("TaskManager"), false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "netspeed" => {
                 let running = matches!(
@@ -2086,31 +2044,29 @@ impl WidgetRuntime {
                 );
                 let down = telemetry::format_speed(self.net.rx_bps);
                 let up = telemetry::format_speed(self.net.tx_bps);
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: format!("↓ {down} · ↑ {up}"),
-                    subtitle: if self.net.adapter_name.is_empty() {
+                make_spec(
+                    format!("↓ {down} · ↑ {up}"),
+                    if self.net.adapter_name.is_empty() {
                         self.speedtest.state().label()
                     } else {
                         self.net.adapter_name.clone()
                     },
-                    rows: vec![
-                        Self::island_detail_row(loc::t("NetworkDownload"), down, None),
-                        Self::island_detail_row(loc::t("NetworkUpload"), up, None),
-                        Self::island_detail_row(
+                    vec![
+                        row(loc::t("NetworkDownload"), down, None),
+                        row(loc::t("NetworkUpload"), up, None),
+                        row(
                             loc::t("NetworkSessionReceived"),
                             telemetry::format_bytes(self.net.session_rx),
                             None,
                         ),
-                        Self::island_detail_row(
+                        row(
                             loc::t("NetworkSessionSent"),
                             telemetry::format_bytes(self.net.session_tx),
                             None,
                         ),
                     ],
-                    actions: vec![
-                        Self::island_detail_action(
+                    vec![
+                        act(
                             "speedtest",
                             loc::t(if running {
                                 "SpeedTestCancel"
@@ -2119,14 +2075,9 @@ impl WidgetRuntime {
                             }),
                             true,
                         ),
-                        Self::island_detail_action(
-                            "network_settings",
-                            loc::t("NetworkSettings"),
-                            false,
-                        ),
+                        act("network_settings", loc::t("NetworkSettings"), false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "battery" => {
                 let b = sample_battery();
@@ -2140,7 +2091,7 @@ impl WidgetRuntime {
                     loc::t("WidgetDetailOnBattery")
                 };
                 let mut rows = vec![
-                    Self::island_detail_row(
+                    row(
                         loc::t("WidgetDetailCharge"),
                         if b.has_battery {
                             format_percent(b.percent)
@@ -2149,35 +2100,28 @@ impl WidgetRuntime {
                         },
                         b.has_battery.then_some(b.percent as f32 / 100.0),
                     ),
-                    Self::island_detail_row(loc::t("WidgetDetailStatus"), status.clone(), None),
+                    row(loc::t("WidgetDetailStatus"), status.clone(), None),
                 ];
                 if let Some(secs) = b
                     .life_secs
                     .filter(|&s| b.has_battery && !b.on_ac && s >= 60)
                 {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("Battery"),
                         format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
                         None,
                     ));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: if b.has_battery {
+                make_spec(
+                    if b.has_battery {
                         format_percent(b.percent)
                     } else {
                         loc::t("BatteryUnavailable")
                     },
-                    subtitle: status,
+                    status,
                     rows,
-                    actions: vec![Self::island_detail_action(
-                        "power_settings",
-                        loc::t("BatterySaver"),
-                        false,
-                    )],
-                    has_full_flyout,
-                }
+                    vec![act("power_settings", loc::t("BatterySaver"), false)],
+                )
             }
             "bluetoothbattery" => {
                 let ignored = setting_string_list(settings, "IgnoredWirelessDevices");
@@ -2213,7 +2157,7 @@ impl WidgetRuntime {
                 let mut rows: Vec<IslandDetailRow> = devices
                     .iter()
                     .map(|d| {
-                        Self::island_detail_row(
+                        row(
                             d.name.clone(),
                             format_percent(d.percent),
                             Some(d.percent as f32 / 100.0),
@@ -2221,35 +2165,28 @@ impl WidgetRuntime {
                     })
                     .collect();
                 if rows.is_empty() {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("BluetoothDevices"),
                         loc::t("WirelessBatteryNoDevices"),
                         None,
                     ));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
+                make_spec(
                     headline,
-                    subtitle: loc::t_fmt(
+                    loc::t_fmt(
                         "WirelessBatterySubtitle",
                         &[&poll_secs.to_string(), &low.to_string()],
                     ),
                     rows,
-                    actions: vec![
-                        Self::island_detail_action(
-                            "refresh",
-                            loc::t("WirelessBatteryRefresh"),
-                            true,
-                        ),
-                        Self::island_detail_action(
+                    vec![
+                        act("refresh", loc::t("WirelessBatteryRefresh"), true),
+                        act(
                             "bluetooth_settings",
                             loc::t("QuickBluetoothSettings"),
                             false,
                         ),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "storage" => {
                 let drives = self.poll_snapshot.fixed_drives();
@@ -2262,7 +2199,7 @@ impl WidgetRuntime {
                     .take(4)
                     .map(|d| {
                         let used = (d.total_gb - d.free_gb).max(0.0);
-                        Self::island_detail_row(
+                        row(
                             format!("{}:", d.letter),
                             d.format_capacity_pair(),
                             Some((used / d.total_gb.max(1.0)) as f32),
@@ -2270,25 +2207,18 @@ impl WidgetRuntime {
                     })
                     .collect();
                 if rows.is_empty() {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("WidgetStorage"),
                         loc::t("StorageNoFixedDrives"),
                         None,
                     ));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
+                make_spec(
                     headline,
-                    subtitle: loc::t("WidgetStorage"),
+                    loc::t("WidgetStorage"),
                     rows,
-                    actions: vec![Self::island_detail_action(
-                        "explorer",
-                        loc::t("OpenFileExplorer"),
-                        false,
-                    )],
-                    has_full_flyout,
-                }
+                    vec![act("explorer", loc::t("OpenFileExplorer"), false)],
+                )
             }
             "media" => {
                 let snap = self.media_snapshot();
@@ -2305,74 +2235,57 @@ impl WidgetRuntime {
                 } else {
                     "—".to_owned()
                 };
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: if has_media {
+                make_spec(
+                    if has_media {
                         snap.title
                     } else {
                         loc::t("MediaNothingPlaying")
                     },
-                    subtitle: if has_media && !snap.artist.is_empty() {
+                    if has_media && !snap.artist.is_empty() {
                         snap.artist
                     } else {
                         loc::t("MediaStartPlaybackHint")
                     },
-                    rows: vec![
-                        Self::island_detail_row(loc::t("SeekLabel"), timeline_val, ratio),
-                        Self::island_detail_row(
+                    vec![
+                        row(loc::t("SeekLabel"), timeline_val, ratio),
+                        row(
                             loc::t("Volume"),
-                            if self.audio_muted {
-                                loc::t("AudioMuted")
-                            } else {
-                                format_percent(self.audio_vol)
-                            },
+                            vol_label(self.audio_vol, self.audio_muted),
                             Some(self.audio_vol as f32 / 100.0),
                         ),
                     ],
-                    actions: vec![
-                        Self::island_detail_action("prev", loc::t("MediaPrevious"), false),
-                        Self::island_detail_action("play_pause", loc::t("MediaPlayPause"), true),
-                        Self::island_detail_action("next", loc::t("MediaNext"), false),
+                    vec![
+                        act("prev", loc::t("MediaPrevious"), false),
+                        act("play_pause", loc::t("MediaPlayPause"), true),
+                        act("next", loc::t("MediaNext"), false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
             "audio" => {
                 let (cached_out_name, cached_mic) = self.cached_audio_detail();
                 let out_name = cached_out_name.unwrap_or_else(|| loc::t("Speakers"));
-                let vol_text = if self.audio_muted {
-                    loc::t("AudioMuted")
-                } else {
-                    format_percent(self.audio_vol)
-                };
+                let vol_text = vol_label(self.audio_vol, self.audio_muted);
                 let mut rows = vec![
-                    Self::island_detail_row(
+                    row(
                         loc::t("AudioOutput"),
                         vol_text.clone(),
                         Some(self.audio_vol as f32 / 100.0),
                     ),
-                    Self::island_detail_row(loc::t("WidgetDetailDevice"), out_name.clone(), None),
+                    row(loc::t("WidgetDetailDevice"), out_name.clone(), None),
                 ];
                 if let Some((in_vol, in_muted)) = cached_mic {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("AudioInput"),
-                        if in_muted {
-                            loc::t("AudioMuted")
-                        } else {
-                            format_percent(in_vol)
-                        },
+                        vol_label(in_vol, in_muted),
                         Some(in_vol as f32 / 100.0),
                     ));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: vol_text,
-                    subtitle: out_name,
+                make_spec(
+                    vol_text,
+                    out_name,
                     rows,
-                    actions: vec![
-                        Self::island_detail_action(
+                    vec![
+                        act(
                             "mute",
                             loc::t(if self.audio_muted {
                                 "AudioUnmute"
@@ -2381,33 +2294,30 @@ impl WidgetRuntime {
                             }),
                             true,
                         ),
-                        Self::island_detail_action("vol_down", "-5%", false),
-                        Self::island_detail_action("vol_up", "+5%", false),
+                        act("vol_down", "-5%", false),
+                        act("vol_up", "+5%", false),
                     ],
-                    has_full_flyout,
-                }
+                )
             }
-            "quicksettings" => IslandDetailSpec {
-                widget_id: canonical,
-                title: title.clone(),
-                headline: title,
-                subtitle: format!(
+            "quicksettings" => make_spec(
+                title.clone(),
+                format!(
                     "{}: {}",
                     loc::t("WiFi"),
                     radio_label(self.wifi_on, self.radio_loading)
                 ),
-                rows: vec![
-                    Self::island_detail_row(
+                vec![
+                    row(
                         loc::t("WiFi"),
                         radio_label(self.wifi_on, self.radio_loading),
                         None,
                     ),
-                    Self::island_detail_row(
+                    row(
                         loc::t("Bluetooth"),
                         radio_label(self.bluetooth_on, self.radio_loading),
                         None,
                     ),
-                    Self::island_detail_row(
+                    row(
                         loc::t("NightLight"),
                         loc::t(if self.night_light_on {
                             "QuickOn"
@@ -2416,27 +2326,18 @@ impl WidgetRuntime {
                         }),
                         None,
                     ),
-                    Self::island_detail_row(
+                    row(
                         loc::t("Volume"),
-                        if self.audio_muted {
-                            loc::t("AudioMuted")
-                        } else {
-                            format_percent(self.audio_vol)
-                        },
+                        vol_label(self.audio_vol, self.audio_muted),
                         Some(self.audio_vol as f32 / 100.0),
                     ),
                 ],
-                actions: vec![
-                    Self::island_detail_action("wifi", loc::t("WiFi"), self.wifi_on),
-                    Self::island_detail_action("bluetooth", loc::t("Bluetooth"), self.bluetooth_on),
-                    Self::island_detail_action(
-                        "nightlight",
-                        loc::t("NightLight"),
-                        self.night_light_on,
-                    ),
+                vec![
+                    act("wifi", loc::t("WiFi"), self.wifi_on),
+                    act("bluetooth", loc::t("Bluetooth"), self.bluetooth_on),
+                    act("nightlight", loc::t("NightLight"), self.night_light_on),
                 ],
-                has_full_flyout,
-            },
+            ),
             "keyboard" => {
                 let code = self.current_keyboard_code();
                 let layouts = self.cached_keyboard_layouts();
@@ -2447,28 +2348,17 @@ impl WidgetRuntime {
                 let mut rows: Vec<IslandDetailRow> = layouts
                     .iter()
                     .take(4)
-                    .map(|(_, c, d)| Self::island_detail_row(c.clone(), d.clone(), None))
+                    .map(|(_, c, d)| row(c.clone(), d.clone(), None))
                     .collect();
                 if rows.is_empty() {
-                    rows.push(Self::island_detail_row(
-                        code.clone(),
-                        active_name.clone(),
-                        None,
-                    ));
+                    rows.push(row(code.clone(), active_name.clone(), None));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: code,
-                    subtitle: active_name,
+                make_spec(
+                    code,
+                    active_name,
                     rows,
-                    actions: vec![Self::island_detail_action(
-                        "next_layout",
-                        loc::t("WidgetKeyboardLayout"),
-                        true,
-                    )],
-                    has_full_flyout,
-                }
+                    vec![act("next_layout", loc::t("WidgetKeyboardLayout"), true)],
+                )
             }
             "aiusage_all" => {
                 let guard_map = self
@@ -2481,25 +2371,23 @@ impl WidgetRuntime {
                 let mut rows = Vec::new();
                 for ai in telemetry::AI_PROVIDERS {
                     let snap = guard_map.get(ai.id).cloned().unwrap_or_default();
-                    let detected =
-                        snap.has_cred || snap.balance_text.is_some() || !snap.windows.is_empty();
-                    if detected {
+                    if snap.has_cred || snap.balance_text.is_some() || !snap.windows.is_empty() {
                         active += 1;
                     }
                     let ring = resolved_ai_usage_ring(settings, ai.id);
                     let ordered = order_ai_windows(&snap.windows, ring);
                     if let Some(w) = ordered.first() {
-                        rows.push(Self::island_detail_row(
+                        rows.push(row(
                             format!("{} ({})", ai.short, w.label),
                             format_percent((w.used * 100.0).round() as u32),
                             Some(w.used),
                         ));
                     } else if let Some(bal) = snap.balance_text {
-                        rows.push(Self::island_detail_row(ai.short, bal, snap.credit_ratio));
+                        rows.push(row(ai.short, bal, snap.credit_ratio));
                     }
                 }
                 if rows.is_empty() {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("WidgetCategoryAi"),
                         loc::t_fmt(
                             "AiUsageReadyCount",
@@ -2512,19 +2400,12 @@ impl WidgetRuntime {
                     ));
                 }
                 rows.truncate(4);
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: loc::t_fmt("AiUsageActiveCount", &[&active.to_string()]),
-                    subtitle: loc::t("AiUsageLiveUsageNote"),
+                make_spec(
+                    loc::t_fmt("AiUsageActiveCount", &[&active.to_string()]),
+                    loc::t("AiUsageLiveUsageNote"),
                     rows,
-                    actions: vec![Self::island_detail_action(
-                        "refresh",
-                        loc::t("AiUsageRefreshAll"),
-                        true,
-                    )],
-                    has_full_flyout,
-                }
+                    vec![act("refresh", loc::t("AiUsageRefreshAll"), true)],
+                )
             }
             "stacks" => {
                 let mut rows: Vec<IslandDetailRow> = settings
@@ -2536,28 +2417,22 @@ impl WidgetRuntime {
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or(path);
-                        Self::island_detail_row(loc::t("FolderLabel"), name, None)
+                        row(loc::t("FolderLabel"), name, None)
                     })
                     .collect();
                 if rows.is_empty() {
-                    rows.push(Self::island_detail_row(
+                    rows.push(row(
                         loc::t("FolderStacks"),
                         loc::t("WidgetStacksHint"),
                         None,
                     ));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: loc::t_fmt(
-                        "FolderCount",
-                        &[&settings.stack_folders.len().to_string()],
-                    ),
-                    subtitle: loc::t("FolderStacks"),
+                make_spec(
+                    loc::t_fmt("FolderCount", &[&settings.stack_folders.len().to_string()]),
+                    loc::t("FolderStacks"),
                     rows,
-                    actions: Vec::new(),
-                    has_full_flyout,
-                }
+                    Vec::new(),
+                )
             }
             "groups" => {
                 let mut rows: Vec<IslandDetailRow> = settings
@@ -2565,7 +2440,7 @@ impl WidgetRuntime {
                     .iter()
                     .take(4)
                     .map(|g| {
-                        Self::island_detail_row(
+                        row(
                             g.name.clone(),
                             loc::t_fmt(
                                 "AppGroupAppsCount",
@@ -2576,35 +2451,21 @@ impl WidgetRuntime {
                     })
                     .collect();
                 if rows.is_empty() {
-                    rows.push(Self::island_detail_row(
-                        loc::t("AppGroups"),
-                        loc::t("WidgetGroupsHint"),
-                        None,
-                    ));
+                    rows.push(row(loc::t("AppGroups"), loc::t("WidgetGroupsHint"), None));
                 }
-                IslandDetailSpec {
-                    widget_id: canonical,
-                    title,
-                    headline: loc::t_fmt("GroupCount", &[&settings.app_groups.len().to_string()]),
-                    subtitle: loc::t("AppGroups"),
+                make_spec(
+                    loc::t_fmt("GroupCount", &[&settings.app_groups.len().to_string()]),
+                    loc::t("AppGroups"),
                     rows,
-                    actions: Vec::new(),
-                    has_full_flyout,
-                }
+                    Vec::new(),
+                )
             }
-            _ => IslandDetailSpec {
-                widget_id: canonical,
-                title: title.clone(),
-                headline: title.clone(),
-                subtitle: loc::t("WidgetDetails"),
-                rows: vec![Self::island_detail_row(
-                    loc::t("WidgetDetailStatus"),
-                    title,
-                    None,
-                )],
-                actions: Vec::new(),
-                has_full_flyout,
-            },
+            _ => make_spec(
+                title.clone(),
+                loc::t("WidgetDetails"),
+                vec![row(loc::t("WidgetDetailStatus"), title.clone(), None)],
+                Vec::new(),
+            ),
         };
         spec.rows.truncate(4);
         spec.actions.truncate(3);
@@ -4040,64 +3901,55 @@ impl WidgetRuntime {
                 });
             }
         }
-        let devices = audio_output_devices();
-        let mut device_blocks: Vec<FlyoutBlock> = devices
-            .iter()
-            .enumerate()
-            .take(6)
-            .map(|(i, (_, name))| FlyoutBlock::BadgeRow {
-                id: 200 + i as u32,
-                code: "\u{E7F5}".to_owned(), // Headphone glyph (reference AudioWidget device selector)
-                title: name.clone(),
-                active: name.eq_ignore_ascii_case(&out_name),
-            })
-            .collect();
-        if !device_blocks.is_empty() {
-            device_blocks.insert(
-                0,
-                FlyoutBlock::StatRow {
-                    label: loc::t("AudioOutputDevices"),
-                    value: String::new(),
-                },
-            );
-            device_blocks.push(FlyoutBlock::Separator);
-        }
-        let input_devices = audio_input_devices();
-        let mut input_blocks: Vec<FlyoutBlock> = input_devices
-            .iter()
-            .enumerate()
-            .take(6)
-            .map(|(i, (_, name))| FlyoutBlock::BadgeRow {
-                id: 300 + i as u32,
-                code: "\u{E720}".to_owned(), // microphone glyph
-                title: name.clone(),
-                active: name.eq_ignore_ascii_case(&in_name),
-            })
-            .collect();
-        if !input_blocks.is_empty() {
-            input_blocks.insert(
-                0,
-                FlyoutBlock::StatRow {
-                    label: loc::t("AudioInputDevices"),
-                    value: String::new(),
-                },
-            );
-            input_blocks.push(FlyoutBlock::Separator);
-        }
-        device_blocks.extend(input_blocks);
+        let append_devices = |blocks: &mut Vec<FlyoutBlock>,
+                              devices: &[(String, String)],
+                              id_base: u32,
+                              glyph: &str,
+                              active_name: &str,
+                              heading_key: &str| {
+            if devices.is_empty() {
+                return;
+            }
+            blocks.push(FlyoutBlock::StatRow {
+                label: loc::t(heading_key),
+                value: String::new(),
+            });
+            blocks.extend(devices.iter().enumerate().take(6).map(|(i, (_, name))| {
+                FlyoutBlock::BadgeRow {
+                    id: id_base + i as u32,
+                    code: glyph.to_owned(),
+                    title: name.clone(),
+                    active: name.eq_ignore_ascii_case(active_name),
+                }
+            }));
+            blocks.push(FlyoutBlock::Separator);
+        };
+        append_devices(
+            &mut blocks,
+            &audio_output_devices(),
+            200,
+            "\u{E7F5}",
+            &out_name,
+            "AudioOutputDevices",
+        );
+        append_devices(
+            &mut blocks,
+            &audio_input_devices(),
+            300,
+            "\u{E720}",
+            &in_name,
+            "AudioInputDevices",
+        );
+        blocks.push(FlyoutBlock::ButtonBar(vec![(
+            5,
+            loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]),
+            false,
+        )]));
         FlyoutSpec {
             title: loc::t("WidgetAudio"),
             subtitle: None,
             width_dips: 314.0,
-            blocks: {
-                blocks.extend(device_blocks);
-                blocks.push(FlyoutBlock::ButtonBar(vec![(
-                    5,
-                    loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]),
-                    false,
-                )]));
-                blocks
-            },
+            blocks,
         }
     }
 
@@ -4418,6 +4270,29 @@ impl WidgetRuntime {
         }
         let border = BorderStyle::from_widget_settings(is_dark, settings);
         let options = flyout::FlyoutOptions::default().with_edge(edge);
+        let show_primary = |spec: FlyoutSpec| {
+            flyout::show_primary_with_options(
+                owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
+            )
+        };
+        macro_rules! show_live {
+            ($wid:expr, $init:expr, $handler:expr) => {
+                flyout::show_flyout_live_with_options(
+                    $wid, owner_hwnd, is_dark, anchor_x, anchor_y, $init, border, options, $handler,
+                )
+            };
+        }
+        let toggle_app_mute = |idx: usize| {
+            if let Some(session) = media_ext::list_app_sessions().get(idx) {
+                let _ = media_ext::set_app_mute(&session.session_id, !session.muted);
+            }
+        };
+        let set_app_vol = |idx: usize, ratio: f32| {
+            if let Some(session) = media_ext::list_app_sessions().get(idx) {
+                let _ =
+                    media_ext::set_app_volume(&session.session_id, (ratio * 100.0).round() as u32);
+            }
+        };
 
         if custom_widgets::is_custom(id) {
             let init = custom_widgets::flyout(id).unwrap_or_else(|| FlyoutSpec {
@@ -4426,25 +4301,14 @@ impl WidgetRuntime {
                 width_dips: 280.0,
                 blocks: vec![FlyoutBlock::Note(loc::t("AiUsageStatusLoading"))],
             });
-            flyout::show_flyout_live_with_options(
-                id,
-                owner_hwnd,
-                is_dark,
-                anchor_x,
-                anchor_y,
-                init.clone(),
-                border,
-                options,
-                |ev| match ev {
-                    LiveEvent::Click(action_id) => {
-                        custom_widgets::click_widget(id, action_id, settings);
-                        LiveOutcome::Close
-                    }
-                    _ => LiveOutcome::Update(
-                        custom_widgets::flyout(id).unwrap_or_else(|| init.clone()),
-                    ),
-                },
-            );
+            show_live!(id, init.clone(), |ev| match ev {
+                LiveEvent::Click(action_id) => {
+                    custom_widgets::click_widget(id, action_id, settings);
+                    LiveOutcome::Close
+                }
+                _ =>
+                    LiveOutcome::Update(custom_widgets::flyout(id).unwrap_or_else(|| init.clone()),),
+            });
             return false;
         }
 
@@ -4477,11 +4341,11 @@ impl WidgetRuntime {
                 } else {
                     blocks.push(FlyoutBlock::StatRow {
                         label: ai.name.to_owned(),
-                        value: if snap.has_cred {
-                            loc::t("AiUsageConfigured")
+                        value: loc::t(if snap.has_cred {
+                            "AiUsageConfigured"
                         } else {
-                            loc::t("AiUsageStatusSignIn")
-                        },
+                            "AiUsageStatusSignIn"
+                        }),
                     });
                 }
             }
@@ -4496,9 +4360,7 @@ impl WidgetRuntime {
                 width_dips: 316.0,
                 blocks,
             };
-            match flyout::show_primary_with_options(
-                owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-            ) {
+            match show_primary(spec) {
                 Some(1) => {
                     for ai in telemetry::AI_PROVIDERS {
                         telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
@@ -4528,9 +4390,7 @@ impl WidgetRuntime {
             }
             let detail = self.ai_flyout_detail(ai.id, &snap);
             let spec = ai_flyout::build_ai_flyout(ai.id, &snap, &detail, settings, is_dark);
-            match flyout::show_primary_with_options(
-                owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-            ) {
+            match show_primary(spec) {
                 Some(1) => pins::launch(ai.dashboard_url.to_owned()),
                 Some(2) => telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true),
                 Some(3) => self.refresh_ai_full(ai.id),
@@ -4542,34 +4402,24 @@ impl WidgetRuntime {
             // System stats flyout: uptime, memory, GPU, charts and top processes (union).
             "stats" => {
                 let init = self.build_stats_spec(settings, is_dark);
-                flyout::show_flyout_live_with_options(
-                    "stats",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            pins::launch("taskmgr.exe".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(2) => {
-                            pins::launch("perfmon.exe".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(3) => {
-                            (self.cpu_pct, self.ram_pct) = self.stats.sample();
-                            self.stats_uptime = telemetry::system_uptime_string();
-                            self.invalidate_top_processes();
-                            LiveOutcome::Update(self.build_stats_spec(settings, is_dark))
-                        }
-                        // WM_TIMER-driven LiveEvent::Update (WS-7) refreshes live values.
-                        _ => LiveOutcome::Update(self.live_spec("stats", settings, is_dark)),
-                    },
-                );
+                show_live!("stats", init, |ev| match ev {
+                    LiveEvent::Click(1) => {
+                        pins::launch("taskmgr.exe".to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(2) => {
+                        pins::launch("perfmon.exe".to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(3) => {
+                        (self.cpu_pct, self.ram_pct) = self.stats.sample();
+                        self.stats_uptime = telemetry::system_uptime_string();
+                        self.invalidate_top_processes();
+                        LiveOutcome::Update(self.build_stats_spec(settings, is_dark))
+                    }
+                    // WM_TIMER-driven LiveEvent::Update (WS-7) refreshes live values.
+                    _ => LiveOutcome::Update(self.live_spec("stats", settings, is_dark)),
+                });
             }
             // Exact `ClockWidget.BuildCalendar` (live interactive month/year nav & day selection)
             "clock" => {
@@ -4577,162 +4427,110 @@ impl WidgetRuntime {
                 let (mut shown_y, mut shown_m) = (info.year, info.month);
                 let mut selected: Option<(i32, u32, u32)> = None;
                 let init = Self::build_calendar_spec(shown_y, shown_m, selected);
-                flyout::show_flyout_live_with_options(
-                    "clock",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            shown_y = (shown_y - 1).max(1970);
-                            LiveOutcome::Update(Self::build_calendar_spec(
-                                shown_y, shown_m, selected,
-                            ))
-                        }
-                        LiveEvent::Click(2) => {
-                            if shown_m == 1 {
+                show_live!("clock", init, |ev| match ev {
+                    LiveEvent::Click(11) => {
+                        pins::launch("ms-settings:dateandtime".to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(btn @ (1..=5 | 10 | 100..=141)) => {
+                        match btn {
+                            1 => shown_y = (shown_y - 1).max(1970),
+                            2 if shown_m == 1 => {
                                 shown_m = 12;
                                 shown_y = (shown_y - 1).max(1970);
-                            } else {
-                                shown_m -= 1;
                             }
-                            LiveOutcome::Update(Self::build_calendar_spec(
-                                shown_y, shown_m, selected,
-                            ))
-                        }
-                        LiveEvent::Click(3) | LiveEvent::Click(10) => {
-                            let now = telemetry::local_clock_info();
-                            shown_y = now.year;
-                            shown_m = now.month;
-                            selected = Some((now.year, now.month, now.day));
-                            LiveOutcome::Update(Self::build_calendar_spec(
-                                shown_y, shown_m, selected,
-                            ))
-                        }
-                        LiveEvent::Click(4) => {
-                            if shown_m == 12 {
+                            2 => shown_m -= 1,
+                            3 | 10 => {
+                                let now = telemetry::local_clock_info();
+                                shown_y = now.year;
+                                shown_m = now.month;
+                                selected = Some((now.year, now.month, now.day));
+                            }
+                            4 if shown_m == 12 => {
                                 shown_m = 1;
                                 shown_y = (shown_y + 1).min(2100);
-                            } else {
-                                shown_m += 1;
                             }
-                            LiveOutcome::Update(Self::build_calendar_spec(
-                                shown_y, shown_m, selected,
-                            ))
+                            4 => shown_m += 1,
+                            5 => shown_y = (shown_y + 1).min(2100),
+                            cell_id => {
+                                let picked = Self::calendar_cell_date(
+                                    shown_y,
+                                    shown_m,
+                                    (cell_id - 100) as i32,
+                                    telemetry::first_day_of_week(),
+                                );
+                                selected = Some(picked);
+                                shown_y = picked.0;
+                                shown_m = picked.1;
+                            }
                         }
-                        LiveEvent::Click(5) => {
-                            shown_y = (shown_y + 1).min(2100);
-                            LiveOutcome::Update(Self::build_calendar_spec(
-                                shown_y, shown_m, selected,
-                            ))
-                        }
-                        LiveEvent::Click(11) => {
-                            pins::launch("ms-settings:dateandtime".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(cell_id) if (100..142).contains(&cell_id) => {
-                            let cell = (cell_id - 100) as i32;
-                            let first_day = telemetry::first_day_of_week();
-                            let picked =
-                                Self::calendar_cell_date(shown_y, shown_m, cell, first_day);
-                            selected = Some(picked);
-                            shown_y = picked.0;
-                            shown_m = picked.1;
-                            LiveOutcome::Update(Self::build_calendar_spec(
-                                shown_y, shown_m, selected,
-                            ))
-                        }
-                        // Live tick: keep the clock/time header current.
-                        _ => LiveOutcome::Update(self.live_spec("clock", settings, is_dark)),
-                    },
-                );
+                        LiveOutcome::Update(Self::build_calendar_spec(shown_y, shown_m, selected))
+                    }
+                    // Live tick: keep the clock/time header current.
+                    _ => LiveOutcome::Update(self.live_spec("clock", settings, is_dark)),
+                });
             }
             // Exact `AudioWidget.PopulateFlyout` (live interactive Output + Input mixer!)
             "audio" => {
                 let init = self.build_audio_mixer_spec();
-                flyout::show_flyout_live_with_options(
-                    "audio",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            toggle_audio_mute();
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
+                show_live!("audio", init, |ev| match ev {
+                    LiveEvent::Click(1) => {
+                        toggle_audio_mute();
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    LiveEvent::Slider { id: 2, ratio } => {
+                        set_audio_volume((ratio * 100.0).round() as u32);
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    LiveEvent::Click(3) => {
+                        telemetry::toggle_mic_mute();
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    LiveEvent::Slider { id: 4, ratio } => {
+                        telemetry::set_mic_volume((ratio * 100.0).round() as u32);
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    LiveEvent::Click(5) => {
+                        pins::launch("ms-settings:sound".to_owned());
+                        LiveOutcome::Close
+                    }
+                    // Per-app mixers from WS-G diagnostics (ids 100..199).
+                    LiveEvent::Click(id) if (100..200).contains(&id) && id % 2 == 0 => {
+                        toggle_app_mute(((id - 100) / 2) as usize);
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    LiveEvent::Slider { id, ratio } if (101..200).contains(&id) && id % 2 == 1 => {
+                        set_app_vol(((id - 101) / 2) as usize, ratio);
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    // C4 `platform::core_audio::set_default_device` — output (200..=205) & input (300..=305).
+                    LiveEvent::Click(id @ (200..=205 | 300..=305)) => {
+                        let (devices, base) = if id < 300 {
+                            (audio_output_devices(), 200)
+                        } else {
+                            (audio_input_devices(), 300)
+                        };
+                        if let Some((device_id, _)) = devices.get((id - base) as usize) {
+                            crate::platform::core_audio::set_default_device(device_id);
                         }
-                        LiveEvent::Slider { id: 2, ratio } => {
-                            set_audio_volume((ratio * 100.0).round() as u32);
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        LiveEvent::Click(3) => {
-                            telemetry::toggle_mic_mute();
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        LiveEvent::Slider { id: 4, ratio } => {
-                            telemetry::set_mic_volume((ratio * 100.0).round() as u32);
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        LiveEvent::Click(5) => {
-                            pins::launch("ms-settings:sound".to_owned());
-                            LiveOutcome::Close
-                        }
-                        // Per-app mixers from WS-G diagnostics (ids 100..199).
-                        LiveEvent::Click(id) if (100..200).contains(&id) && id % 2 == 0 => {
-                            let sessions = media_ext::list_app_sessions();
-                            if let Some(session) = sessions.get(((id - 100) / 2) as usize) {
-                                let _ =
-                                    media_ext::set_app_mute(&session.session_id, !session.muted);
-                            }
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        LiveEvent::Slider { id, ratio }
-                            if (101..200).contains(&id) && id % 2 == 1 =>
-                        {
-                            let sessions = media_ext::list_app_sessions();
-                            if let Some(session) = sessions.get(((id - 101) / 2) as usize) {
-                                let _ = media_ext::set_app_volume(
-                                    &session.session_id,
-                                    (ratio * 100.0).round() as u32,
-                                );
-                            }
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        // C4 `platform::core_audio::set_default_device` — output selector (ids 200..=205).
-                        LiveEvent::Click(id @ 200..=205) => {
-                            if let Some((device_id, _)) =
-                                audio_output_devices().get((id - 200) as usize)
-                            {
-                                crate::platform::core_audio::set_default_device(device_id);
-                            }
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        // Input device selector (300..=305).
-                        LiveEvent::Click(id @ 300..=305) => {
-                            if let Some((device_id, _)) =
-                                audio_input_devices().get((id - 300) as usize)
-                            {
-                                crate::platform::core_audio::set_default_device(device_id);
-                            }
-                            LiveOutcome::Update(self.build_audio_mixer_spec())
-                        }
-                        _ => LiveOutcome::Close,
-                    },
-                );
+                        LiveOutcome::Update(self.build_audio_mixer_spec())
+                    }
+                    _ => LiveOutcome::Close,
+                });
                 (self.audio_vol, self.audio_muted) = get_audio_state();
             }
             // Exact `WeatherWidget.BuildFlyoutContent`
             "weather" => {
                 let snap = self.weather.lock().map(|g| g.clone()).unwrap_or_default();
+                let dash_or = |s: &str| {
+                    if s.is_empty() {
+                        "—".to_owned()
+                    } else {
+                        s.to_owned()
+                    }
+                };
                 let city = if snap.city.is_empty() {
                     settings.weather_city.clone()
                 } else {
@@ -4740,38 +4538,8 @@ impl WidgetRuntime {
                 };
                 // Chip, flyout and tooltip all use the same effective unit / formatting.
                 let (temp, feels, today_range) = weather_display(&snap, settings);
-                let temp = if snap.temp_c.is_empty() {
-                    "—".to_owned()
-                } else {
-                    temp
-                };
-                let feels = if snap.feels_like.is_empty() {
-                    "—".to_owned()
-                } else {
-                    feels
-                };
                 let unit = weather_unit(settings);
                 let wind = snap.formatted_wind(unit);
-                let wind = if wind.is_empty() {
-                    "—".to_owned()
-                } else {
-                    wind
-                };
-                let hum = if snap.humidity.is_empty() {
-                    "—".to_owned()
-                } else {
-                    snap.humidity.clone()
-                };
-                let cond = if snap.condition.is_empty() {
-                    loc::t("WidgetWeather")
-                } else {
-                    snap.condition.clone()
-                };
-                let today_val = if today_range.is_empty() {
-                    "—".to_owned()
-                } else {
-                    today_range
-                };
                 let mut blocks = vec![
                     FlyoutBlock::HeroHeader {
                         glyph: weather_icon_glyph(&snap.condition),
@@ -4781,15 +4549,30 @@ impl WidgetRuntime {
                         } else {
                             city.clone()
                         },
-                        subtitle: Some(cond),
-                        right_value: Some(temp),
+                        subtitle: Some(if snap.condition.is_empty() {
+                            loc::t("WidgetWeather")
+                        } else {
+                            snap.condition.clone()
+                        }),
+                        right_value: Some(if snap.temp_c.is_empty() {
+                            "—".to_owned()
+                        } else {
+                            temp
+                        }),
                     },
                     // Balanced 2×2 metric grid (Feels Like, Humidity, Wind, Today Hi/Lo).
                     FlyoutBlock::MetricTiles(vec![
-                        (loc::t("FeelsLikeLabel"), feels),
-                        (loc::t("WeatherHumidity"), hum),
-                        (loc::t("WeatherWind"), wind),
-                        (loc::t("WeatherToday"), today_val),
+                        (
+                            loc::t("FeelsLikeLabel"),
+                            if snap.feels_like.is_empty() {
+                                "—".to_owned()
+                            } else {
+                                feels
+                            },
+                        ),
+                        (loc::t("WeatherHumidity"), dash_or(&snap.humidity)),
+                        (loc::t("WeatherWind"), dash_or(&wind)),
+                        (loc::t("WeatherToday"), dash_or(&today_range)),
                     ]),
                     FlyoutBlock::StatRow {
                         label: loc::t("WeatherSource"),
@@ -4836,10 +4619,7 @@ impl WidgetRuntime {
                     width_dips: 312.0,
                     blocks,
                 };
-                if flyout::show_primary_with_options(
-                    owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-                ) == Some(1)
-                {
+                if show_primary(spec) == Some(1) {
                     telemetry::refresh_weather(&self.weather, &settings.weather_city, true);
                     self.weather_retry_at =
                         Some(Instant::now() + std::time::Duration::from_secs(30 * 60));
@@ -4890,49 +4670,32 @@ impl WidgetRuntime {
                     spec
                 };
                 let init = build(self);
-                flyout::show_flyout_live_with_options(
-                    "netspeed",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            self.speedtest.start();
-                            self.speedtest_started_at = Some(Instant::now());
-                            self.poll_speedtest(Instant::now());
-                            LiveOutcome::Update(build(self))
+                show_live!("netspeed", init, |ev| match ev {
+                    LiveEvent::Click(btn @ (1 | 3 | 4)) => {
+                        match btn {
+                            1 => self.speedtest.start(),
+                            3 => self.speedtest.retry(),
+                            _ => self.speedtest.restart(),
                         }
-                        LiveEvent::Click(2) => {
-                            self.speedtest.cancel();
-                            self.speedtest_started_at = None;
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(3) => {
-                            self.speedtest.retry();
-                            self.speedtest_started_at = Some(Instant::now());
-                            self.poll_speedtest(Instant::now());
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(4) => {
-                            self.speedtest.restart();
-                            self.speedtest_started_at = Some(Instant::now());
-                            self.poll_speedtest(Instant::now());
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(5) => {
-                            pins::launch("ms-settings:network".to_owned());
-                            LiveOutcome::Close
-                        }
-                        _ => {
-                            self.poll_speedtest(Instant::now());
-                            LiveOutcome::Update(build(self))
-                        }
-                    },
-                );
+                        let now = Instant::now();
+                        self.speedtest_started_at = Some(now);
+                        self.poll_speedtest(now);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(2) => {
+                        self.speedtest.cancel();
+                        self.speedtest_started_at = None;
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(5) => {
+                        pins::launch("ms-settings:network".to_owned());
+                        LiveOutcome::Close
+                    }
+                    _ => {
+                        self.poll_speedtest(Instant::now());
+                        LiveOutcome::Update(build(self))
+                    }
+                });
             }
             // `BluetoothBatteryWidget.PopulateHoverFlyoutPanel` + device management.
             "bluetoothbattery" => {
@@ -4967,6 +4730,12 @@ impl WidgetRuntime {
                                 .map(str::to_owned)
                         })
                         .unwrap_or_else(|| name.to_owned())
+                };
+                let prefill_for = |cfg: &DockSettings, idx: usize| -> String {
+                    visible(cfg)
+                        .get(idx)
+                        .map(|d| alias_for(cfg, &d.name))
+                        .unwrap_or_default()
                 };
                 let build = |cfg: &DockSettings,
                              selected: usize,
@@ -5043,11 +4812,11 @@ impl WidgetRuntime {
                     blocks.push(FlyoutBlock::ToggleGrid(vec![(
                         7,
                         loc::t("WirelessBatteryListenOnlyLabel"),
-                        if listen_only {
-                            loc::t("WirelessBatteryListenOnlyOn")
+                        loc::t(if listen_only {
+                            "WirelessBatteryListenOnlyOn"
                         } else {
-                            loc::t("WirelessBatteryListenOnlyOff")
-                        },
+                            "WirelessBatteryListenOnlyOff"
+                        }),
                         listen_only,
                     )]));
                     blocks.push(FlyoutBlock::ButtonBar(vec![
@@ -5073,218 +4842,175 @@ impl WidgetRuntime {
                         blocks,
                     }
                 };
-                let prefill = visible(settings)
-                    .first()
-                    .map(|d| alias_for(settings, &d.name))
-                    .unwrap_or_default();
-                let init = build(settings, 0, prefill, None);
-                flyout::show_flyout_live_with_options(
-                    "bluetoothbattery",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        // Device row selection: prefill the rename box from the selected device.
-                        LiveEvent::Click(id @ 100..=199) => {
-                            let idx = (id - 100) as usize;
-                            if let Some(d) = visible(settings).get(idx) {
-                                selected = idx;
-                                feedback = None;
-                                LiveOutcome::Update(build(
-                                    settings,
-                                    selected,
-                                    alias_for(settings, &d.name),
-                                    feedback.as_deref(),
-                                ))
-                            } else {
-                                LiveOutcome::Close
-                            }
-                        }
-                        LiveEvent::Click(1) => {
-                            // Listen-only devices are refreshed passively by the platform provider.
-                            self.refresh_bluetooth_devices(settings);
-                            feedback = Some(loc::t("WirelessBatteryRefresh"));
+                let init = build(settings, 0, prefill_for(settings, 0), None);
+                show_live!("bluetoothbattery", init, |ev| match ev {
+                    // Device row selection: prefill the rename box from the selected device.
+                    LiveEvent::Click(id @ 100..=199) => {
+                        let idx = (id - 100) as usize;
+                        if let Some(d) = visible(settings).get(idx) {
+                            selected = idx;
+                            feedback = None;
                             LiveOutcome::Update(build(
                                 settings,
                                 selected,
-                                visible(settings)
-                                    .get(selected)
-                                    .map(|d| alias_for(settings, &d.name))
-                                    .unwrap_or_default(),
+                                alias_for(settings, &d.name),
                                 feedback.as_deref(),
                             ))
-                        }
-                        LiveEvent::Click(2) => {
-                            // Hide the *selected* device (not simply the first one).
-                            if let Some(d) = visible(settings).get(selected) {
-                                let mut list =
-                                    setting_string_list(settings, "IgnoredWirelessDevices");
-                                if !list.iter().any(|n| n.eq_ignore_ascii_case(&d.name)) {
-                                    list.push(d.name.clone());
-                                    set_setting(
-                                        settings,
-                                        "IgnoredWirelessDevices",
-                                        serde_json::json!(list),
-                                    );
-                                    settings_changed = true;
-                                }
-                                selected = selected.saturating_sub(1);
-                            }
-                            let prefill = visible(settings)
-                                .get(selected)
-                                .map(|d| alias_for(settings, &d.name))
-                                .unwrap_or_default();
-                            LiveOutcome::Update(build(
-                                settings,
-                                selected,
-                                prefill,
-                                feedback.as_deref(),
-                            ))
-                        }
-                        LiveEvent::Click(3) => {
-                            set_setting(settings, "IgnoredWirelessDevices", serde_json::json!([]));
-                            settings_changed = true;
-                            selected = 0;
-                            let prefill = visible(settings)
-                                .first()
-                                .map(|d| alias_for(settings, &d.name))
-                                .unwrap_or_default();
-                            LiveOutcome::Update(build(settings, 0, prefill, feedback.as_deref()))
-                        }
-                        LiveEvent::Click(4) => {
-                            const STEPS: [i64; 5] = [15, 30, 60, 120, 300];
-                            let cur = setting_i64(settings, "WirelessBatteryPollSeconds", 60);
-                            let next = STEPS
-                                .iter()
-                                .find(|&&s| s > cur)
-                                .copied()
-                                .unwrap_or(STEPS[0]);
-                            set_setting(
-                                settings,
-                                "WirelessBatteryPollSeconds",
-                                serde_json::json!(next),
-                            );
-                            settings_changed = true;
-                            LiveOutcome::Update(build(
-                                settings,
-                                selected,
-                                visible(settings)
-                                    .get(selected)
-                                    .map(|d| alias_for(settings, &d.name))
-                                    .unwrap_or_default(),
-                                feedback.as_deref(),
-                            ))
-                        }
-                        LiveEvent::Click(5) => {
-                            // reference cycles 0 / 10 / 20 / 30 percent (0 disables the low alert).
-                            let cur = setting_i64(settings, "WirelessBatteryLowThreshold", 20);
-                            let next = bt_next_threshold(cur);
-                            set_setting(
-                                settings,
-                                "WirelessBatteryLowThreshold",
-                                serde_json::json!(next),
-                            );
-                            settings_changed = true;
-                            LiveOutcome::Update(build(
-                                settings,
-                                selected,
-                                visible(settings)
-                                    .get(selected)
-                                    .map(|d| alias_for(settings, &d.name))
-                                    .unwrap_or_default(),
-                                feedback.as_deref(),
-                            ))
-                        }
-                        LiveEvent::Click(6) => {
-                            let diag = self
-                                .bt_battery
-                                .lock()
-                                .map(|g| {
-                                    g.devices
-                                        .iter()
-                                        .map(|d| {
-                                            format!(
-                                                "{}|{}|{}%|{}|{}",
-                                                d.name,
-                                                d.id,
-                                                d.percent,
-                                                d.source_label,
-                                                if d.charging {
-                                                    "charging"
-                                                } else {
-                                                    "discharging"
-                                                }
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                })
-                                .unwrap_or_default();
-                            copy_to_clipboard(&diag);
-                            // Visible feedback instead of a silent clipboard write.
-                            feedback = Some(loc::t("WirelessBatteryDiagnosticsCopied"));
-                            LiveOutcome::Update(build(
-                                settings,
-                                selected,
-                                visible(settings)
-                                    .get(selected)
-                                    .map(|d| alias_for(settings, &d.name))
-                                    .unwrap_or_default(),
-                                feedback.as_deref(),
-                            ))
-                        }
-                        LiveEvent::Click(7) => {
-                            let next = !setting_bool(settings, "WirelessBatteryListenOnly", false);
-                            set_setting(
-                                settings,
-                                "WirelessBatteryListenOnly",
-                                serde_json::json!(next),
-                            );
-                            settings_changed = true;
-                            self.refresh_bluetooth_devices(settings);
-                            LiveOutcome::Update(build(
-                                settings,
-                                selected,
-                                visible(settings)
-                                    .get(selected)
-                                    .map(|d| alias_for(settings, &d.name))
-                                    .unwrap_or_default(),
-                                feedback.as_deref(),
-                            ))
-                        }
-                        LiveEvent::Click(8) => {
-                            pins::launch("ms-settings:bluetooth".to_owned());
+                        } else {
                             LiveOutcome::Close
                         }
-                        LiveEvent::TextCommit { id: 50, text } => {
-                            if (1..=64).contains(&text.len())
-                                && let Some(d) = visible(settings).get(selected)
-                            {
-                                let mut map = setting_value(settings, "WirelessDeviceAliases")
-                                    .and_then(|v| v.as_object().cloned())
-                                    .unwrap_or_default();
-                                map.insert(d.name.clone(), serde_json::json!(text));
+                    }
+                    LiveEvent::Click(1) => {
+                        // Listen-only devices are refreshed passively by the platform provider.
+                        self.refresh_bluetooth_devices(settings);
+                        feedback = Some(loc::t("WirelessBatteryRefresh"));
+                        LiveOutcome::Update(build(
+                            settings,
+                            selected,
+                            prefill_for(settings, selected),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(2) => {
+                        // Hide the *selected* device (not simply the first one).
+                        if let Some(d) = visible(settings).get(selected) {
+                            let mut list = setting_string_list(settings, "IgnoredWirelessDevices");
+                            if !list.iter().any(|n| n.eq_ignore_ascii_case(&d.name)) {
+                                list.push(d.name.clone());
                                 set_setting(
                                     settings,
-                                    "WirelessDeviceAliases",
-                                    serde_json::json!(map),
+                                    "IgnoredWirelessDevices",
+                                    serde_json::json!(list),
                                 );
                                 settings_changed = true;
                             }
-                            LiveOutcome::Update(build(
-                                settings,
-                                selected,
-                                text,
-                                feedback.as_deref(),
-                            ))
+                            selected = selected.saturating_sub(1);
                         }
-                        _ => LiveOutcome::Close,
-                    },
-                );
+                        LiveOutcome::Update(build(
+                            settings,
+                            selected,
+                            prefill_for(settings, selected),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(3) => {
+                        set_setting(settings, "IgnoredWirelessDevices", serde_json::json!([]));
+                        settings_changed = true;
+                        selected = 0;
+                        LiveOutcome::Update(build(
+                            settings,
+                            0,
+                            prefill_for(settings, 0),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(4) => {
+                        const STEPS: [i64; 5] = [15, 30, 60, 120, 300];
+                        let cur = setting_i64(settings, "WirelessBatteryPollSeconds", 60);
+                        let next = STEPS
+                            .iter()
+                            .find(|&&s| s > cur)
+                            .copied()
+                            .unwrap_or(STEPS[0]);
+                        set_setting(
+                            settings,
+                            "WirelessBatteryPollSeconds",
+                            serde_json::json!(next),
+                        );
+                        settings_changed = true;
+                        LiveOutcome::Update(build(
+                            settings,
+                            selected,
+                            prefill_for(settings, selected),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(5) => {
+                        // reference cycles 0 / 10 / 20 / 30 percent (0 disables the low alert).
+                        let cur = setting_i64(settings, "WirelessBatteryLowThreshold", 20);
+                        set_setting(
+                            settings,
+                            "WirelessBatteryLowThreshold",
+                            serde_json::json!(bt_next_threshold(cur)),
+                        );
+                        settings_changed = true;
+                        LiveOutcome::Update(build(
+                            settings,
+                            selected,
+                            prefill_for(settings, selected),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(6) => {
+                        let diag = self
+                            .bt_battery
+                            .lock()
+                            .map(|g| {
+                                g.devices
+                                    .iter()
+                                    .map(|d| {
+                                        format!(
+                                            "{}|{}|{}%|{}|{}",
+                                            d.name,
+                                            d.id,
+                                            d.percent,
+                                            d.source_label,
+                                            if d.charging {
+                                                "charging"
+                                            } else {
+                                                "discharging"
+                                            }
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        copy_to_clipboard(&diag);
+                        // Visible feedback instead of a silent clipboard write.
+                        feedback = Some(loc::t("WirelessBatteryDiagnosticsCopied"));
+                        LiveOutcome::Update(build(
+                            settings,
+                            selected,
+                            prefill_for(settings, selected),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(7) => {
+                        let next = !setting_bool(settings, "WirelessBatteryListenOnly", false);
+                        set_setting(
+                            settings,
+                            "WirelessBatteryListenOnly",
+                            serde_json::json!(next),
+                        );
+                        settings_changed = true;
+                        self.refresh_bluetooth_devices(settings);
+                        LiveOutcome::Update(build(
+                            settings,
+                            selected,
+                            prefill_for(settings, selected),
+                            feedback.as_deref(),
+                        ))
+                    }
+                    LiveEvent::Click(8) => {
+                        pins::launch("ms-settings:bluetooth".to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::TextCommit { id: 50, text } => {
+                        if (1..=64).contains(&text.len())
+                            && let Some(d) = visible(settings).get(selected)
+                        {
+                            let mut map = setting_value(settings, "WirelessDeviceAliases")
+                                .and_then(|v| v.as_object().cloned())
+                                .unwrap_or_default();
+                            map.insert(d.name.clone(), serde_json::json!(text));
+                            set_setting(settings, "WirelessDeviceAliases", serde_json::json!(map));
+                            settings_changed = true;
+                        }
+                        LiveOutcome::Update(build(settings, selected, text, feedback.as_deref()))
+                    }
+                    _ => LiveOutcome::Close,
+                });
                 // WS-1: no unconditional `true` — a hover-opened flyout must not
                 // trigger settings save + live reload on the hook-owning UI thread.
                 return Self::flyout_settings_changed("bluetoothbattery", settings_changed);
@@ -5311,7 +5037,7 @@ impl WidgetRuntime {
                 blocks.push(FlyoutBlock::Separator);
                 blocks.push(FlyoutBlock::ButtonBar(vec![(
                     1,
-                    loc::t("OpenFileExplorer").to_owned(),
+                    loc::t("OpenFileExplorer"),
                     false,
                 )]));
                 let spec = FlyoutSpec {
@@ -5320,10 +5046,7 @@ impl WidgetRuntime {
                     width_dips: 286.0,
                     blocks,
                 };
-                if flyout::show_primary_with_options(
-                    owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-                ) == Some(1)
-                {
+                if show_primary(spec) == Some(1) {
                     pins::launch("explorer.exe".to_owned());
                 }
             }
@@ -5352,9 +5075,8 @@ impl WidgetRuntime {
                     width_dips: 268.0,
                     blocks,
                 };
-                if let Some(act) = flyout::show_primary_with_options(
-                    owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-                ) && act >= 100
+                if let Some(act) = show_primary(spec)
+                    && act >= 100
                     && let Some((hkl, code, _)) = layouts.get((act - 100) as usize)
                 {
                     if let Some(target) = self.keyboard_target_hwnd {
@@ -5399,9 +5121,7 @@ impl WidgetRuntime {
                         },
                     ],
                 };
-                let _ = flyout::show_primary_with_options(
-                    owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-                );
+                let _ = show_primary(spec);
             }
             // `FocusWidget.BuildFocusFlyout` — Break phase + session number + pulse.
             "focus" => {
@@ -5411,126 +5131,96 @@ impl WidgetRuntime {
                     focus_break::build_focus_flyout(&runtime.focus.snapshot(), is_dark)
                 };
                 let init = build(self);
-                flyout::show_flyout_live_with_options(
-                    "focus",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            self.focus.with_mut(|s| s.toggle());
-                            self.sync_focus_mirrors();
-                            LiveOutcome::Update(build(self))
+                show_live!("focus", init, |ev| match ev {
+                    LiveEvent::Click(1) => {
+                        self.focus.with_mut(|s| s.toggle());
+                        self.sync_focus_mirrors();
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(2) => {
+                        self.focus.with_mut(|s| s.reset());
+                        self.sync_focus_mirrors();
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(4) => {
+                        let event = self.focus.with_mut(|s| {
+                            s.skip_phase();
+                            FocusEvent::PhaseEnded(s.phase)
+                        });
+                        if matches!(event, Some(FocusEvent::PhaseEnded(_))) {
+                            play_break_chime();
                         }
-                        LiveEvent::Click(2) => {
-                            self.focus.with_mut(|s| s.reset());
-                            self.sync_focus_mirrors();
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(4) => {
-                            let event = self.focus.with_mut(|s| {
-                                s.skip_phase();
-                                FocusEvent::PhaseEnded(s.phase)
-                            });
-                            if matches!(event, Some(FocusEvent::PhaseEnded(_))) {
-                                play_break_chime();
-                            }
-                            self.sync_focus_mirrors();
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(mins @ (15 | 25 | 50)) => {
-                            self.focus
-                                .with_mut(|s| s.set_focus_minutes(u64::from(mins)));
-                            self.sync_focus_mirrors();
-                            LiveOutcome::Update(build(self))
-                        }
-                        _ => LiveOutcome::Update(build(self)),
-                    },
-                );
+                        self.sync_focus_mirrors();
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(mins @ (15 | 25 | 50)) => {
+                        self.focus
+                            .with_mut(|s| s.set_focus_minutes(u64::from(mins)));
+                        self.sync_focus_mirrors();
+                        LiveOutcome::Update(build(self))
+                    }
+                    _ => LiveOutcome::Update(build(self)),
+                });
             }
             // Exact `TimedWidgetPanel.xaml` Stopwatch (live Lap / Start / Pause / Reset)
             "stopwatch" => {
                 let init = self.build_stopwatch_spec();
-                flyout::show_flyout_live_with_options(
-                    "stopwatch",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            self.stopwatch_running = !self.stopwatch_running;
-                            LiveOutcome::Update(self.build_stopwatch_spec())
-                        }
-                        LiveEvent::Click(2) => {
-                            self.stopwatch_running = false;
-                            self.stopwatch_secs = 0;
-                            self.stopwatch_cs = 0;
-                            self.stopwatch_debt_secs = 0.0;
-                            self.stopwatch_laps.clear();
-                            LiveOutcome::Update(self.build_stopwatch_spec())
-                        }
-                        LiveEvent::Click(3) => {
-                            self.stopwatch_laps
-                                .push((self.stopwatch_secs, self.stopwatch_cs));
-                            LiveOutcome::Update(self.build_stopwatch_spec())
-                        }
-                        _ => LiveOutcome::Update(self.live_spec("stopwatch", settings, is_dark)),
-                    },
-                );
+                show_live!("stopwatch", init, |ev| match ev {
+                    LiveEvent::Click(1) => {
+                        self.stopwatch_running = !self.stopwatch_running;
+                        LiveOutcome::Update(self.build_stopwatch_spec())
+                    }
+                    LiveEvent::Click(2) => {
+                        self.stopwatch_running = false;
+                        self.stopwatch_secs = 0;
+                        self.stopwatch_cs = 0;
+                        self.stopwatch_debt_secs = 0.0;
+                        self.stopwatch_laps.clear();
+                        LiveOutcome::Update(self.build_stopwatch_spec())
+                    }
+                    LiveEvent::Click(3) => {
+                        self.stopwatch_laps
+                            .push((self.stopwatch_secs, self.stopwatch_cs));
+                        LiveOutcome::Update(self.build_stopwatch_spec())
+                    }
+                    _ => LiveOutcome::Update(self.live_spec("stopwatch", settings, is_dark)),
+                });
             }
             // Exact `TimedWidgetPanel.xaml` Countdown (live 5/10/15/30 presets + Start/Pause/Reset)
             "countdown" => {
                 let init = self.build_countdown_spec();
-                flyout::show_flyout_live_with_options(
-                    "countdown",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            if self.countdown_remaining_secs == 0 {
-                                self.countdown_remaining_secs = self.countdown_total_secs;
-                            }
-                            self.countdown_running = !self.countdown_running;
-                            LiveOutcome::Update(self.build_countdown_spec())
-                        }
-                        LiveEvent::Click(2) => {
-                            self.countdown_running = false;
+                show_live!("countdown", init, |ev| match ev {
+                    LiveEvent::Click(1) => {
+                        if self.countdown_remaining_secs == 0 {
                             self.countdown_remaining_secs = self.countdown_total_secs;
-                            LiveOutcome::Update(self.build_countdown_spec())
                         }
-                        LiveEvent::Click(mins @ (5 | 10 | 15 | 30)) => {
-                            self.countdown_total_secs = u64::from(mins) * 60;
+                        self.countdown_running = !self.countdown_running;
+                        LiveOutcome::Update(self.build_countdown_spec())
+                    }
+                    LiveEvent::Click(2) => {
+                        self.countdown_running = false;
+                        self.countdown_remaining_secs = self.countdown_total_secs;
+                        LiveOutcome::Update(self.build_countdown_spec())
+                    }
+                    LiveEvent::Click(mins @ (5 | 10 | 15 | 30)) => {
+                        self.countdown_total_secs = u64::from(mins) * 60;
+                        self.countdown_remaining_secs = self.countdown_total_secs;
+                        self.countdown_running = false;
+                        LiveOutcome::Update(self.build_countdown_spec())
+                    }
+                    // C2 TextCommit — custom duration with 1-1440 minute validation.
+                    LiveEvent::TextCommit { id: 50, text } => {
+                        if let Ok(mins) = text.trim().parse::<u64>()
+                            && (1..=1440).contains(&mins)
+                        {
+                            self.countdown_total_secs = mins * 60;
                             self.countdown_remaining_secs = self.countdown_total_secs;
                             self.countdown_running = false;
-                            LiveOutcome::Update(self.build_countdown_spec())
                         }
-                        // C2 TextCommit — custom duration with 1-1440 minute validation.
-                        LiveEvent::TextCommit { id: 50, text } => {
-                            if let Ok(mins) = text.trim().parse::<u64>()
-                                && (1..=1440).contains(&mins)
-                            {
-                                self.countdown_total_secs = mins * 60;
-                                self.countdown_remaining_secs = self.countdown_total_secs;
-                                self.countdown_running = false;
-                            }
-                            LiveOutcome::Update(self.build_countdown_spec())
-                        }
-                        _ => LiveOutcome::Update(self.live_spec("countdown", settings, is_dark)),
-                    },
-                );
+                        LiveOutcome::Update(self.build_countdown_spec())
+                    }
+                    _ => LiveOutcome::Update(self.live_spec("countdown", settings, is_dark)),
+                });
             }
             // `MediaWidget` live flyout: seek anchor + per-app mixer (WS-E).
             "media" => {
@@ -5550,116 +5240,78 @@ impl WidgetRuntime {
                     spec
                 };
                 let init = build(self);
-                flyout::show_flyout_live_with_options(
-                    "media",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
+                show_live!("media", init, |ev| match ev {
+                    LiveEvent::Click(btn @ 1..=3) => {
+                        let vk = match btn {
+                            1 => VK_MEDIA_PREV_TRACK,
+                            2 => VK_MEDIA_PLAY_PAUSE,
+                            _ => VK_MEDIA_NEXT_TRACK,
+                        };
+                        telemetry::send_media_vk(vk);
+                        telemetry::refresh_media_session(&self.media_session, true);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(4) => {
+                        pins::launch("ms-settings:sound".to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(60) => {
+                        toggle_audio_mute();
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(build(self))
+                    }
+                    // C2 LiveEvent::Seek — C4 `telemetry::media_seek(secs)`.
+                    LiveEvent::Seek { id: 50, ratio } => {
+                        let dur = self
+                            .media_session
+                            .lock()
+                            .ok()
+                            .map_or(0, |g| g.duration_secs);
+                        let target = media_ext::seek_position(ratio, dur);
+                        if telemetry::media_seek(target) {
+                            // Anchor locally at once; a stale SMTC echo of the old position
+                            // must not rewind the slider until the provider catches up.
+                            let now = self.now_secs();
+                            confirm_seek(&mut self.media_timeline, target as f64, now);
                         }
-                        LiveEvent::Click(2) => {
-                            telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(3) => {
-                            telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(4) => {
-                            pins::launch("ms-settings:sound".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(60) => {
-                            toggle_audio_mute();
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build(self))
-                        }
-                        // C2 LiveEvent::Seek — C4 `telemetry::media_seek(secs)`.
-                        LiveEvent::Seek { id: 50, ratio } => {
-                            let dur = self
-                                .media_session
-                                .lock()
-                                .ok()
-                                .map_or(0, |g| g.duration_secs);
-                            let target = media_ext::seek_position(ratio, dur);
-                            if telemetry::media_seek(target) {
-                                // Anchor locally at once; a stale SMTC echo of the old position
-                                // must not rewind the slider until the provider catches up.
-                                let now = self.now_secs();
-                                confirm_seek(&mut self.media_timeline, target as f64, now);
-                            }
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Slider { id: 51, ratio } => {
-                            set_audio_volume((ratio * 100.0).round() as u32);
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build(self))
-                        }
-                        // Per-app mixer rows (ids 120..=131) from `media_ext::list_app_sessions`.
-                        LiveEvent::Click(id) if (120..132).contains(&id) && id % 2 == 0 => {
-                            let sessions = media_ext::list_app_sessions();
-                            if let Some(session) = sessions.get(((id - 120) / 2) as usize) {
-                                media_ext::set_app_mute(&session.session_id, !session.muted);
-                            }
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Slider { id, ratio }
-                            if (121..132).contains(&id) && id % 2 == 1 =>
-                        {
-                            let sessions = media_ext::list_app_sessions();
-                            if let Some(session) = sessions.get(((id - 121) / 2) as usize) {
-                                media_ext::set_app_volume(
-                                    &session.session_id,
-                                    (ratio * 100.0).round() as u32,
-                                );
-                            }
-                            LiveOutcome::Update(build(self))
-                        }
-                        _ => LiveOutcome::Close,
-                    },
-                );
+                        telemetry::refresh_media_session(&self.media_session, true);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Slider { id: 51, ratio } => {
+                        set_audio_volume((ratio * 100.0).round() as u32);
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(build(self))
+                    }
+                    // Per-app mixer rows (ids 120..=131) from `media_ext::list_app_sessions`.
+                    LiveEvent::Click(id) if (120..132).contains(&id) && id % 2 == 0 => {
+                        toggle_app_mute(((id - 120) / 2) as usize);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Slider { id, ratio } if (121..132).contains(&id) && id % 2 == 1 => {
+                        set_app_vol(((id - 121) / 2) as usize, ratio);
+                        LiveOutcome::Update(build(self))
+                    }
+                    _ => LiveOutcome::Close,
+                });
             }
             "quicksettings" => {
                 let mut settings_changed = false;
                 let build_qs_spec = |runtime: &Self, settings: &DockSettings| {
-                    let change_error = if runtime.radio_failed {
-                        Some(loc::t(if runtime.radio_denied {
+                    let change_error = runtime.radio_failed.then(|| {
+                        loc::t(if runtime.radio_denied {
                             "QuickPermissionDenied"
                         } else {
                             "QuickChangeFailed"
-                        }))
-                    } else {
-                        None
-                    };
-                    let wifi_state = if runtime.radio_unavailable {
-                        loc::t("QuickUnavailable")
-                    } else {
-                        change_error
-                            .clone()
-                            .unwrap_or_else(|| radio_label(runtime.wifi_on, runtime.radio_loading))
-                    };
-                    let bt_state = if runtime.radio_unavailable {
-                        loc::t("QuickUnavailable")
-                    } else {
-                        change_error.unwrap_or_else(|| {
-                            radio_label(runtime.bluetooth_on, runtime.radio_loading)
                         })
-                    };
-                    let loading_note = if runtime.radio_loading {
-                        loc::t("QuickLoading")
-                    } else {
-                        String::new()
+                    });
+                    let radio_state = |on: bool| {
+                        if runtime.radio_unavailable {
+                            loc::t("QuickUnavailable")
+                        } else {
+                            change_error
+                                .clone()
+                                .unwrap_or_else(|| radio_label(on, runtime.radio_loading))
+                        }
                     };
                     let (vol, muted) = get_audio_state();
                     let out_name = telemetry::default_audio_device_name(false)
@@ -5674,46 +5326,47 @@ impl WidgetRuntime {
                         AppTheme::Dark => loc::t("Dark"),
                         AppTheme::Light => loc::t("Light"),
                     };
+                    let on_off = |on: bool| loc::t(if on { "QuickOn" } else { "QuickOff" });
                     FlyoutSpec {
                         title: loc::t("WidgetQuickSettings"),
-                        subtitle: (!loading_note.is_empty()).then_some(loading_note),
+                        subtitle: runtime.radio_loading.then(|| loc::t("QuickLoading")),
                         width_dips: 312.0,
                         blocks: vec![
                             FlyoutBlock::ToggleGrid(vec![
-                                (5, loc::t("WiFi"), wifi_state, runtime.wifi_on),
-                                (6, loc::t("Bluetooth"), bt_state, runtime.bluetooth_on),
+                                (
+                                    5,
+                                    loc::t("WiFi"),
+                                    radio_state(runtime.wifi_on),
+                                    runtime.wifi_on,
+                                ),
+                                (
+                                    6,
+                                    loc::t("Bluetooth"),
+                                    radio_state(runtime.bluetooth_on),
+                                    runtime.bluetooth_on,
+                                ),
                                 (
                                     1,
-                                    loc::t("FocusMode").to_owned(),
-                                    if settings.focus_mode {
-                                        loc::t("QuickOn")
-                                    } else {
-                                        loc::t("QuickOff")
-                                    }
-                                    .to_owned(),
+                                    loc::t("FocusMode"),
+                                    on_off(settings.focus_mode),
                                     settings.focus_mode,
                                 ),
                                 (
                                     2,
                                     loc::t("AutoHide"),
-                                    hide_label.to_owned(),
+                                    hide_label,
                                     settings.auto_hide != AutoHideMode::Disabled,
                                 ),
                                 (
                                     3,
                                     loc::t("Theme"),
-                                    theme_label.to_owned(),
+                                    theme_label,
                                     settings.theme != AppTheme::System,
                                 ),
                                 (
                                     7,
-                                    loc::t("NightLight").to_owned(),
-                                    if runtime.night_light_on {
-                                        loc::t("QuickOn")
-                                    } else {
-                                        loc::t("QuickOff")
-                                    }
-                                    .to_owned(),
+                                    loc::t("NightLight"),
+                                    on_off(runtime.night_light_on),
                                     runtime.night_light_on,
                                 ),
                             ]),
@@ -5746,90 +5399,79 @@ impl WidgetRuntime {
                                 ],
                             },
                             FlyoutBlock::ButtonBar(vec![
-                                (8, loc::t("Settings").to_owned(), true),
+                                (8, loc::t("Settings"), true),
                                 (9, loc::t("WidgetShowDesktop"), false),
                             ]),
                         ],
                     }
                 };
                 let init = build_qs_spec(self, settings);
-                flyout::show_flyout_live_with_options(
-                    "quicksettings",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    border,
-                    options,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            settings.focus_mode = !settings.focus_mode;
-                            settings_changed = true;
-                            LiveOutcome::Update(build_qs_spec(self, settings))
+                show_live!("quicksettings", init, |ev| match ev {
+                    LiveEvent::Click(1) => {
+                        settings.focus_mode = !settings.focus_mode;
+                        settings_changed = true;
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(2) => {
+                        settings.auto_hide = match settings.auto_hide {
+                            AutoHideMode::Disabled => AutoHideMode::Smart,
+                            AutoHideMode::Smart => AutoHideMode::Always,
+                            AutoHideMode::Always => AutoHideMode::Disabled,
+                        };
+                        settings_changed = true;
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(3) => {
+                        settings.theme = match settings.theme {
+                            AppTheme::System => AppTheme::Dark,
+                            AppTheme::Dark => AppTheme::Light,
+                            AppTheme::Light => AppTheme::System,
+                        };
+                        settings_changed = true;
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(4) => {
+                        toggle_audio_mute();
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Slider { id: 10, ratio } => {
+                        set_audio_volume((ratio * 100.0).round() as u32);
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(5) => {
+                        // C4 `platform::radio::set` — real WinRT Wi-Fi toggle.
+                        self.toggle_radio("wifi");
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(6) => {
+                        // C4 `platform::radio::set` — real WinRT Bluetooth toggle.
+                        self.toggle_radio("bluetooth");
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(id @ 100..=116) => {
+                        pins::launch(shortcut_uri(id).to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(7) => {
+                        if telemetry::toggle_night_light() {
+                            self.night_light_on = !self.night_light_on;
+                        } else {
+                            pins::launch("ms-settings:nightlight".to_owned());
                         }
-                        LiveEvent::Click(2) => {
-                            settings.auto_hide = match settings.auto_hide {
-                                AutoHideMode::Disabled => AutoHideMode::Smart,
-                                AutoHideMode::Smart => AutoHideMode::Always,
-                                AutoHideMode::Always => AutoHideMode::Disabled,
-                            };
-                            settings_changed = true;
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Click(3) => {
-                            settings.theme = match settings.theme {
-                                AppTheme::System => AppTheme::Dark,
-                                AppTheme::Dark => AppTheme::Light,
-                                AppTheme::Light => AppTheme::System,
-                            };
-                            settings_changed = true;
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Click(4) => {
-                            toggle_audio_mute();
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Slider { id: 10, ratio } => {
-                            set_audio_volume((ratio * 100.0).round() as u32);
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Click(5) => {
-                            // C4 `platform::radio::set` — real WinRT Wi-Fi toggle.
-                            self.toggle_radio("wifi");
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Click(6) => {
-                            // C4 `platform::radio::set` — real WinRT Bluetooth toggle.
-                            self.toggle_radio("bluetooth");
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Click(id @ 100..=116) => {
-                            let uri = shortcut_uri(id);
-                            pins::launch(uri.to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(7) => {
-                            if telemetry::toggle_night_light() {
-                                self.night_light_on = !self.night_light_on;
-                            } else {
-                                pins::launch("ms-settings:nightlight".to_owned());
-                            }
-                            LiveOutcome::Update(build_qs_spec(self, settings))
-                        }
-                        LiveEvent::Click(8) => {
-                            crate::ui::settings::spawn_settings_window();
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(9) => {
-                            opentaskbar_shell::taskbar::show_desktop();
-                            LiveOutcome::Close
-                        }
-                        _ => LiveOutcome::Close,
-                    },
-                );
+                        LiveOutcome::Update(build_qs_spec(self, settings))
+                    }
+                    LiveEvent::Click(8) => {
+                        crate::ui::settings::spawn_settings_window();
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(9) => {
+                        opentaskbar_shell::taskbar::show_desktop();
+                        LiveOutcome::Close
+                    }
+                    _ => LiveOutcome::Close,
+                });
                 return Self::flyout_settings_changed("quicksettings", settings_changed);
             }
             "stacks" => {
@@ -5854,9 +5496,8 @@ impl WidgetRuntime {
                     width_dips: 276.0,
                     blocks,
                 };
-                if let Some(act) = flyout::show_primary_with_options(
-                    owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-                ) && act >= 100
+                if let Some(act) = show_primary(spec)
+                    && act >= 100
                     && let Some(path) = settings.stack_folders.get((act - 100) as usize)
                 {
                     pins::launch(path.clone());
@@ -5887,9 +5528,8 @@ impl WidgetRuntime {
                     width_dips: 276.0,
                     blocks,
                 };
-                if let Some(act) = flyout::show_primary_with_options(
-                    owner_hwnd, is_dark, anchor_x, anchor_y, spec, border, options,
-                ) && act >= 100
+                if let Some(act) = show_primary(spec)
+                    && act >= 100
                     && let Some(group) = settings.app_groups.get((act - 100) as usize)
                 {
                     for member in &group.executable_paths {
