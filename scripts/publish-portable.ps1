@@ -42,11 +42,10 @@ Copy-Item -LiteralPath $built -Destination $finalExe -Force
 # it into the EXE. Keep a named copy beside the portable EXE so the release
 # manifest can record its architecture and SHA-256 (and CI can re-verify it).
 $buildRoot = Join-Path $repoRoot "target\$target\release\build"
-$watchdogExe = Get-ChildItem -LiteralPath $buildRoot -Directory -Filter 'opentaskbar-shell-*' -ErrorAction SilentlyContinue |
-    ForEach-Object { Join-Path $_.FullName 'out\watchdog\OpenTaskbarWatchdog.exe' } |
-    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-    Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending |
-    Select-Object -First 1
+$watchdogExe = Get-ChildItem -LiteralPath $buildRoot -Filter 'OpenTaskbarWatchdog.exe' -File -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Directory.Name -eq 'watchdog' -and $_.Directory.Parent.Name -eq 'out' } |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
 if (-not $watchdogExe) {
     throw "No architecture-specific watchdog produced by build.rs under $buildRoot"
 }
