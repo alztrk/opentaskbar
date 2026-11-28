@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockContentAlignment, DockHeightMode, DockSettings,
+    self, AppTheme, AutoHideMode, DockContentAlignment, DockEdge, DockHeightMode, DockSettings,
     DockWidthMode, MiddleClickAction, StartButtonAction, StartButtonPlacement, SurfaceBackground,
 };
 use opentaskbar_shell::flyout_reposition::FlyoutKind;
@@ -193,7 +193,7 @@ struct EffectiveMetrics {
 }
 
 impl EffectiveMetrics {
-    fn for_monitor(settings: &DockSettings, mon_w_dips: f32) -> Self {
+    fn for_monitor(settings: &DockSettings, mon_w_dips: f32, dpi_scale: f32) -> Self {
         let positive = |v: f32| (v.is_finite() && v > 0.0).then_some(v);
         let mut widget_densities = HashMap::new();
         for wd in widgets::active_widgets(settings) {
@@ -214,7 +214,14 @@ impl EffectiveMetrics {
             DockHeightMode::Pixels | DockHeightMode::Percent => {
                 positive(settings::effective_height(settings))
             }
-            DockHeightMode::Auto | DockHeightMode::Fill => None,
+            DockHeightMode::Auto => None,
+            DockHeightMode::Fill if settings.edge == DockEdge::Bottom && dpi_scale > 0.0 => {
+                positive(
+                    opentaskbar_shell::taskbar::native_bottom_taskbar_height_px() as f32
+                        / dpi_scale,
+                )
+            }
+            DockHeightMode::Fill => None,
         };
         Self {
             width_dips,
@@ -1716,10 +1723,9 @@ fn compute_window_dips_with(
     let width_dips = (resting_w + mag_extra + 24.0)
         .clamp(160.0, mon_w_dips)
         .ceil();
-    let mut pill_h = pill_height_dips(settings);
-    if let Some(h) = effective.height_dips {
-        pill_h = h;
-    }
+    let pill_h = effective
+        .height_dips
+        .unwrap_or_else(|| pill_height_dips(settings));
     let bottom_inset = effective.bottom_inset_dips();
     let height_dips = (pill_h + TOOLTIP_HEADROOM + mag_headroom + bottom_inset).ceil();
     (width_dips, height_dips)
@@ -2168,7 +2174,7 @@ impl DockState {
             initial_fps,
         );
         let target_fps = Arc::new(AtomicU32::new(initial_fps));
-        let effective = EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi);
+        let effective = EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi, dpi);
         let mut state = Self {
             hwnd,
             monitor,
@@ -2734,7 +2740,11 @@ impl DockState {
         self.update_widget_shrink();
         let mut changed = false;
         let mut width_changed = false;
-        let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
+        let widget_h = design::widget_height_dips(
+            self.effective
+                .height_dips
+                .unwrap_or_else(|| pill_height_dips(&self.settings)),
+        );
         let mut key_scratch = String::with_capacity(256);
         let live_widths: Vec<f32> = self
             .widget_visuals
@@ -3126,7 +3136,10 @@ impl DockState {
         let dpi = self.dpi;
         let is_dark = self.is_dark;
         let base = layout::size_profile(&self.settings).cell;
-        let pill_h = pill_height_dips(&self.settings);
+        let pill_h = self
+            .effective
+            .height_dips
+            .unwrap_or_else(|| pill_height_dips(&self.settings));
 
         // The DComp dock used to ignore `ThemeManager` entirely: editor/pack changes
         // to DockMaterial, DockBorderMaterial, WidgetCard(Hover/Pressed), DockHighlight
@@ -3452,7 +3465,7 @@ impl DockState {
         let next = settings::load_from(&settings::settings_path());
         // Re-resolve WS-1 effective geometry/density for this monitor before any
         // rebuild; the cached values feed every subsequent hot-path frame.
-        self.effective = EffectiveMetrics::for_monitor(&next, self.mon_w_dips());
+        self.effective = EffectiveMetrics::for_monitor(&next, self.mon_w_dips(), self.dpi);
         self.settings = next;
         window_picker::set_picker_enabled(self.settings.previews_enabled);
         set_win_key_reveal_gate(&self.settings);
@@ -3518,8 +3531,15 @@ impl DockState {
         self.tooltip_cache = None;
         self.rebuild_theme_surfaces();
         if let Some(ref corner) = self.show_desktop_corner {
-            let corner_h = pill_height_dips(&self.settings)
-                + self.settings.dock_bottom_gap_pixels.max(0) as f32;
+            let corner_h = self
+                .effective
+                .height_dips
+                .unwrap_or_else(|| pill_height_dips(&self.settings))
+                + if self.settings.dock_height_mode == DockHeightMode::Fill {
+                    0.0
+                } else {
+                    self.settings.dock_bottom_gap_pixels.max(0) as f32
+                };
             corner.update_for_edge(
                 effective_edge(&self.settings),
                 self.monitor.clone(),
@@ -3530,9 +3550,16 @@ impl DockState {
         }
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
-            let desired_total_dips = pill_height_dips(&self.settings)
+            let desired_total_dips = self
+                .effective
+                .height_dips
+                .unwrap_or_else(|| pill_height_dips(&self.settings))
                 + self.effective.bottom_inset_dips()
-                + VERTICAL_EDGE_GAP;
+                + if self.settings.dock_height_mode == DockHeightMode::Fill {
+                    0.0
+                } else {
+                    VERTICAL_EDGE_GAP
+                };
             let desired_total_px = (desired_total_dips * self.dpi).ceil() as i32;
             opentaskbar_shell::taskbar::update_appbar_height(
                 self.hwnd,
@@ -3999,7 +4026,11 @@ impl DockState {
     fn slot_lift(&self, slot: &DockSlot) -> f32 {
         let profile = layout::size_profile(&self.settings);
         let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
-        let headroom = (pill_height_dips(&self.settings) - profile.icon - 4.0).max(0.0);
+        let pill_h = self
+            .effective
+            .height_dips
+            .unwrap_or_else(|| pill_height_dips(&self.settings));
+        let headroom = (pill_h - profile.icon - 4.0).max(0.0);
         compute_safe_lift(slot.scale, max_scale, profile.icon, headroom)
             + bounce_offset_dips(slot.bounce_started).unwrap_or(0.0)
     }
@@ -9487,7 +9518,7 @@ pub fn run(settings: DockSettings) {
         let light_strip = dock_layout == layout::SecondaryLayout::LightStrip;
         let initial_count = if light_strip { 0 } else { initial_slots.len() };
         let monitor_effective =
-            EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi_scale);
+            EffectiveMetrics::for_monitor(&settings, monitor.width() as f32 / dpi_scale, dpi_scale);
         let rect = compute_window_rect_with(
             &settings,
             initial_count,
@@ -9514,6 +9545,7 @@ pub fn run(settings: DockSettings) {
             continue;
         }
         let hwnd_val = hwnd as usize;
+        let monitor_width_dips = monitor.width() as f32 / dpi_scale;
         win32::configure_native_dock_hwnd(hwnd_val);
         unsafe {
             DragAcceptFiles(hwnd, 1);
@@ -9598,9 +9630,15 @@ pub fn run(settings: DockSettings) {
                 }
                 created.push((hwnd, ptr));
                 if is_primary {
-                    let desired_total_dips = pill_height_dips(&settings)
-                        + (settings::effective_bottom_gap(&settings).max(0) as f32)
-                        + VERTICAL_EDGE_GAP;
+                    let desired_total_dips = if settings.dock_height_mode == DockHeightMode::Fill {
+                        EffectiveMetrics::for_monitor(&settings, monitor_width_dips, dpi_scale)
+                            .height_dips
+                            .unwrap_or_else(|| pill_height_dips(&settings))
+                    } else {
+                        pill_height_dips(&settings)
+                            + settings::effective_bottom_gap(&settings).max(0) as f32
+                            + VERTICAL_EDGE_GAP
+                    };
                     let desired_total_px = (desired_total_dips * dpi_scale).ceil() as i32;
                     opentaskbar_shell::taskbar::begin_replacement(
                         hwnd_val,
@@ -10430,7 +10468,7 @@ mod tests {
     #[test]
     fn auto_width_mode_does_not_clamp_dock_to_min_surface_width() {
         let settings = DockSettings::default();
-        let eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        let eff = EffectiveMetrics::for_monitor(&settings, 1920.0, 1.0);
         assert!(
             eff.width_dips.is_none(),
             "Auto width mode must let the dock size to its icons/widgets"
@@ -10776,7 +10814,7 @@ mod tests {
             settings.set_widget_enabled(id, true);
         }
         settings.stack_folders = vec![r"C:\Users\Public\Downloads".to_owned()];
-        let mut eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        let mut eff = EffectiveMetrics::for_monitor(&settings, 1920.0, 1.0);
         assert!(eff.width_dips.is_none());
         let live_content = 1500.0;
         eff.live_rest_content_dips = Some(live_content);
