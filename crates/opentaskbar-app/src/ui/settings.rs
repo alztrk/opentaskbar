@@ -5398,7 +5398,6 @@ impl SettingsView {
             "media" => WidgetChipSpec::Media {
                 title: "Midnight City".to_owned(),
                 artist: "M83".to_owned(),
-                muted: false,
             },
             "audio" => WidgetChipSpec::Audio {
                 volume: 68,
@@ -6122,11 +6121,7 @@ impl SettingsView {
                         ),
                 )
             }
-            WidgetChipSpec::Media {
-                title,
-                artist,
-                muted,
-            } => chip(
+            WidgetChipSpec::Media { title, artist } => chip(
                 div()
                     .flex()
                     .items_center()
@@ -6158,12 +6153,7 @@ impl SettingsView {
                     .child(vdiv())
                     .child(icon_glyph("\u{E892}", 10.0, t.dock_preview_fg))
                     .child(icon_glyph("\u{E768}", 11.0, t.dock_preview_fg))
-                    .child(icon_glyph("\u{E893}", 10.0, t.dock_preview_fg))
-                    .child(icon_glyph(
-                        if muted { "\u{E74F}" } else { "\u{E767}" },
-                        10.0,
-                        t.dock_preview_sub,
-                    )),
+                    .child(icon_glyph("\u{E893}", 10.0, t.dock_preview_fg)),
             ),
             WidgetChipSpec::Audio { volume, muted } => {
                 let silent = muted || volume == 0;

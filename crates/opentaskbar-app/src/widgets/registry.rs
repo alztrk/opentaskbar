@@ -409,7 +409,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "WidgetMedia",
         "Media & Controls",
         244.0,
-        true,
+        false,
         false,
         HardwareNeed::Audio,
         ShrinkPriority::Normal,

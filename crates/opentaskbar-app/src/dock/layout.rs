@@ -1438,11 +1438,20 @@ pub fn step_shell_spring(
     targets: [f32; 3],
     dt_seconds: f32,
     max_scale: f32,
+    stiffness: f32,
+    damping: f32,
 ) -> bool {
     let mut moving = false;
     for i in 0..3 {
-        let (scale, velocity, settled) =
-            step_spring(scales[i], targets[i], velocities[i], dt_seconds, max_scale);
+        let (scale, velocity, settled) = step_spring_with(
+            scales[i],
+            targets[i],
+            velocities[i],
+            dt_seconds,
+            max_scale,
+            stiffness,
+            damping,
+        );
         scales[i] = scale;
         velocities[i] = velocity;
         moving |= !settled;
@@ -3068,7 +3077,16 @@ mod tests {
         assert_eq!(targets[2], 1.0);
         let mut scales = [1.0_f32; 3];
         let mut velocities = [0.0_f32; 3];
-        step_shell_spring(&mut scales, &mut velocities, targets, 1.0 / 60.0, 1.5);
+        let (stiffness, damping) = fisheye_spring_params(true);
+        step_shell_spring(
+            &mut scales,
+            &mut velocities,
+            targets,
+            1.0 / 60.0,
+            1.5,
+            stiffness,
+            damping,
+        );
         assert!(scales[0] > 1.0);
         assert_eq!(scales[1], 1.0);
 
@@ -3080,7 +3098,15 @@ mod tests {
             centers.map(|center| fisheye_target_scale(&focus, Some(100.0), center, 1.5, 1.0));
         assert_eq!(gated, [1.0; 3]);
         for _ in 0..120 {
-            step_shell_spring(&mut scales, &mut velocities, gated, 1.0 / 60.0, 1.5);
+            step_shell_spring(
+                &mut scales,
+                &mut velocities,
+                gated,
+                1.0 / 60.0,
+                1.5,
+                stiffness,
+                damping,
+            );
         }
         assert!((scales[0] - 1.0).abs() < 0.01);
     }

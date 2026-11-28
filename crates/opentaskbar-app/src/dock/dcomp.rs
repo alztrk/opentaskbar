@@ -261,12 +261,8 @@ pub enum WidgetChipSpec {
     },
     /// `StorageWidget.cs`: `"C: 213 / 476 GB | D: 1.2 / 1.8 TB"` (clean typographic, no bars)
     Storage { drives: Vec<(String, String)> },
-    /// `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next] [Volume]`
-    Media {
-        title: String,
-        artist: String,
-        muted: bool,
-    },
+    /// `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next]`
+    Media { title: String, artist: String },
     /// `AudioWidget.xaml`: `[Speaker 16px] [12.5px SemiBold 67%]` (scroll adjusts, click opens mixer)
     Audio { volume: u32, muted: bool },
     /// `QuickSettingsWidget.xaml`: 3 compact `27x27` toggle pills (`Wi-Fi`, `Bluetooth`, `Night Light/Focus`)
@@ -463,21 +459,9 @@ impl WidgetChipSpec {
                 .iter()
                 .map(|(name, usage)| line(name, usage.clone()))
                 .collect(),
-            Self::Media {
-                title,
-                artist,
-                muted,
-            } => vec![
+            Self::Media { title, artist } => vec![
                 line("WidgetDetailTitle", title.clone()),
                 line("WidgetDetailArtist", artist.clone()),
-                line(
-                    "LauncherSound",
-                    if *muted {
-                        loc::t("WidgetDetailMuted")
-                    } else {
-                        loc::t("WidgetDetailOn")
-                    },
-                ),
             ],
             Self::Audio { volume, muted } => vec![
                 line("Volume", crate::widgets::format_percent(*volume)),
@@ -3492,7 +3476,6 @@ impl DcompEngine {
                 WidgetChipSpec::Media {
                     title,
                     artist,
-                    muted,
                 } => {
                     draw_chip_card(
                         &card_style,
@@ -3670,7 +3653,7 @@ impl DcompEngine {
                             radiusX: 7.0,
                             radiusY: 7.0,
                         };
-                        let play_hov = active_sub == Some(3);
+                        let play_hov = matches!(active_sub, Some(2 | 3));
                         if play_hov {
                             let hb = dc.CreateSolidColorBrush(
                                 &if is_dark {
@@ -3698,7 +3681,7 @@ impl DcompEngine {
                             0.90,
                         )?;
                     } else {
-                        let controls_l = (width_dips - 114.0).max(info_l + 24.0);
+                        let controls_l = (width_dips - 88.0).max(info_l + 24.0);
                         let mid = height_dips * 0.50;
                         if artist.is_empty() {
                             draw_text(
@@ -3737,18 +3720,12 @@ impl DcompEngine {
                             );
                         }
 
-                        // 4 sub-buttons: 0=Prev, 1=Play/Pause (dynamic glyph), 2=Next, 3=Mute
+                        // 3 sub-buttons: 0=Prev, 1=Play/Pause (dynamic glyph), 2=Next
                         let play_glyph = if hint.playing { "\u{E769}" } else { "\u{E768}" };
-                        let btns: [(f32, f32, &str, bool); 4] = [
+                        let btns: [(f32, f32, &str, bool); 3] = [
                             (controls_l, 25.0, "\u{E892}", false),
                             (controls_l + 27.0, 27.0, play_glyph, true),
                             (controls_l + 56.0, 25.0, "\u{E893}", false),
-                            (
-                                controls_l + 83.0,
-                                25.0,
-                                if *muted { "\u{E74F}" } else { "\u{E767}" },
-                                true,
-                            ),
                         ];
                         for (i, (bx, bw, glyph, has_base_bg)) in btns.iter().enumerate() {
                             let rect = D2D_RECT_F {
@@ -3781,8 +3758,6 @@ impl DcompEngine {
                             }
                             let glyph_col = if i == 1 && hint.playing {
                                 pal.selected_fg
-                            } else if i == 3 && *muted {
-                                pal.danger
                             } else {
                                 pal.text_primary
                             };
@@ -3791,7 +3766,7 @@ impl DcompEngine {
                                 dc,
                                 glyph,
                                 rect,
-                                if i == 1 || i == 3 { 12.0 } else { 10.5 },
+                                if i == 1 { 12.0 } else { 10.5 },
                                 glyph_col,
                                 0.95,
                             )?;
