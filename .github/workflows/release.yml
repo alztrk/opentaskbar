@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for the release (e.g. v0.3.5 or v0.3.5-rc.1)'
+        description: 'Tag name for the release (e.g. v0.3.5-dev or v0.3.5-stable)'
         required: true
         type: string
       prerelease:
@@ -50,11 +50,15 @@ jobs:
           } else {
             "${{ inputs.tag_name }}"
           }
-          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-            throw "Release tag must look like v0.3.5 or v0.3.5-rc.1."
+          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)-(?<channel>dev(?:\.\d+)?|stable)$') {
+            throw "Release tag must look like v0.3.5-dev, v0.3.5-dev.2 or v0.3.5-stable."
           }
           $version = $Matches['base']
-          $isPre = -not [string]::IsNullOrEmpty($Matches['pre'])
+          $channel = $Matches['channel']
+          # `-stable` publishes as a normal GitHub release so `/releases/latest`
+          # serves both legacy (v0.2.6-v0.3.4) and current stable installs.
+          # `-dev` / `-dev.N` always publishes as a prerelease.
+          $isPre = $channel -ne 'stable'
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and "${{ inputs.prerelease }}" -eq 'true') {
             $isPre = $true
           }

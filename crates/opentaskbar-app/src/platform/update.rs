@@ -14,8 +14,10 @@ use super::http::{self, Proxy};
 
 pub const REPOSITORY: &str = "alztrk/opentaskbar";
 pub const RELEASES_PAGE: &str = "https://github.com/alztrk/opentaskbar/releases/latest";
-/// Single source of truth for the shipped version (also shown in Settings → About).
+/// Single source of truth for the shipped version (e.g. `0.3.5-dev` or `0.3.5-stable`).
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// User-facing version label shown in Settings → About and update status text.
+pub const DISPLAY_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +28,16 @@ pub struct Release {
     pub download_url: Option<String>,
     pub size: Option<u64>,
     pub sha256: Option<String>,
+}
+
+fn format_display_version(tag: &str) -> String {
+    let trimmed = tag.trim();
+    let stripped = trimmed.trim_start_matches(['v', 'V']);
+    if stripped.is_empty() {
+        trimmed.to_owned()
+    } else {
+        format!("v{stripped}")
+    }
 }
 
 fn version_parts(text: &str) -> Option<[u64; 4]> {
@@ -42,11 +54,8 @@ fn version_parts(text: &str) -> Option<[u64; 4]> {
     Some(parts)
 }
 
-fn is_newer(candidate: &str) -> bool {
-    match (version_parts(candidate), version_parts(CURRENT_VERSION)) {
-        (Some(a), Some(b)) => a > b,
-        _ => false,
-    }
+fn is_newer_for(candidate: &str, current: Version) -> bool {
+    Version::parse(candidate).is_some_and(|version| version.is_update_for(current))
 }
 
 /// Streams a GET response into `sink` and returns the HTTP status code.
@@ -98,15 +107,17 @@ fn select_asset<'a>(assets: &'a [Value], architecture: &str) -> Option<&'a Value
     matching.or(legacy).or(first_exe)
 }
 
-/// Parses a GitHub release JSON document and returns it only when it is newer.
-pub fn parse_release(json: &str) -> Option<Release> {
-    let root: Value = serde_json::from_str(json).ok()?;
+fn parse_release_value(root: &Value, current: Version) -> Option<(Version, Release)> {
+    if root.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
     let tag = root
         .get("tag_name")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    if !is_newer(&tag) {
+    let parsed = Version::parse(&tag)?;
+    if !parsed.is_update_for(current) {
         return None;
     }
     let url = root
@@ -123,25 +134,45 @@ pub fn parse_release(json: &str) -> Option<Release> {
         .get("assets")
         .and_then(Value::as_array)
         .and_then(|assets| select_asset(assets, architecture));
-    Some(Release {
-        version: tag
-            .trim_start_matches(['v', 'V'])
-            .split(['-', '+'])
-            .next()
-            .unwrap_or(&tag)
-            .to_owned(),
-        tag,
-        url,
-        download_url: asset
-            .and_then(|a| a.get("browser_download_url"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        size: asset.and_then(|a| a.get("size")).and_then(Value::as_u64),
-        sha256: asset
-            .and_then(|a| a.get("digest"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-    })
+    Some((
+        parsed,
+        Release {
+            version: format_display_version(&tag),
+            tag,
+            url,
+            download_url: asset
+                .and_then(|a| a.get("browser_download_url"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            size: asset.and_then(|a| a.get("size")).and_then(Value::as_u64),
+            sha256: asset
+                .and_then(|a| a.get("digest"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        },
+    ))
+}
+
+/// Parses a single GitHub release JSON document for a specific installed version.
+pub fn parse_release_for(json: &str, current: Version) -> Option<Release> {
+    let root: Value = serde_json::from_str(json).ok()?;
+    parse_release_value(&root, current).map(|(_, release)| release)
+}
+
+/// Parses a GitHub `/releases` array and picks the highest eligible non-draft release.
+pub fn parse_releases_list(json: &str, current: Version) -> Option<Release> {
+    let items = serde_json::from_str::<Value>(json).ok()?;
+    let array = items.as_array()?;
+    array
+        .iter()
+        .filter_map(|item| parse_release_value(item, current))
+        .max_by_key(|(version, _)| version.cmp_key())
+        .map(|(_, release)| release)
+}
+
+/// Parses a GitHub release JSON document and returns it only when it is newer.
+pub fn parse_release(json: &str) -> Option<Release> {
+    parse_release_for(json, Version::current())
 }
 
 /// `Ok(None)` means up to date; `Err(())` means GitHub could not be reached.
@@ -168,10 +199,19 @@ fn find_newer_with_packaged(packaged: bool) -> Result<Option<Release>, ()> {
 }
 
 fn find_newer_github() -> Result<Option<Release>, ()> {
+    let current = Version::current();
+    // Stable installs follow `/releases/latest` (prereleases excluded by GitHub).
+    // Dev installs inspect recent releases so they receive both newer `-dev`
+    // prereleases and graduation to `-stable`.
+    let endpoint = if current.channel == ReleaseChannel::Stable {
+        format!("/repos/{REPOSITORY}/releases/latest")
+    } else {
+        format!("/repos/{REPOSITORY}/releases?per_page=20")
+    };
     let mut body = Vec::new();
     let status = http_get(
         "api.github.com",
-        &format!("/repos/{REPOSITORY}/releases/latest"),
+        &endpoint,
         &[
             ("User-Agent", &format!("OpenTaskbar/{CURRENT_VERSION}")),
             ("Accept", "application/vnd.github+json"),
@@ -188,7 +228,11 @@ fn find_newer_github() -> Result<Option<Release>, ()> {
         return Err(());
     }
     let json = String::from_utf8(body).map_err(|_| ())?;
-    Ok(parse_release(&json))
+    if current.channel == ReleaseChannel::Stable {
+        Ok(parse_release_for(&json, current))
+    } else {
+        Ok(parse_releases_list(&json, current))
+    }
 }
 
 fn valid_digest(digest: Option<&str>) -> bool {
@@ -238,15 +282,16 @@ mod tests {
     #[test]
     fn parses_newer_release_and_selects_arch_asset() {
         let json = r#"{
-          "tag_name":"v0.4.1",
-          "html_url":"https://github.com/alztrk/opentaskbar/releases/tag/v0.4.1",
+          "tag_name":"v0.4.1-stable",
+          "html_url":"https://github.com/alztrk/opentaskbar/releases/tag/v0.4.1-stable",
           "assets":[
             {"name":"OpenTaskbar-x86.exe","browser_download_url":"https://x/86.exe","size":123,"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
             {"name":"OpenTaskbar-x64.exe","browser_download_url":"https://x/64.exe","size":456,"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
           ]
         }"#;
         let release = parse_release(json).unwrap();
-        assert_eq!(release.version, "0.4.1");
+        assert_eq!(release.version, "v0.4.1-stable");
+        assert_eq!(release.tag, "v0.4.1-stable");
         let expected = if cfg!(target_arch = "x86_64") {
             "https://x/64.exe"
         } else {
@@ -256,8 +301,62 @@ mod tests {
     }
 
     #[test]
+    fn channel_upgrade_rules_and_legacy_compatibility() {
+        let dev = Version::parse("v0.3.5-dev").unwrap();
+        let dev2 = Version::parse("v0.3.5-dev.2").unwrap();
+        let stable = Version::parse("v0.3.5-stable").unwrap();
+        let legacy = Version::parse("v0.3.5").unwrap();
+        let legacy_old = Version::parse("v0.3.4").unwrap();
+        let next_dev = Version::parse("v0.3.6-dev").unwrap();
+        let next_stable = Version::parse("v0.3.6-stable").unwrap();
+
+        assert_eq!(stable, legacy);
+        assert!(dev2.is_update_for(dev));
+        assert!(stable.is_update_for(dev));
+        assert!(stable.is_update_for(dev2));
+        assert!(next_dev.is_update_for(dev));
+        assert!(!legacy_old.is_update_for(dev));
+        assert!(!dev.is_update_for(dev));
+
+        // Stable installs never switch to dev prereleases, even for a higher base version.
+        assert!(!dev.is_update_for(stable));
+        assert!(!next_dev.is_update_for(stable));
+        assert!(!legacy.is_update_for(stable));
+        assert!(next_stable.is_update_for(stable));
+        assert!(stable.is_update_for(legacy_old));
+        assert!(is_newer_for("v0.3.5-stable", dev));
+        assert!(!is_newer_for("v0.3.6-dev", stable));
+    }
+
+    #[test]
+    fn dev_release_list_skips_drafts_and_picks_highest_candidate() {
+        let current_dev = Version::parse("v0.3.5-dev").unwrap();
+        let list = r#"[
+          {"tag_name":"v0.3.7-dev","draft":true,"prerelease":true},
+          {"tag_name":"v0.3.5-dev","draft":false,"prerelease":true},
+          {"tag_name":"v0.3.5-stable","draft":false,"prerelease":false,"html_url":"https://example.com/stable"},
+          {"tag_name":"v0.3.6-dev","draft":false,"prerelease":true,"html_url":"https://example.com/dev"}
+        ]"#;
+        let release = parse_releases_list(list, current_dev).unwrap();
+        assert_eq!(release.version, "v0.3.6-dev");
+
+        // Same list when only v0.3.5-stable is newer than v0.3.5-dev.
+        let graduate = r#"[
+          {"tag_name":"v0.3.5-stable","draft":false,"prerelease":false},
+          {"tag_name":"v0.3.5-dev","draft":false,"prerelease":true}
+        ]"#;
+        let grad_release = parse_releases_list(graduate, current_dev).unwrap();
+        assert_eq!(grad_release.version, "v0.3.5-stable");
+
+        // Stable install ignores dev entries even if passed a list.
+        let current_stable = Version::parse("v0.3.5-stable").unwrap();
+        assert!(parse_releases_list(list, current_stable).is_none());
+    }
+
+    #[test]
     fn ignores_older_or_invalid_versions() {
         assert!(parse_release(r#"{"tag_name":"v0.1.0"}"#).is_none());
+        assert!(parse_release(r#"{"tag_name":"v0.3.5-"}"#).is_none());
         assert!(parse_release(r#"{"tag_name":"nightly"}"#).is_none());
     }
 
@@ -285,24 +384,69 @@ pub fn releases_page() -> String {
     format!("https://github.com/{REPOSITORY}/releases/latest")
 }
 
-/// Semver-like version with the same normalization as `Version` (missing parts become 0).
+/// Release channel derived from the tag suffix (`-dev`, `-dev.N`, `-stable`, or legacy unsuffixed).
+///
+/// Ordering guarantees `Dev(0) < Dev(N) < Prerelease(_) < Stable` for identical numeric versions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReleaseChannel {
+    /// Development channel (`-dev` or `-dev.N`).
+    Dev(u32),
+    /// Legacy prerelease suffixes such as `-beta.1` or `-rc.1`.
+    Prerelease(u32),
+    /// Stable channel (`-stable` or legacy unsuffixed tags such as `v0.3.4`).
+    #[default]
+    Stable,
+}
+
+impl ReleaseChannel {
+    fn parse(suffix: Option<&str>) -> Option<Self> {
+        let Some(raw) = suffix else {
+            return Some(Self::Stable);
+        };
+        let clean = raw.split('+').next().unwrap_or(raw).trim();
+        if clean.is_empty() {
+            return None;
+        }
+        let lower = clean.to_ascii_lowercase();
+        if lower == "stable" {
+            return Some(Self::Stable);
+        }
+        if lower == "dev" {
+            return Some(Self::Dev(0));
+        }
+        if let Some(rest) = lower.strip_prefix("dev.") {
+            let seq = rest.parse::<u32>().ok()?;
+            return Some(Self::Dev(seq));
+        }
+        let seq = lower
+            .rsplit('.')
+            .next()
+            .and_then(|part| part.parse::<u32>().ok())
+            .unwrap_or(0);
+        Some(Self::Prerelease(seq))
+    }
+}
+
+/// Semver-like version with channel awareness and legacy unsuffixed compatibility.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
     pub build: u32,
     pub revision: u32,
+    pub channel: ReleaseChannel,
 }
 
 impl Version {
     pub fn parse(tag: &str) -> Option<Self> {
-        let tag = tag
-            .trim()
-            .trim_start_matches(['v', 'V'])
-            .split(['-', '+'])
-            .next()
-            .unwrap_or_default();
-        let parts: Vec<u32> = tag
+        let trimmed = tag.trim().trim_start_matches(['v', 'V']);
+        let without_meta = trimmed.split('+').next().unwrap_or(trimmed);
+        let (numeric, suffix) = match without_meta.split_once('-') {
+            Some((num, pre)) => (num, Some(pre)),
+            None => (without_meta, None),
+        };
+        let channel = ReleaseChannel::parse(suffix)?;
+        let parts: Vec<u32> = numeric
             .split('.')
             .map(|part| part.parse::<u32>().ok())
             .collect::<Option<Vec<_>>>()?;
@@ -314,6 +458,7 @@ impl Version {
             minor: *parts.get(1).unwrap_or(&0),
             build: *parts.get(2).unwrap_or(&0),
             revision: *parts.get(3).unwrap_or(&0),
+            channel,
         })
     }
 
@@ -324,15 +469,45 @@ impl Version {
     pub fn padded(self) -> (u32, u32, u32, u32) {
         (self.major, self.minor, self.build, self.revision)
     }
+
+    pub fn cmp_key(self) -> (u32, u32, u32, u32, ReleaseChannel) {
+        (
+            self.major,
+            self.minor,
+            self.build,
+            self.revision,
+            self.channel,
+        )
+    }
+
+    /// Returns `true` when `self` is a valid upgrade over `current`.
+    /// Stable installs only accept stable releases; dev installs accept both newer dev and stable.
+    pub fn is_update_for(self, current: Self) -> bool {
+        if current.channel == ReleaseChannel::Stable && self.channel != ReleaseChannel::Stable {
+            return false;
+        }
+        self.cmp_key() > current.cmp_key()
+    }
 }
 
 impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}.{}",
-            self.major, self.minor, self.build, self.revision
-        )
+        if self.revision == 0 {
+            write!(f, "{}.{}.{}", self.major, self.minor, self.build)?;
+        } else {
+            write!(
+                f,
+                "{}.{}.{}.{}",
+                self.major, self.minor, self.build, self.revision
+            )?;
+        }
+        match self.channel {
+            ReleaseChannel::Dev(0) => f.write_str("-dev"),
+            ReleaseChannel::Dev(n) => write!(f, "-dev.{n}"),
+            ReleaseChannel::Prerelease(0) => f.write_str("-pre"),
+            ReleaseChannel::Prerelease(n) => write!(f, "-pre.{n}"),
+            ReleaseChannel::Stable => f.write_str("-stable"),
+        }
     }
 }
 
@@ -373,20 +548,20 @@ impl Release {
     /// WS-F comparison against a parsed current version.
     pub fn is_newer_than(&self, current: Version) -> bool {
         self.version_struct()
-            .is_some_and(|version| version.padded() > current.padded())
+            .is_some_and(|version| version.is_update_for(current))
     }
 }
 
 impl DetailedRelease {
     pub fn is_newer_than(&self, current: Version) -> bool {
-        self.version.padded() > current.padded()
+        self.version.is_update_for(current)
     }
 }
 
 impl From<DetailedRelease> for Release {
     fn from(value: DetailedRelease) -> Self {
         Self {
-            version: value.version.to_string(),
+            version: format_display_version(&value.tag),
             tag: value.tag,
             url: value.url,
             download_url: value.download_url,
@@ -816,7 +991,28 @@ mod parity_tests {
                 major: 1,
                 minor: 2,
                 build: 3,
-                revision: 0
+                revision: 0,
+                channel: ReleaseChannel::Prerelease(1),
+            })
+        );
+        assert_eq!(
+            Version::parse("v0.3.5-dev"),
+            Some(Version {
+                major: 0,
+                minor: 3,
+                build: 5,
+                revision: 0,
+                channel: ReleaseChannel::Dev(0),
+            })
+        );
+        assert_eq!(
+            Version::parse("v0.3.5-stable"),
+            Some(Version {
+                major: 0,
+                minor: 3,
+                build: 5,
+                revision: 0,
+                channel: ReleaseChannel::Stable,
             })
         );
         assert_eq!(
@@ -825,7 +1021,8 @@ mod parity_tests {
                 major: 2,
                 minor: 0,
                 build: 0,
-                revision: 0
+                revision: 0,
+                channel: ReleaseChannel::Stable,
             })
         );
         assert_eq!(Version::parse("nope"), None);
@@ -853,7 +1050,8 @@ mod parity_tests {
                 major: 9,
                 minor: 8,
                 build: 7,
-                revision: 0
+                revision: 0,
+                channel: ReleaseChannel::Stable,
             }
         );
         assert!(

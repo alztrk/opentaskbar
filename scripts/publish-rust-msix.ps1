@@ -55,7 +55,9 @@ Copy-Item -LiteralPath $exe -Destination (Join-Path $stagingDir 'OpenTaskBar.exe
 Copy-Item -LiteralPath $assetsDir -Destination (Join-Path $stagingDir 'Assets') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stagingDir 'README.md') -Force
 
-$parts = $Version.Split('.')
+# MSIX identity requires four numeric components (`X.Y.Z.0`), so strip channel suffixes like `-dev` / `-stable`.
+$numericVersion = ($Version -split '[-+]')[0]
+$parts = $numericVersion.Split('.')
 while ($parts.Length -lt 4) { $parts += '0' }
 $msixVersion = ($parts[0..3]) -join '.'
 

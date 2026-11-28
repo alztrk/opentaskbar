@@ -25,10 +25,11 @@ if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
 }
 $OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
-if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-    throw "Tag must look like v0.3.5 or v0.3.5-rc.1 (got: $Tag)."
+if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)-(?<channel>dev(?:\.\d+)?|stable)$') {
+    throw "Tag must look like v0.3.5-dev, v0.3.5-dev.2 or v0.3.5-stable (got: $Tag)."
 }
 $version = $Matches['base']
+$channel = $Matches['channel']
 
 function Get-FileSha256([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -108,7 +109,12 @@ function Get-CargoWorkspaceVersion([string]$Path) {
 function Get-ReleaseNotes([string]$ChangelogPath, [string]$Version, [string]$TagName) {
     if (Test-Path -LiteralPath $ChangelogPath) {
         $lines = @(Get-Content -LiteralPath $ChangelogPath)
-        foreach ($heading in @("^##\s+$([regex]::Escape($Version))(\s|$)", '^##\s+Unreleased(\s|$)')) {
+        $tagWithoutV = $TagName.TrimStart('v', 'V')
+        foreach ($heading in @(
+            "^##\s+$([regex]::Escape($tagWithoutV))(\s|$)",
+            "^##\s+$([regex]::Escape($Version))(\s|$)",
+            '^##\s+Unreleased(\s|$)'
+        )) {
             $start = -1
             for ($i = 0; $i -lt $lines.Count; $i++) {
                 if ($lines[$i] -match $heading) { $start = $i; break }
@@ -226,6 +232,7 @@ $manifest = [ordered]@{
     schemaVersion  = 3
     tag            = $Tag
     version        = $version
+    channel        = $channel
     prerelease     = [bool]$Prerelease
     commit         = $Commit
     checksumsFile  = 'checksums.txt'

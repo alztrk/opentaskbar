@@ -42,7 +42,7 @@ cargo test --workspace
 Locale and release changes have dedicated gates:
 ```pwsh
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag vX.Y.Z
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag vX.Y.Z-dev
 ```
 
 Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/development/windows-reliability-audit.md` and `docs/development/windows-taskbar-model.md`.

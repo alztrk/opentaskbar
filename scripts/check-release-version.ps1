@@ -15,10 +15,12 @@ if (-not $Tag) { $Tag = $env:GITHUB_REF_NAME }
 if (-not $Tag) { $Tag = $env:RELEASE_TAG }
 if (-not $Tag) { throw 'No release tag supplied (-Tag, GITHUB_REF_NAME or RELEASE_TAG). Release CI supplies it; local runs must pass -Tag explicitly.' }
 
-if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-    throw "Tag must look like v0.3.5 or v0.3.5-rc.1 (got: $Tag)."
+if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)-(?<channel>dev(?:\.\d+)?|stable)$') {
+    throw "Tag must look like v0.3.5-dev, v0.3.5-dev.2 or v0.3.5-stable (got: $Tag)."
 }
-$tagVersion = $Matches['base']
+$tagBaseVersion = $Matches['base']
+$tagChannel = $Matches['channel']
+$expectedCargoVersion = "$tagBaseVersion-$tagChannel"
 
 function Get-CargoWorkspaceVersion {
     param ([string]$Path)
@@ -45,11 +47,11 @@ $cargoVersion = Get-CargoWorkspaceVersion -Path $cargoPath
 $msixVersion = $manifest.Package.Identity.Version
 
 $failures = [System.Collections.Generic.List[string]]::new()
-if ($tagVersion -ne $cargoVersion) {
-    $failures.Add("Tag version $tagVersion does not match Cargo workspace version $cargoVersion.")
+if ($expectedCargoVersion -ne $cargoVersion) {
+    $failures.Add("Tag version $expectedCargoVersion does not match Cargo workspace version $cargoVersion.")
 }
-if ($msixVersion -ne "$cargoVersion.0") {
-    $failures.Add("Rust MSIX identity version $msixVersion != $cargoVersion.0")
+if ($msixVersion -ne "$tagBaseVersion.0") {
+    $failures.Add("Rust MSIX identity version $msixVersion != $tagBaseVersion.0")
 }
 
 if ($failures.Count -gt 0) {
@@ -58,6 +60,6 @@ if ($failures.Count -gt 0) {
 }
 
 if (-not $Quiet) {
-    Write-Host ("Version gate OK: tag={0} cargo={1} rust-msix={2}" -f `
-        $Tag, $cargoVersion, $msixVersion) -ForegroundColor Green
+    Write-Host ("Version gate OK: tag={0} channel={1} cargo={2} rust-msix={3}" -f `
+        $Tag, $tagChannel, $cargoVersion, $msixVersion) -ForegroundColor Green
 }

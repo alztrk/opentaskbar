@@ -6454,7 +6454,7 @@ impl SettingsView {
                     }
                     Ok(None) => {
                         view.update_status =
-                            loc::t_fmt("UpdateCurrent", &[update::CURRENT_VERSION]);
+                            loc::t_fmt("UpdateCurrent", &[update::DISPLAY_VERSION]);
                     }
                     Err(()) => view.update_status = loc::t("ErrorUpdateCheck"),
                 }
@@ -10922,7 +10922,7 @@ impl SettingsView {
                         t,
                         Some("\u{E946}"),
                         loc::t("Version"),
-                        badge(t, concat!("v", env!("CARGO_PKG_VERSION")), true),
+                        badge(t, update::DISPLAY_VERSION, true),
                     )
                     .into_any_element(),
                     setting_row(
