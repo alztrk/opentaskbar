@@ -2168,10 +2168,9 @@ impl SettingsView {
         })
     }
 
-    /// Builds a dropdown for a copyable enum without repeating the entity/closure boilerplate.
-    /// Used by the newly wired runtime rows (content alignment, width/height/gap modes, density,
-    /// AI ring) so every one of them auto-saves and closes the menu consistently.
-    fn enum_dropdown<T, F>(
+    /// Builds a dropdown for a copyable enum without repeating entity/closure boilerplate,
+    /// passing `&mut Window` when the selection also syncs window-level state (glass/theme).
+    fn enum_dropdown_win<T, F>(
         &self,
         id: impl Into<String>,
         t: &UiTheme,
@@ -2182,7 +2181,7 @@ impl SettingsView {
     ) -> gpui::Div
     where
         T: Copy + Eq + 'static,
-        F: Fn(&mut Self, T, &mut Context<Self>) + 'static,
+        F: Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
     {
         let entity = cx.entity().downgrade();
         let callback = std::rc::Rc::new(on_select);
@@ -2196,18 +2195,109 @@ impl SettingsView {
                     flag_path: None,
                     glyph: None,
                     selected: current == value,
-                    on_select: std::rc::Rc::new(move |_win, app| {
+                    on_select: std::rc::Rc::new(move |win, app| {
                         let callback = callback.clone();
-                        let entity = entity.clone();
-                        let _ = entity.update(app, move |this, app| {
+                        let _ = entity.update(app, move |this, cx| {
                             this.open_dropdown = None;
-                            callback(this, value, app);
+                            callback(this, value, win, cx);
                         });
                     }),
                 }
             })
             .collect();
         self.make_dropdown(id, t, opts, cx)
+    }
+
+    /// Builds a dropdown for a copyable enum without repeating the entity/closure boilerplate.
+    fn enum_dropdown<T, F>(
+        &self,
+        id: impl Into<String>,
+        t: &UiTheme,
+        options: Vec<(String, T)>,
+        current: T,
+        on_select: F,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div
+    where
+        T: Copy + Eq + 'static,
+        F: Fn(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        self.enum_dropdown_win(
+            id,
+            t,
+            options,
+            current,
+            move |this, value, _win, cx| on_select(this, value, cx),
+            cx,
+        )
+    }
+
+    /// Toggle switch bound directly to a `bool` field on `DockSettings` with auto-save.
+    fn bool_switch(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        t: &UiTheme,
+        checked: bool,
+        field: fn(&mut DockSettings) -> &mut bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        ios_switch(
+            id,
+            t,
+            checked,
+            cx.listener(move |this, _, _, cx| {
+                let slot = field(&mut this.settings);
+                *slot = !*slot;
+                this.auto_save(cx);
+            }),
+        )
+    }
+
+    /// Toggle switch bound to a boolean key in the widget `extra` settings map.
+    fn widget_bool_switch(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        key: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        ios_switch(
+            id,
+            t,
+            widgets::setting_bool(&self.settings, key, false),
+            cx.listener(move |this, _, _, cx| {
+                let next = !widgets::setting_bool(&this.settings, key, false);
+                widgets::set_setting(&mut this.settings, key, serde_json::Value::Bool(next));
+                this.auto_save(cx);
+            }),
+        )
+    }
+
+    /// Stepped slider that forwards each step index directly to a `&mut Self` handler.
+    #[allow(clippy::too_many_arguments)]
+    fn setting_slider<F>(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        ratio: f32,
+        steps: usize,
+        label: impl Into<SharedString>,
+        on_step: F,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div
+    where
+        F: Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    {
+        let entity = cx.entity().downgrade();
+        let on_step = std::rc::Rc::new(on_step);
+        live_slider(id, t, ratio, steps, label, move |i| {
+            let entity = entity.clone();
+            let on_step = on_step.clone();
+            std::rc::Rc::new(move |win, app| {
+                let on_step = on_step.clone();
+                let _ = entity.update(app, move |this, cx| on_step(this, i, win, cx));
+            })
+        })
     }
 
     /// Bounded integer stepper with one debounced save per click. Bounds are inclusive and
@@ -5243,6 +5333,19 @@ impl SettingsView {
                 .bg(rgba(t.separator))
                 .flex_shrink_0()
         };
+        let txt = |sz: f32, col: u32, text: String| {
+            div()
+                .text_size(px(fonts::scaled_size(sz)))
+                .text_color(rgba(col))
+                .child(text)
+        };
+        let txt_w = |sz: f32, weight: gpui::FontWeight, col: u32, text: String| {
+            txt(sz, col, text).font_weight(weight)
+        };
+        let hrow = |gap: f32| div().flex().items_center().gap(px(gap));
+        let vcol = |gap: f32| div().flex().flex_col().gap(px(gap));
+        let fg = t.dock_preview_fg;
+        let sub = t.dock_preview_sub;
 
         match spec {
             WidgetChipSpec::Clock {
@@ -5252,37 +5355,13 @@ impl SettingsView {
             } => {
                 let show_weekday = !clock_weekday_is_redundant(&date, &weekday);
                 chip(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(icon_glyph("\u{E823}", 13.0, t.dock_preview_sub))
+                    hrow(7.0)
+                        .child(icon_glyph("\u{E823}", 13.0, sub))
+                        .child(txt_w(14.0, gpui::FontWeight::BOLD, fg, time))
                         .child(
-                            div()
-                                .text_size(px(fonts::scaled_size(14.0)))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgba(t.dock_preview_fg))
-                                .child(time),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
-                                        .child(date),
-                                )
-                                .when(show_weekday, |col| {
-                                    col.child(
-                                        div()
-                                            .text_size(px(fonts::scaled_size(9.0)))
-                                            .text_color(rgba(t.dock_preview_sub))
-                                            .child(weekday),
-                                    )
-                                }),
+                            vcol(0.0)
+                                .child(txt_w(10.0, gpui::FontWeight::SEMIBOLD, fg, date))
+                                .when(show_weekday, |col| col.child(txt(9.0, sub, weekday))),
                         ),
                 )
             }
@@ -5296,68 +5375,28 @@ impl SettingsView {
                 today_range,
             } => {
                 if !available {
-                    chip(
-                        div()
-                            .text_size(px(fonts::scaled_size(11.0)))
-                            .text_color(rgba(t.dock_preview_sub))
-                            .child(condition),
-                    )
+                    chip(txt(11.0, sub, condition))
                 } else {
-                    let mut row = div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
+                    let mut row = hrow(7.0)
                         .child(icon_glyph(
                             if is_rain { "\u{E9C4}" } else { "\u{E706}" },
                             15.0,
                             crate::design::gpui_rgba(icon_color, 0xff),
                         ))
+                        .child(txt_w(15.0, gpui::FontWeight::BOLD, fg, temp))
                         .child(
-                            div()
-                                .text_size(px(fonts::scaled_size(15.0)))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgba(t.dock_preview_fg))
-                                .child(temp),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
-                                        .child(place),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(condition),
-                                ),
+                            vcol(0.0)
+                                .child(txt_w(10.0, gpui::FontWeight::SEMIBOLD, fg, place))
+                                .child(txt(9.0, sub, condition)),
                         );
                     if let Some(range) = today_range {
                         // Secondary info: extra breathing room around the divider and muted
                         // high/low so the current temperature + city stay the focal point.
                         row = row.child(vdiv().mx(px(4.0))).child(
-                            div()
-                                .flex()
-                                .flex_col()
+                            vcol(0.0)
                                 .opacity(0.85)
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(loc::t("Today")),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(range),
-                                ),
+                                .child(txt(9.0, sub, loc::t("Today")))
+                                .child(txt_w(10.0, gpui::FontWeight::MEDIUM, sub, range)),
                         );
                     }
                     chip(row)
@@ -5371,10 +5410,7 @@ impl SettingsView {
                 let pct = format!("{:.0}", (ratio * 100.0).clamp(0.0, 100.0));
                 let pct_text = loc::t_fmt("OpacityPercent", &[&pct]);
                 chip(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
+                    hrow(8.0)
                         .child(progress_ring(
                             20.0,
                             2.5,
@@ -5383,22 +5419,9 @@ impl SettingsView {
                             crate::design::gpui_rgba(pal.widget_blue, 0xff),
                         ))
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(12.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
-                                        .child(pct_text),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(unit),
-                                ),
+                            vcol(0.0)
+                                .child(txt_w(12.0, gpui::FontWeight::SEMIBOLD, fg, pct_text))
+                                .child(txt(9.0, sub, unit)),
                         ),
                 )
             }
@@ -5406,109 +5429,78 @@ impl SettingsView {
                 is_focus,
                 running,
                 text,
-            } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(if is_focus {
-                        let ring_col = if running {
-                            crate::design::gpui_rgba(pal.selected_fg, 0xff)
+            } => {
+                let active_col = crate::design::gpui_rgba(pal.selected_fg, 0xff);
+                chip(
+                    hrow(7.0)
+                        .child(if is_focus {
+                            let ring_col = if running {
+                                active_col
+                            } else {
+                                crate::design::gpui_rgba(pal.widget_accent, 0xcc)
+                            };
+                            progress_ring(18.0, 2.4, 0.72, track_bg, ring_col).into_any_element()
                         } else {
-                            crate::design::gpui_rgba(pal.widget_accent, 0xcc)
-                        };
-                        progress_ring(18.0, 2.4, 0.72, track_bg, ring_col).into_any_element()
-                    } else {
-                        icon_glyph(
-                            if id == "countdown" {
-                                "\u{EA8F}"
-                            } else {
-                                "\u{E916}"
-                            },
-                            13.0,
-                            if running {
-                                crate::design::gpui_rgba(pal.selected_fg, 0xff)
-                            } else {
-                                t.dock_preview_sub
-                            },
-                        )
-                        .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(12.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(text),
-                    )
-                    .child(
-                        div()
-                            .size(px(22.0))
-                            .rounded(px(6.0))
-                            .bg(rgba(if running {
-                                crate::design::gpui_rgba(pal.selected_fill, 0xff)
-                            } else {
-                                track_bg
-                            }))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon_glyph(
-                                if running { "\u{E769}" } else { "\u{E768}" },
-                                10.0,
-                                if running {
-                                    crate::design::gpui_rgba(pal.selected_fg, 0xff)
+                            icon_glyph(
+                                if id == "countdown" {
+                                    "\u{EA8F}"
                                 } else {
-                                    t.dock_preview_fg
+                                    "\u{E916}"
                                 },
-                            )),
-                    ),
-            ),
+                                13.0,
+                                if running { active_col } else { sub },
+                            )
+                            .into_any_element()
+                        })
+                        .child(txt_w(12.0, gpui::FontWeight::SEMIBOLD, fg, text))
+                        .child(
+                            div()
+                                .size(px(22.0))
+                                .rounded(px(6.0))
+                                .bg(rgba(if running {
+                                    crate::design::gpui_rgba(pal.selected_fill, 0xff)
+                                } else {
+                                    track_bg
+                                }))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon_glyph(
+                                    if running { "\u{E769}" } else { "\u{E768}" },
+                                    10.0,
+                                    if running { active_col } else { fg },
+                                )),
+                        ),
+                )
+            }
             WidgetChipSpec::SystemStats { columns } => {
                 if columns.is_empty() {
-                    chip(
-                        div()
-                            .text_size(px(fonts::scaled_size(11.0)))
-                            .text_color(rgba(t.dock_preview_sub))
-                            .child("—"),
-                    )
+                    chip(txt(11.0, sub, "—".to_owned()))
                 } else {
                     let warm_col = if is_dark {
                         crate::design::gpui_rgba(pal.warning, 0xff)
                     } else {
                         0xb45309ff
                     };
-                    let mut row = div().flex().items_center().gap(px(9.0));
+                    let mut row = hrow(9.0);
                     for (idx, col) in columns.into_iter().take(4).enumerate() {
                         if idx > 0 {
                             row = row.child(vdiv());
                         }
                         let fill_w = (36.0 * col.ratio.clamp(0.0, 1.0)).round();
                         row = row.child(
-                            div()
+                            vcol(2.0)
                                 .min_w(px(36.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
                                 .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(col.label),
+                                    txt_w(9.0, gpui::FontWeight::SEMIBOLD, sub, col.label)
+                                        .whitespace_nowrap(),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(12.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(if col.warm_text {
-                                            warm_col
-                                        } else {
-                                            t.dock_preview_fg
-                                        }))
-                                        .child(col.value_text),
-                                )
+                                .child(txt_w(
+                                    12.0,
+                                    gpui::FontWeight::SEMIBOLD,
+                                    if col.warm_text { warm_col } else { fg },
+                                    col.value_text,
+                                ))
                                 .child(
                                     div()
                                         .w(px(36.0))
@@ -5535,14 +5527,16 @@ impl SettingsView {
                 down_history,
                 up_history: _,
             } => {
-                let split_speed = |s: &str| -> (String, String) {
-                    s.rsplit_once(' ').map_or_else(
-                        || (s.to_owned(), String::new()),
+                let speed_line = |glyph: &'static str, tint: (u8, u8, u8), raw: &str| {
+                    let (num, unit) = raw.rsplit_once(' ').map_or_else(
+                        || (raw.to_owned(), String::new()),
                         |(n, u)| (n.to_owned(), u.to_owned()),
-                    )
+                    );
+                    hrow(4.0)
+                        .child(icon_glyph(glyph, 9.0, crate::design::gpui_rgba(tint, 0xff)))
+                        .child(txt_w(11.0, gpui::FontWeight::SEMIBOLD, fg, num))
+                        .child(txt(9.5, sub, unit))
                 };
-                let (d_num, d_unit) = split_speed(&down);
-                let (u_num, u_unit) = split_speed(&up);
                 let spark = div()
                     .w(px(36.0))
                     .h(px(22.0))
@@ -5558,66 +5552,11 @@ impl SettingsView {
                             .bg(c_rgba(pal.success, 0xc8))
                     }));
                 chip(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(9.0))
-                        .child(spark)
-                        .child(vdiv())
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .child(icon_glyph(
-                                            "\u{E74B}",
-                                            9.0,
-                                            crate::design::gpui_rgba(pal.success, 0xff),
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(11.0)))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(rgba(t.dock_preview_fg))
-                                                .child(d_num),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(9.5)))
-                                                .text_color(rgba(t.dock_preview_sub))
-                                                .child(d_unit),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .child(icon_glyph(
-                                            "\u{E74A}",
-                                            9.0,
-                                            crate::design::gpui_rgba(pal.widget_blue, 0xff),
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(11.0)))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(rgba(t.dock_preview_fg))
-                                                .child(u_num),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(9.5)))
-                                                .text_color(rgba(t.dock_preview_sub))
-                                                .child(u_unit),
-                                        ),
-                                ),
-                        ),
+                    hrow(9.0).child(spark).child(vdiv()).child(
+                        vcol(2.0)
+                            .child(speed_line("\u{E74B}", pal.success, &down))
+                            .child(speed_line("\u{E74A}", pal.widget_blue, &up)),
+                    ),
                 )
             }
             WidgetChipSpec::BatteryLiquid {
@@ -5628,17 +5567,9 @@ impl SettingsView {
             } => {
                 if !present {
                     chip(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(icon_glyph("\u{E850}", 14.0, t.dock_preview_sub))
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(11.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child("—"),
-                            ),
+                        hrow(6.0)
+                            .child(icon_glyph("\u{E850}", 14.0, sub))
+                            .child(txt(11.0, sub, "—".to_owned())),
                     )
                 } else {
                     let ratio = (percent as f32 / 100.0).clamp(0.04, 1.0);
@@ -5660,8 +5591,7 @@ impl SettingsView {
                     };
                     let chamber_w = 82.0_f32;
                     let fill_w = (chamber_w * ratio).round();
-                    let use_dark_ink = !is_dark && percent < 50;
-                    let text_col = if use_dark_ink {
+                    let text_col = if !is_dark && percent < 50 {
                         t.text_primary
                     } else {
                         0xffff_ffff
@@ -5700,24 +5630,17 @@ impl SettingsView {
                                         .bg(c_rgba(fill_col, 0xf2)),
                                 )
                                 .child(
-                                    div()
+                                    hrow(3.0)
                                         .relative()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(3.0))
                                         .when(charging, |row| {
                                             row.child(icon_glyph("\u{E945}", 11.0, text_col))
                                         })
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(13.0)))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(rgba(text_col))
-                                                .child(loc::t_fmt(
-                                                    "OpacityPercent",
-                                                    &[&percent.to_string()],
-                                                )),
-                                        ),
+                                        .child(txt_w(
+                                            13.0,
+                                            gpui::FontWeight::SEMIBOLD,
+                                            text_col,
+                                            loc::t_fmt("OpacityPercent", &[&percent.to_string()]),
+                                        )),
                                 ),
                         )
                         .child(
@@ -5731,17 +5654,9 @@ impl SettingsView {
                 }
             }
             WidgetChipSpec::Bluetooth { devices } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
+                hrow(8.0)
                     .when(devices.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .text_size(px(fonts::scaled_size(11.0)))
-                                .text_color(rgba(t.dock_preview_sub))
-                                .child("—"),
-                        )
+                        row.child(txt(11.0, sub, "—".to_owned()))
                     })
                     .children(devices.into_iter().take(2).enumerate().map(
                         |(i, (kind, pct, low, full))| {
@@ -5750,21 +5665,17 @@ impl SettingsView {
                             } else if full {
                                 0x34d399ff
                             } else {
-                                t.dock_preview_fg
+                                fg
                             };
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(5.0))
+                            hrow(5.0)
                                 .when(i > 0, |el| el.child(vdiv()))
-                                .child(icon_glyph(kind.fluent_glyph(), 13.0, t.dock_preview_sub))
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(11.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(val_col))
-                                        .child(loc::t_fmt("OpacityPercent", &[&pct.to_string()])),
-                                )
+                                .child(icon_glyph(kind.fluent_glyph(), 13.0, sub))
+                                .child(txt_w(
+                                    11.0,
+                                    gpui::FontWeight::SEMIBOLD,
+                                    val_col,
+                                    loc::t_fmt("OpacityPercent", &[&pct.to_string()]),
+                                ))
                         },
                     )),
             ),
@@ -5799,37 +5710,20 @@ impl SettingsView {
                     pal.widget_blue
                 };
                 chip(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(icon_glyph("\u{EDA2}", 13.0, t.dock_preview_sub))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(5.0))
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(10.0)))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(rgba(t.dock_preview_fg))
-                                                .child(format!("{drv} {pct_text}")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(9.0)))
-                                                .text_color(rgba(t.dock_preview_sub))
-                                                .child(free_text),
-                                        ),
-                                )
-                                .child(mini_bar(used_ratio, bar_col, 72.0)),
-                        ),
+                    hrow(7.0).child(icon_glyph("\u{EDA2}", 13.0, sub)).child(
+                        vcol(2.0)
+                            .child(
+                                hrow(5.0)
+                                    .child(txt_w(
+                                        10.0,
+                                        gpui::FontWeight::SEMIBOLD,
+                                        fg,
+                                        format!("{drv} {pct_text}"),
+                                    ))
+                                    .child(txt(9.0, sub, free_text)),
+                            )
+                            .child(mini_bar(used_ratio, bar_col, 72.0)),
+                    ),
                 )
             }
             WidgetChipSpec::Media {
@@ -5837,42 +5731,30 @@ impl SettingsView {
                 artist,
                 muted,
             } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
+                hrow(7.0)
                     .child(
-                        div()
+                        vcol(0.0)
                             .max_w(px(86.0))
                             .overflow_hidden()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(10.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(if artist.is_empty() {
-                                        "Media".to_owned()
-                                    } else {
-                                        artist
-                                    }),
-                            ),
+                            .child(txt_w(10.0, gpui::FontWeight::SEMIBOLD, fg, title))
+                            .child(txt(
+                                9.0,
+                                sub,
+                                if artist.is_empty() {
+                                    "Media".to_owned()
+                                } else {
+                                    artist
+                                },
+                            )),
                     )
                     .child(vdiv())
-                    .child(icon_glyph("\u{E892}", 10.0, t.dock_preview_fg))
-                    .child(icon_glyph("\u{E768}", 11.0, t.dock_preview_fg))
-                    .child(icon_glyph("\u{E893}", 10.0, t.dock_preview_fg))
+                    .child(icon_glyph("\u{E892}", 10.0, fg))
+                    .child(icon_glyph("\u{E768}", 11.0, fg))
+                    .child(icon_glyph("\u{E893}", 10.0, fg))
                     .child(icon_glyph(
                         if muted { "\u{E74F}" } else { "\u{E767}" },
                         10.0,
-                        t.dock_preview_sub,
+                        sub,
                     )),
             ),
             WidgetChipSpec::Audio { volume, muted } => {
@@ -5890,96 +5772,53 @@ impl SettingsView {
                 } else {
                     (volume as f32 / 100.0).clamp(0.0, 1.0)
                 };
+                let col = if silent { sub } else { fg };
                 chip(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(icon_glyph(
-                                    glyph,
-                                    13.0,
-                                    if silent {
-                                        t.dock_preview_sub
-                                    } else {
-                                        t.dock_preview_fg
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(12.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(if silent {
-                                            t.dock_preview_sub
-                                        } else {
-                                            t.dock_preview_fg
-                                        }))
-                                        .child(loc::t_fmt(
-                                            "OpacityPercent",
-                                            &[&display_pct.to_string()],
-                                        )),
-                                ),
-                        )
+                    vcol(3.0)
+                        .child(hrow(6.0).child(icon_glyph(glyph, 13.0, col)).child(txt_w(
+                            12.0,
+                            gpui::FontWeight::SEMIBOLD,
+                            col,
+                            loc::t_fmt("OpacityPercent", &[&display_pct.to_string()]),
+                        )))
                         .child(mini_bar(ratio, pal.widget_blue, 52.0)),
                 )
             }
-            WidgetChipSpec::QuickSettings { pills } => {
-                chip(div().flex().items_center().gap(px(4.0)).children(
-                    pills.into_iter().enumerate().map(|(i, (glyph, active))| {
-                        let is_night = i == 2;
-                        let bg = if active {
-                            if is_night {
-                                if is_dark { 0xfbbf2428 } else { 0xd9770624 }
-                            } else if is_dark {
-                                0xffffff24
-                            } else {
-                                0x18181b1a
-                            }
-                        } else {
-                            0x00000000
-                        };
-                        let fg = if active {
-                            if is_night {
-                                if is_dark { 0xfcd34dff } else { 0xb45309ff }
-                            } else {
-                                t.dock_preview_fg
-                            }
-                        } else if is_dark {
-                            0xf4f4f55c
-                        } else {
-                            0x18181b5c
-                        };
-                        div()
-                            .size(px(30.0))
-                            .rounded(px(15.0))
-                            .bg(rgba(bg))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .font_family("Segoe Fluent Icons")
-                                    .text_size(px(fonts::scaled_size(13.5)))
-                                    .text_color(rgba(fg))
-                                    .child(glyph),
-                            )
-                    }),
-                ))
-            }
+            WidgetChipSpec::QuickSettings { pills } => chip(hrow(4.0).children(
+                pills.into_iter().enumerate().map(|(i, (glyph, active))| {
+                    let is_night = i == 2;
+                    let bg = if !active {
+                        0x00000000
+                    } else if is_night {
+                        if is_dark { 0xfbbf2428 } else { 0xd9770624 }
+                    } else if is_dark {
+                        0xffffff24
+                    } else {
+                        0x18181b1a
+                    };
+                    let pill_fg = if !active {
+                        if is_dark { 0xf4f4f55c } else { 0x18181b5c }
+                    } else if is_night {
+                        if is_dark { 0xfcd34dff } else { 0xb45309ff }
+                    } else {
+                        fg
+                    };
+                    div()
+                        .size(px(30.0))
+                        .rounded(px(15.0))
+                        .bg(rgba(bg))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(txt(13.5, pill_fg, glyph).font_family("Segoe Fluent Icons"))
+                }),
+            )),
             WidgetChipSpec::Keyboard { code } => chip(
-                div()
+                txt_w(12.0, gpui::FontWeight::BOLD, fg, code)
                     .px(px(6.0))
                     .py(px(2.0))
                     .rounded(px(5.0))
-                    .bg(rgba(track_bg))
-                    .text_size(px(fonts::scaled_size(12.0)))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgba(t.dock_preview_fg))
-                    .child(code),
+                    .bg(rgba(track_bg)),
             ),
             WidgetChipSpec::AiDual {
                 provider_id,
@@ -5989,75 +5828,38 @@ impl SettingsView {
                 let dot_col =
                     brand_color.unwrap_or_else(|| widgets::ai_provider_color(provider_id));
                 chip(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
+                    hrow(8.0)
                         .child(ai_brand_badge(provider_id, dot_col, is_dark))
-                        .child(div().flex().flex_col().gap(px(3.0)).children(
-                            rows.into_iter().take(2).map(|(lbl, used, col, reset)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
-                                    .child(
-                                        div()
-                                            .w(px(18.0))
-                                            .text_size(px(fonts::scaled_size(9.0)))
-                                            .text_color(rgba(t.dock_preview_sub))
-                                            .child(lbl),
-                                    )
+                        .child(vcol(3.0).children(rows.into_iter().take(2).map(
+                            |(lbl, used, col, reset)| {
+                                hrow(5.0)
+                                    .child(txt(9.0, sub, lbl).w(px(18.0)))
                                     .child(mini_bar(used, col, 48.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts::scaled_size(9.0)))
-                                            .text_color(rgba(t.dock_preview_sub))
-                                            .child(reset),
-                                    )
-                            }),
-                        )),
+                                    .child(txt(9.0, sub, reset))
+                            },
+                        ))),
                 )
             }
             WidgetChipSpec::AiOpenCode { columns } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
+                hrow(8.0)
                     .child(ai_brand_badge(
                         "aiusage_opencode",
                         widgets::ai_provider_color("aiusage_opencode"),
                         is_dark,
                     ))
-                    .child(div().flex().items_center().gap(px(7.0)).children(
-                        columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
+                    .child(hrow(7.0).children(columns.into_iter().take(3).map(
+                        |(lbl, val, used, col, _)| {
+                            vcol(2.0)
                                 .child(
-                                    div()
+                                    hrow(3.0)
                                         .w(px(40.0))
-                                        .flex()
-                                        .items_center()
                                         .justify_between()
-                                        .gap(px(3.0))
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(8.5)))
-                                                .text_color(rgba(t.dock_preview_sub))
-                                                .child(lbl),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(fonts::scaled_size(9.0)))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(rgba(t.dock_preview_fg))
-                                                .child(val),
-                                        ),
+                                        .child(txt(8.5, sub, lbl))
+                                        .child(txt_w(9.0, gpui::FontWeight::SEMIBOLD, fg, val)),
                                 )
                                 .child(mini_bar(used, col, 40.0))
-                        }),
-                    )),
+                        },
+                    ))),
             ),
             WidgetChipSpec::AiCopilot {
                 value_text,
@@ -6065,35 +5867,15 @@ impl SettingsView {
                 used,
                 bar_color,
             } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
+                hrow(8.0)
                     .child(ai_brand_badge("aiusage_copilot", bar_color, is_dark))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
+                        vcol(3.0)
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                hrow(8.0)
                                     .justify_between()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts::scaled_size(11.0)))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(rgba(t.dock_preview_fg))
-                                            .child(value_text),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts::scaled_size(9.0)))
-                                            .text_color(rgba(t.dock_preview_sub))
-                                            .child(meta_text),
-                                    ),
+                                    .child(txt_w(11.0, gpui::FontWeight::SEMIBOLD, fg, value_text))
+                                    .child(txt(9.0, sub, meta_text)),
                             )
                             .child(mini_bar(used, bar_color, 72.0)),
                     ),
@@ -6103,67 +5885,37 @@ impl SettingsView {
                 name,
                 value_text,
                 ..
-            } => {
-                let dot_col = widgets::ai_provider_color(provider_id);
-                chip(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(ai_brand_badge(provider_id, dot_col, is_dark))
-                        .child(vdiv())
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(name),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(11.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
-                                        .child(value_text),
-                                ),
-                        ),
-                )
-            }
+            } => chip(
+                hrow(7.0)
+                    .child(ai_brand_badge(
+                        provider_id,
+                        widgets::ai_provider_color(provider_id),
+                        is_dark,
+                    ))
+                    .child(vdiv())
+                    .child(vcol(0.0).child(txt(9.0, sub, name.to_owned())).child(txt_w(
+                        11.0,
+                        gpui::FontWeight::SEMIBOLD,
+                        fg,
+                        value_text,
+                    ))),
+            ),
             WidgetChipSpec::Simple {
                 icon_color,
                 top,
                 bottom,
                 ..
             } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
+                hrow(7.0)
                     .child(icon_glyph(
                         widget_glyph(id),
                         13.0,
                         crate::design::gpui_rgba(icon_color, 0xff),
                     ))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(11.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(top),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(bottom),
-                            ),
+                        vcol(0.0)
+                            .child(txt_w(11.0, gpui::FontWeight::SEMIBOLD, fg, top))
+                            .child(txt(9.0, sub, bottom)),
                     ),
             ),
             WidgetChipSpec::Custom {
@@ -6198,36 +5950,13 @@ impl SettingsView {
                         icon_glyph("\u{E81E}", 13.0, tint).into_any_element()
                     }
                 };
-                let mut column = div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(11.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(value),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(9.0)))
-                            .text_color(rgba(t.dock_preview_sub))
-                            .child(label),
-                    );
+                let mut column = vcol(0.0)
+                    .child(txt_w(11.0, gpui::FontWeight::SEMIBOLD, fg, value))
+                    .child(txt(9.0, sub, label));
                 if let Some((_, detail)) = details.first() {
-                    column = column.child(
-                        div()
-                            .text_size(px(fonts::scaled_size(9.0)))
-                            .text_color(rgba(t.dock_preview_sub))
-                            .child(detail.clone()),
-                    );
+                    column = column.child(txt(9.0, sub, detail.clone()));
                 }
-                let mut inner = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(icon_node)
-                    .child(column);
+                let mut inner = hrow(7.0).child(icon_node).child(column);
                 if let Some(ratio) = ratio {
                     inner = inner.child(mini_bar(ratio, color, 24.0));
                 }
@@ -6517,31 +6246,23 @@ impl SettingsView {
         current: SurfaceBackground,
         apply: fn(&mut DockSettings, SurfaceBackground),
     ) -> AnyElement {
-        let opts: Vec<DropdownOption> = [
-            (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
-            (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
-            (loc::t("SurfaceNone"), SurfaceBackground::None),
-            (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
-        ]
-        .into_iter()
-        .map(|(text, background)| {
-            let entity = cx.entity().downgrade();
-            DropdownOption {
-                label: SharedString::from(text),
-                flag_path: None,
-                glyph: None,
-                selected: current == background,
-                on_select: std::rc::Rc::new(move |win, app| {
-                    let _ = entity.update(app, |this, cx| {
-                        this.open_dropdown = None;
-                        apply(&mut this.settings, background);
-                        this.sync_settings_glass(win);
-                        this.auto_save(cx);
-                    });
-                }),
-            }
-        })
-        .collect();
+        let dd = self.enum_dropdown_win(
+            id,
+            t,
+            vec![
+                (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
+                (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
+                (loc::t("SurfaceNone"), SurfaceBackground::None),
+                (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
+            ],
+            current,
+            move |this, background, win, cx| {
+                apply(&mut this.settings, background);
+                this.sync_settings_glass(win);
+                this.auto_save(cx);
+            },
+            cx,
+        );
         let glyph = match id {
             "surf-dock" => "\u{E90E}",
             "surf-menu" => "\u{E700}",
@@ -6549,7 +6270,6 @@ impl SettingsView {
             "surf-settings" => "\u{E713}",
             _ => "\u{E81E}",
         };
-        let dd = self.make_dropdown(id, t, opts, cx);
         self.target_row(row_id, t, Some(glyph), label, dd)
     }
 
@@ -6781,97 +6501,55 @@ impl SettingsView {
     }
 
     fn render_dock(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let align_dd = self.make_dropdown(
+        let align_dd = self.enum_dropdown(
             "dock-align",
             t,
-            [
+            vec![
                 (loc::t("Left"), DockPosition::Left),
                 (loc::t("Center"), DockPosition::Center),
                 (loc::t("Right"), DockPosition::Right),
-            ]
-            .into_iter()
-            .map(|(label, pos)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(label),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.settings.position == pos,
-                    on_select: std::rc::Rc::new(move |_win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.settings.position = pos;
-                            this.auto_save(cx);
-                        });
-                    }),
-                }
-            })
-            .collect(),
+            ],
+            self.settings.position,
+            |this, pos, cx| {
+                this.settings.position = pos;
+                this.auto_save(cx);
+            },
             cx,
         );
-
-        let size_dd = self.make_dropdown(
+        let size_dd = self.enum_dropdown(
             "dock-size",
             t,
-            [
+            vec![
                 (loc::t("SizeCompact"), DockSize::Compact),
                 (loc::t("SizeMedium"), DockSize::Medium),
                 (loc::t("SizeLarge"), DockSize::Large),
-            ]
-            .into_iter()
-            .map(|(label, sz)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(label),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.settings.size == sz,
-                    on_select: std::rc::Rc::new(move |_win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.settings.size = sz;
-                            this.auto_save(cx);
-                        });
-                    }),
-                }
-            })
-            .collect(),
+            ],
+            self.settings.size,
+            |this, sz, cx| {
+                this.settings.size = sz;
+                this.auto_save(cx);
+            },
             cx,
         );
-
-        let autohide_dd = self.make_dropdown(
+        let autohide_dd = self.enum_dropdown(
             "dock-autohide",
             t,
-            [
+            vec![
                 (loc::t("HotkeyDisabled"), AutoHideMode::Disabled),
                 (loc::t("AutoHideSmart"), AutoHideMode::Smart),
                 (loc::t("AutoHideAlways"), AutoHideMode::Always),
-            ]
-            .into_iter()
-            .map(|(label, mode)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(label),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.settings.auto_hide == mode,
-                    on_select: std::rc::Rc::new(move |_win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.settings.auto_hide = mode;
-                            this.auto_save(cx);
-                        });
-                    }),
-                }
-            })
-            .collect(),
+            ],
+            self.settings.auto_hide,
+            |this, mode, cx| {
+                this.settings.auto_hide = mode;
+                this.auto_save(cx);
+            },
             cx,
         );
-
-        let start_placement_dd = self.make_dropdown(
+        let start_placement_dd = self.enum_dropdown(
             "start-placement",
             t,
-            [
+            vec![
                 (loc::t("PlacementStart"), StartButtonPlacement::Start),
                 (loc::t("PlacementEnd"), StartButtonPlacement::End),
                 (loc::t("PlacementHidden"), StartButtonPlacement::Hidden),
@@ -6879,25 +6557,12 @@ impl SettingsView {
                     loc::t("PlacementInWidgets"),
                     StartButtonPlacement::InWidgets,
                 ),
-            ]
-            .into_iter()
-            .map(|(label, placement)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(label),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.settings.start_placement == placement,
-                    on_select: std::rc::Rc::new(move |_win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.settings.start_placement = placement;
-                            this.auto_save(cx);
-                        });
-                    }),
-                }
-            })
-            .collect(),
+            ],
+            self.settings.start_placement,
+            |this, placement, cx| {
+                this.settings.start_placement = placement;
+                this.auto_save(cx);
+            },
             cx,
         );
 
@@ -7145,21 +6810,15 @@ impl SettingsView {
                 t,
                 Some("\u{E9A6}"),
                 loc::t("StartWidgetIndex"),
-                stepper(
-                    "start-widget-index-minus",
-                    "start-widget-index-plus",
+                self.number_stepper(
+                    "start-widget-index",
                     t,
-                    self.settings.start_widget_index.to_string(),
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.start_widget_index =
-                            (this.settings.start_widget_index - 1).max(0);
-                        this.auto_save(cx);
-                    }),
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.start_widget_index =
-                            (this.settings.start_widget_index + 1).min(32);
-                        this.auto_save(cx);
-                    }),
+                    self.settings.start_widget_index,
+                    0,
+                    32,
+                    |s| s.start_widget_index,
+                    |s, v| s.start_widget_index = v,
+                    cx,
                 ),
             ),
             self.target_row(
@@ -7167,33 +6826,28 @@ impl SettingsView {
                 t,
                 Some("\u{E8A3}"),
                 loc::t("DockScale"),
-                live_slider(
+                self.setting_slider(
                     "sc",
                     t,
                     ((self.settings.dock_scale as f32) - 0.75) / 0.75,
                     16,
                     loc::t_fmt("OpacityPercent", &[&scale_pct.to_string()]),
-                    |i| {
-                        let entity = cx.entity().downgrade();
-                        std::rc::Rc::new(move |_win, app| {
-                            let _ = entity.update(app, |this, cx| {
-                                let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
-                                if (this.settings.dock_scale - next).abs() > 0.001 {
-                                    this.settings.dock_scale = next;
-                                    this.auto_save(cx);
-                                }
-                            });
-                        })
+                    |this, i, _, cx| {
+                        let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
+                        if (this.settings.dock_scale - next).abs() > 0.001 {
+                            this.settings.dock_scale = next;
+                            this.auto_save(cx);
+                        }
                     },
+                    cx,
                 ),
-            )
-            .into_any_element(),
+            ),
             self.target_row(
                 "DockBottomGap",
                 t,
                 Some(DOCK_GAP_GLYPH),
                 loc::t("DockBottomGap"),
-                live_slider(
+                self.setting_slider(
                     "gap",
                     t,
                     self.settings.dock_bottom_gap_pixels as f32 / 32.0,
@@ -7202,27 +6856,22 @@ impl SettingsView {
                         "PixelsValue",
                         &[&self.settings.dock_bottom_gap_pixels.to_string()],
                     ),
-                    |i| {
-                        let entity = cx.entity().downgrade();
-                        std::rc::Rc::new(move |_win, app| {
-                            let _ = entity.update(app, |this, cx| {
-                                let next = ((i as i32) * 2).clamp(0, 32);
-                                if this.settings.dock_bottom_gap_pixels != next {
-                                    this.settings.dock_bottom_gap_pixels = next;
-                                    this.auto_save(cx);
-                                }
-                            });
-                        })
+                    |this, i, _, cx| {
+                        let next = ((i as i32) * 2).clamp(0, 32);
+                        if this.settings.dock_bottom_gap_pixels != next {
+                            this.settings.dock_bottom_gap_pixels = next;
+                            this.auto_save(cx);
+                        }
                     },
+                    cx,
                 ),
-            )
-            .into_any_element(),
+            ),
             self.target_row(
                 "DockIconPadding",
                 t,
                 Some("\u{E96E}"),
                 loc::t("DockIconPadding"),
-                live_slider(
+                self.setting_slider(
                     "pad",
                     t,
                     self.settings.dock_icon_padding as f32 / 12.0,
@@ -7231,37 +6880,29 @@ impl SettingsView {
                         "PixelsValue",
                         &[&self.settings.dock_icon_padding.to_string()],
                     ),
-                    |i| {
-                        let entity = cx.entity().downgrade();
-                        std::rc::Rc::new(move |_win, app| {
-                            let _ = entity.update(app, |this, cx| {
-                                let next = (i as i32).clamp(0, 12);
-                                if this.settings.dock_icon_padding != next {
-                                    this.settings.dock_icon_padding = next;
-                                    this.auto_save(cx);
-                                }
-                            });
-                        })
+                    |this, i, _, cx| {
+                        let next = (i as i32).clamp(0, 12);
+                        if this.settings.dock_icon_padding != next {
+                            this.settings.dock_icon_padding = next;
+                            this.auto_save(cx);
+                        }
                     },
+                    cx,
                 ),
-            )
-            .into_any_element(),
+            ),
             self.target_row(
                 "LayoutFullWidth",
                 t,
                 Some("\u{E740}"),
                 loc::t("LayoutFullWidth"),
-                ios_switch(
+                self.bool_switch(
                     "sw-fullw",
                     t,
                     self.settings.full_width,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.full_width = !this.settings.full_width;
-                        this.auto_save(cx);
-                    }),
+                    |s| &mut s.full_width,
+                    cx,
                 ),
-            )
-            .into_any_element(),
+            ),
             setting_row(
                 t,
                 Some("\u{E72C}"),
@@ -7280,7 +6921,7 @@ impl SettingsView {
             .into_any_element(),
         ]);
 
-        let out = vec![
+        vec![
             section_card(t, loc::t("SectionDockLayout"), layout_rows).into_any_element(),
             section_card(
                 t,
@@ -7302,18 +6943,14 @@ impl SettingsView {
                         t,
                         Some("\u{E7F4}"),
                         loc::t("AllMonitors"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-allmon",
                             t,
                             self.settings.show_on_all_monitors,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_on_all_monitors =
-                                    !this.settings.show_on_all_monitors;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_on_all_monitors,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row_desc(
                         "PreviewsEnabled",
                         t,
@@ -7324,14 +6961,12 @@ impl SettingsView {
                         } else {
                             SharedString::from(loc::t("PreviewDisabledHint"))
                         },
-                        ios_switch(
+                        self.bool_switch(
                             "sw-previews",
                             t,
                             self.settings.previews_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.previews_enabled = !this.settings.previews_enabled;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.previews_enabled,
+                            cx,
                         ),
                     ),
                     self.target_row(
@@ -7339,15 +6974,12 @@ impl SettingsView {
                         t,
                         Some("\u{E767}"),
                         loc::t("WheelVolume"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-wheel-volume",
                             t,
                             self.settings.wheel_volume_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.wheel_volume_enabled =
-                                    !this.settings.wheel_volume_enabled;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.wheel_volume_enabled,
+                            cx,
                         ),
                     ),
                     self.target_row(
@@ -7355,51 +6987,40 @@ impl SettingsView {
                         t,
                         Some("\u{E708}"),
                         loc::t("FocusMode"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-focus",
                             t,
                             self.settings.focus_mode,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.focus_mode = !this.settings.focus_mode;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.focus_mode,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "RevealDockOnWinKey",
                         t,
                         Some("\u{E765}"),
                         loc::t("RevealDockOnWinKey"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-winkey",
                             t,
                             self.settings.reveal_dock_on_win_key,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.reveal_dock_on_win_key =
-                                    !this.settings.reveal_dock_on_win_key;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.reveal_dock_on_win_key,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "CurrentDesktopOnly",
                         t,
                         Some("\u{E7C4}"),
                         loc::t("CurrentDesktopOnly"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-vdesk",
                             t,
                             self.settings.current_desktop_only,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.current_desktop_only =
-                                    !this.settings.current_desktop_only;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.current_desktop_only,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                 ],
             )
             .into_any_element(),
@@ -7412,139 +7033,104 @@ impl SettingsView {
                         t,
                         Some("\u{E8A9}"),
                         loc::t("ShowStartButton"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-start-btn",
                             t,
                             self.settings.show_start_button,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_start_button = !this.settings.show_start_button;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_start_button,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "ShowSearchButton",
                         t,
                         Some("\u{E721}"),
                         loc::t("ShowSearchButton"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-search-btn",
                             t,
                             self.settings.show_search_button,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_search_button =
-                                    !this.settings.show_search_button;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_search_button,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "ShowTaskViewButton",
                         t,
                         Some("\u{E7C4}"),
                         loc::t("ShowTaskViewButton"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-taskview-btn",
                             t,
                             self.settings.show_task_view_button,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_task_view_button =
-                                    !this.settings.show_task_view_button;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_task_view_button,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "TrayApps",
                         t,
                         Some("\u{E70E}"),
                         loc::t("TrayApps"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-tray",
                             t,
                             self.settings.show_tray_button,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_tray_button = !this.settings.show_tray_button;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_tray_button,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "RecycleBin",
                         t,
                         Some("\u{E74D}"),
                         loc::t("RecycleBin"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-bin",
                             t,
                             self.settings.show_recycle_bin,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_recycle_bin = !this.settings.show_recycle_bin;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_recycle_bin,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "WidgetShowDesktop",
                         t,
                         Some("\u{E7F8}"),
                         loc::t("WidgetShowDesktop"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-sd",
                             t,
                             self.settings.show_desktop_button,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_desktop_button =
-                                    !this.settings.show_desktop_button;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.show_desktop_button,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     self.target_row(
                         "MiddleClickAction",
                         t,
                         Some("\u{E962}"),
                         loc::t("MiddleClickAction"),
-                        self.make_dropdown(
+                        self.enum_dropdown(
                             "dock-mclick",
                             t,
-                            [
-                                (MiddleClickAction::NewWindow, loc::t("MiddleClickNewWindow")),
-                                (MiddleClickAction::CloseWindow, loc::t("MiddleClickClose")),
-                                (MiddleClickAction::Nothing, loc::t("MiddleClickNothing")),
-                            ]
-                            .into_iter()
-                            .map(|(act, label)| {
-                                let entity = cx.entity().downgrade();
-                                DropdownOption {
-                                    label: SharedString::from(label),
-                                    flag_path: None,
-                                    glyph: None,
-                                    selected: self.settings.middle_click_action == act,
-                                    on_select: std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            this.open_dropdown = None;
-                                            this.settings.middle_click_action = act;
-                                            this.auto_save(cx);
-                                        });
-                                    }),
-                                }
-                            })
-                            .collect(),
+                            vec![
+                                (loc::t("MiddleClickNewWindow"), MiddleClickAction::NewWindow),
+                                (loc::t("MiddleClickClose"), MiddleClickAction::CloseWindow),
+                                (loc::t("MiddleClickNothing"), MiddleClickAction::Nothing),
+                            ],
+                            self.settings.middle_click_action,
+                            |this, act, cx| {
+                                this.settings.middle_click_action = act;
+                                this.auto_save(cx);
+                            },
                             cx,
                         ),
                     ),
                 ],
             )
             .into_any_element(),
-        ];
-        out
+        ]
     }
 
     fn render_theme_card(
@@ -8022,32 +7608,19 @@ impl SettingsView {
         // ---------------------------------------------------------------------
         // SECTION 3: Color Mode & Glass Optics
         // ---------------------------------------------------------------------
-        let theme_dd = self.make_dropdown(
+        let theme_dd = self.enum_dropdown_win(
             "themes-theme",
             t,
-            [
+            vec![
                 (loc::t("ThemeWindowsAppearance"), AppTheme::System),
                 (loc::t("Dark"), AppTheme::Dark),
                 (loc::t("Light"), AppTheme::Light),
-            ]
-            .into_iter()
-            .map(|(label, th)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(label),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.settings.theme == th,
-                    on_select: std::rc::Rc::new(move |win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.settings.theme = th;
-                            this.apply_theme_change(Some(win), false, cx);
-                        });
-                    }),
-                }
-            })
-            .collect(),
+            ],
+            self.settings.theme,
+            |this, th, win, cx| {
+                this.settings.theme = th;
+                this.apply_theme_change(Some(win), false, cx);
+            },
             cx,
         );
 
@@ -8083,24 +7656,20 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(live_slider(
+                    .child(self.setting_slider(
                         "rad",
                         t,
                         self.settings.dock_corner_radius.unwrap_or(16) as f32 / 32.0,
                         17,
                         radius_label,
-                        |i| {
-                            let entity = cx.entity().downgrade();
-                            std::rc::Rc::new(move |_win, app| {
-                                let _ = entity.update(app, |this, cx| {
-                                    let next = Some(((i as i32) * 2).clamp(0, 32));
-                                    if this.settings.dock_corner_radius != next {
-                                        this.settings.dock_corner_radius = next;
-                                        this.auto_save(cx);
-                                    }
-                                });
-                            })
+                        |this, i, _, cx| {
+                            let next = Some(((i as i32) * 2).clamp(0, 32));
+                            if this.settings.dock_corner_radius != next {
+                                this.settings.dock_corner_radius = next;
+                                this.auto_save(cx);
+                            }
                         },
+                        cx,
                     ))
                     .when(self.settings.dock_corner_radius.is_some(), |row| {
                         row.child(compact_card_button(
@@ -8132,25 +7701,21 @@ impl SettingsView {
                     t,
                     Some("\u{EB42}"),
                     loc::t("GlassBlurLabel"),
-                    live_slider(
+                    self.setting_slider(
                         "glass-blur",
                         t,
                         (self.settings.glass_blur_sigma.clamp(0.0, 36.0) as f32) / 36.0,
                         37,
                         loc::t_fmt("PixelsValue", &[&blur_px.to_string()]),
-                        |i| {
-                            let entity = cx.entity().downgrade();
-                            std::rc::Rc::new(move |win, app| {
-                                let _ = entity.update(app, |this, cx| {
-                                    let next = (i as f64).clamp(0.0, 36.0);
-                                    if (this.settings.glass_blur_sigma - next).abs() > 0.01 {
-                                        this.settings.glass_blur_sigma = next;
-                                        this.sync_settings_glass(win);
-                                        this.auto_save(cx);
-                                    }
-                                });
-                            })
+                        |this, i, win, cx| {
+                            let next = (i as f64).clamp(0.0, 36.0);
+                            if (this.settings.glass_blur_sigma - next).abs() > 0.01 {
+                                this.settings.glass_blur_sigma = next;
+                                this.sync_settings_glass(win);
+                                this.auto_save(cx);
+                            }
                         },
+                        cx,
                     ),
                 ),
                 self.target_row(
@@ -8158,25 +7723,21 @@ impl SettingsView {
                     t,
                     Some("\u{E771}"),
                     loc::t("GlassSaturationLabel"),
-                    live_slider(
+                    self.setting_slider(
                         "glass-sat",
                         t,
                         ((self.settings.glass_saturation.clamp(0.8, 1.8) as f32) - 0.8) / 1.0,
                         26,
                         loc::t_fmt("OpacityPercent", &[&sat_pct.to_string()]),
-                        |i| {
-                            let entity = cx.entity().downgrade();
-                            std::rc::Rc::new(move |win, app| {
-                                let _ = entity.update(app, |this, cx| {
-                                    let next = (0.80 + (i as f64) * 0.04).clamp(0.80, 1.80);
-                                    if (this.settings.glass_saturation - next).abs() > 0.001 {
-                                        this.settings.glass_saturation = next;
-                                        this.sync_settings_glass(win);
-                                        this.auto_save(cx);
-                                    }
-                                });
-                            })
+                        |this, i, win, cx| {
+                            let next = (0.80 + (i as f64) * 0.04).clamp(0.80, 1.80);
+                            if (this.settings.glass_saturation - next).abs() > 0.001 {
+                                this.settings.glass_saturation = next;
+                                this.sync_settings_glass(win);
+                                this.auto_save(cx);
+                            }
                         },
+                        cx,
                     ),
                 ),
                 self.target_row(
@@ -8184,25 +7745,21 @@ impl SettingsView {
                     t,
                     Some("\u{E706}"),
                     loc::t("GlassEdgeGlowLabel"),
-                    live_slider(
+                    self.setting_slider(
                         "glass-edge",
                         t,
                         self.settings.glass_edge_glow.clamp(0.0, 1.0) as f32,
                         26,
                         loc::t_fmt("OpacityPercent", &[&edge_pct.to_string()]),
-                        |i| {
-                            let entity = cx.entity().downgrade();
-                            std::rc::Rc::new(move |win, app| {
-                                let _ = entity.update(app, |this, cx| {
-                                    let next = ((i as f64) * 0.04).clamp(0.0, 1.0);
-                                    if (this.settings.glass_edge_glow - next).abs() > 0.001 {
-                                        this.settings.glass_edge_glow = next;
-                                        this.sync_settings_glass(win);
-                                        this.auto_save(cx);
-                                    }
-                                });
-                            })
+                        |this, i, win, cx| {
+                            let next = ((i as f64) * 0.04).clamp(0.0, 1.0);
+                            if (this.settings.glass_edge_glow - next).abs() > 0.001 {
+                                this.settings.glass_edge_glow = next;
+                                this.sync_settings_glass(win);
+                                this.auto_save(cx);
+                            }
                         },
+                        cx,
                     ),
                 ),
                 self.target_row(
@@ -8533,7 +8090,7 @@ impl SettingsView {
                         t,
                         Some("\u{E8D3}"),
                         loc::t("UiFontSize"),
-                        live_slider(
+                        self.setting_slider(
                             "ui-font-size",
                             t,
                             (self.settings.ui_font_size - 9.0) / 15.0,
@@ -8542,19 +8099,15 @@ impl SettingsView {
                                 "PixelsValue",
                                 &[&(self.settings.ui_font_size.round() as i32).to_string()],
                             ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (9.0 + i as f32).clamp(9.0, 24.0);
-                                        if (this.settings.ui_font_size - next).abs() > 0.01 {
-                                            this.settings.ui_font_size = next;
-                                            fonts::apply_settings(&this.settings);
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
+                            |this, i, _, cx| {
+                                let next = (9.0 + i as f32).clamp(9.0, 24.0);
+                                if (this.settings.ui_font_size - next).abs() > 0.01 {
+                                    this.settings.ui_font_size = next;
+                                    fonts::apply_settings(&this.settings);
+                                    this.auto_save(cx);
+                                }
                             },
+                            cx,
                         ),
                     )
                     .into_any_element(),
@@ -8576,15 +8129,12 @@ impl SettingsView {
                         t,
                         Some("\u{E945}"),
                         loc::t("Animations"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-anim",
                             t,
                             self.settings.animations_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.animations_enabled =
-                                    !this.settings.animations_enabled;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.animations_enabled,
+                            cx,
                         ),
                     ),
                     dim_when(
@@ -8594,15 +8144,12 @@ impl SettingsView {
                             t,
                             Some("\u{E71E}"),
                             loc::t("Magnification"),
-                            ios_switch(
+                            self.bool_switch(
                                 "sw-mag",
                                 t,
                                 self.settings.magnification_enabled,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.magnification_enabled =
-                                        !this.settings.magnification_enabled;
-                                    this.auto_save(cx);
-                                }),
+                                |s| &mut s.magnification_enabled,
+                                cx,
                             ),
                         ),
                     )
@@ -8615,15 +8162,12 @@ impl SettingsView {
                             Some("\u{E71E}"),
                             loc::t("MagnificationExpandsDock"),
                             loc::t("MagnificationExpandsDockDescription"),
-                            ios_switch(
+                            self.bool_switch(
                                 "sw-mag-expands-dock",
                                 t,
                                 self.settings.magnification_expands_dock,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.magnification_expands_dock =
-                                        !this.settings.magnification_expands_dock;
-                                    this.auto_save(cx);
-                                }),
+                                |s| &mut s.magnification_expands_dock,
+                                cx,
                             ),
                         ),
                     )
@@ -8635,32 +8179,19 @@ impl SettingsView {
                             t,
                             Some("\u{E9E9}"),
                             loc::t("FisheyeIntensity"),
-                            self.make_dropdown(
+                            self.enum_dropdown(
                                 "themes-fisheye",
                                 t,
-                                [
-                                    (FisheyeIntensity::Low, loc::t("FisheyeLow")),
-                                    (FisheyeIntensity::Normal, loc::t("FisheyeNormal")),
-                                    (FisheyeIntensity::Strong, loc::t("FisheyeStrong")),
-                                ]
-                                .into_iter()
-                                .map(|(level, label)| {
-                                    let entity = cx.entity().downgrade();
-                                    DropdownOption {
-                                        label: SharedString::from(label),
-                                        flag_path: None,
-                                        glyph: None,
-                                        selected: self.settings.fisheye_intensity == level,
-                                        on_select: std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                this.open_dropdown = None;
-                                                this.settings.fisheye_intensity = level;
-                                                this.auto_save(cx);
-                                            });
-                                        }),
-                                    }
-                                })
-                                .collect(),
+                                vec![
+                                    (loc::t("FisheyeLow"), FisheyeIntensity::Low),
+                                    (loc::t("FisheyeNormal"), FisheyeIntensity::Normal),
+                                    (loc::t("FisheyeStrong"), FisheyeIntensity::Strong),
+                                ],
+                                self.settings.fisheye_intensity,
+                                |this, level, cx| {
+                                    this.settings.fisheye_intensity = level;
+                                    this.auto_save(cx);
+                                },
                                 cx,
                             ),
                         ),
@@ -8680,7 +8211,6 @@ impl SettingsView {
                             ),
                             None => format!("{} ({max_hz} Hz)", loc::t("AnimationFpsAuto")),
                         };
-                        let fps_entity = cx.entity().downgrade();
                         dim_when(
                             !self.settings.animations_enabled,
                             self.target_row(
@@ -8688,28 +8218,24 @@ impl SettingsView {
                                 t,
                                 Some("\u{EC4A}"),
                                 loc::t("AnimationFps"),
-                                live_slider(
+                                self.setting_slider(
                                     "anim-fps",
                                     t,
                                     current_step as f32 / max_step.max(1) as f32,
                                     max_step + 1,
                                     fps_label,
-                                    move |i| {
-                                        let entity = fps_entity.clone();
-                                        std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                let next = if i >= max_step {
-                                                    None
-                                                } else {
-                                                    Some((15 + i as u32).min(max_hz))
-                                                };
-                                                if this.settings.animation_fps != next {
-                                                    this.settings.animation_fps = next;
-                                                    this.auto_save(cx);
-                                                }
-                                            });
-                                        })
+                                    move |this, i, _, cx| {
+                                        let next = if i >= max_step {
+                                            None
+                                        } else {
+                                            Some((15 + i as u32).min(max_hz))
+                                        };
+                                        if this.settings.animation_fps != next {
+                                            this.settings.animation_fps = next;
+                                            this.auto_save(cx);
+                                        }
                                     },
+                                    cx,
                                 ),
                             ),
                         )
@@ -8787,15 +8313,12 @@ impl SettingsView {
                         Some("\u{EC4A}"),
                         loc::t("BurnInShift"),
                         loc::t("BurnInShiftHelp"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-burn-in-shift",
                             t,
                             self.settings.burn_in_shift_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.burn_in_shift_enabled =
-                                    !this.settings.burn_in_shift_enabled;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.burn_in_shift_enabled,
+                            cx,
                         ),
                     )
                     .into_any_element(),
@@ -8806,24 +8329,20 @@ impl SettingsView {
                             Some("\u{EC4A}"),
                             loc::t("BurnInShiftInterval"),
                             loc::t("BurnInShiftHelp"),
-                            live_slider(
+                            self.setting_slider(
                                 "burn-in-interval",
                                 t,
                                 (shift_minutes - 5) as f32 / 115.0,
                                 116,
                                 loc::t_fmt("MinutesShort", &[&shift_minutes.to_string()]),
-                                |i| {
-                                    let entity = cx.entity().downgrade();
-                                    std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            let next = (5 + i as i32).clamp(5, 120);
-                                            if this.settings.burn_in_shift_minutes != next {
-                                                this.settings.burn_in_shift_minutes = next;
-                                                this.auto_save(cx);
-                                            }
-                                        });
-                                    })
+                                |this, i, _, cx| {
+                                    let next = (5 + i as i32).clamp(5, 120);
+                                    if this.settings.burn_in_shift_minutes != next {
+                                        this.settings.burn_in_shift_minutes = next;
+                                        this.auto_save(cx);
+                                    }
                                 },
+                                cx,
                             ),
                         ),
                     )
@@ -8833,15 +8352,12 @@ impl SettingsView {
                         Some("\u{E81E}"),
                         loc::t("OledAutoTrigger"),
                         loc::t("OledAutoTriggerHelp"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-oled-auto-trigger",
                             t,
                             self.settings.oled_auto_trigger_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.oled_auto_trigger_enabled =
-                                    !this.settings.oled_auto_trigger_enabled;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.oled_auto_trigger_enabled,
+                            cx,
                         ),
                     )
                     .into_any_element(),
@@ -8871,15 +8387,12 @@ impl SettingsView {
                         Some("\u{E706}"),
                         loc::t("OledAutoOnNightLight"),
                         loc::t("OledAutoOnNightLightHelp"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-oled-night-light",
                             t,
                             self.settings.oled_auto_on_night_light,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.oled_auto_on_night_light =
-                                    !this.settings.oled_auto_on_night_light;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.oled_auto_on_night_light,
+                            cx,
                         ),
                     )
                     .into_any_element(),
@@ -8888,15 +8401,12 @@ impl SettingsView {
                         Some("\u{E81E}"),
                         loc::t("AmbientMode"),
                         loc::t("AmbientModeHelp"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-ambient-mode",
                             t,
                             self.settings.ambient_mode_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.ambient_mode_enabled =
-                                    !this.settings.ambient_mode_enabled;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.ambient_mode_enabled,
+                            cx,
                         ),
                     )
                     .into_any_element(),
@@ -9610,14 +9120,12 @@ impl SettingsView {
                     t,
                     Some("\u{E823}"),
                     loc::t("ClockFormat24Hour"),
-                    ios_switch(
+                    self.bool_switch(
                         "sw-24h",
                         t,
                         self.settings.clock_24_hour,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.clock_24_hour = !this.settings.clock_24_hour;
-                            this.auto_save(cx);
-                        }),
+                        |s| &mut s.clock_24_hour,
+                        cx,
                     ),
                 ),
                 self.target_row(
@@ -9625,14 +9133,12 @@ impl SettingsView {
                     t,
                     Some("\u{E916}"),
                     loc::t("ClockShowSeconds"),
-                    ios_switch(
+                    self.bool_switch(
                         "sw-seconds",
                         t,
                         self.settings.clock_show_seconds,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.clock_show_seconds = !this.settings.clock_show_seconds;
-                            this.auto_save(cx);
-                        }),
+                        |s| &mut s.clock_show_seconds,
+                        cx,
                     ),
                 ),
                 self.target_row(
@@ -9660,31 +9166,18 @@ impl SettingsView {
                     t,
                     Some("\u{E8A1}"),
                     loc::t("ClockDateLayout"),
-                    self.make_dropdown(
+                    self.enum_dropdown(
                         "clock-date-layout",
                         t,
-                        [
+                        vec![
                             (loc::t("ClockDateLayoutBeside"), ClockDateLayout::Beside),
                             (loc::t("ClockDateLayoutBelow"), ClockDateLayout::Below),
-                        ]
-                        .into_iter()
-                        .map(|(label, layout)| {
-                            let entity = cx.entity().downgrade();
-                            DropdownOption {
-                                label: SharedString::from(label),
-                                flag_path: None,
-                                glyph: None,
-                                selected: self.settings.clock_date_layout == layout,
-                                on_select: std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        this.open_dropdown = None;
-                                        this.settings.clock_date_layout = layout;
-                                        this.auto_save(cx);
-                                    });
-                                }),
-                            }
-                        })
-                        .collect(),
+                        ],
+                        self.settings.clock_date_layout,
+                        |this, layout, cx| {
+                            this.settings.clock_date_layout = layout;
+                            this.auto_save(cx);
+                        },
                         cx,
                     ),
                 ),
@@ -9693,125 +9186,80 @@ impl SettingsView {
                     t,
                     Some("\u{E8BF}"),
                     loc::t("ClockDateFormat"),
-                    self.make_dropdown(
+                    self.enum_dropdown(
                         "clock-date-format",
                         t,
-                        [
+                        vec![
                             (loc::t("DateFormatSystem"), ClockDateFormat::System),
                             (loc::t("DateFormatDdMmYyyy"), ClockDateFormat::DdMmYyyy),
                             (loc::t("DateFormatYyyyMmDd"), ClockDateFormat::YyyyMmDd),
-                        ]
-                        .into_iter()
-                        .map(|(label, fmt)| {
-                            let entity = cx.entity().downgrade();
-                            DropdownOption {
-                                label: SharedString::from(label),
-                                flag_path: None,
-                                glyph: None,
-                                selected: self.settings.date_format == fmt,
-                                on_select: std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        this.open_dropdown = None;
-                                        this.settings.date_format = fmt;
-                                        this.auto_save(cx);
-                                    });
-                                }),
-                            }
-                        })
-                        .collect(),
+                        ],
+                        self.settings.date_format,
+                        |this, fmt, cx| {
+                            this.settings.date_format = fmt;
+                            this.auto_save(cx);
+                        },
                         cx,
                     ),
                 ),
             ],
             "weather" => {
                 let mut weather_rows = self.render_weather_picker(t, cx);
-                let compact = widgets::setting_bool(&self.settings, "WeatherCompactMode", false);
                 weather_rows.push(self.target_row(
                     "WeatherCompactMode",
                     t,
                     Some("\u{E753}"),
                     loc::t("WeatherCompactMode"),
-                    ios_switch(
-                        "sw-weather-compact",
-                        t,
-                        compact,
-                        cx.listener(|this, _, _, cx| {
-                            let next =
-                                !widgets::setting_bool(&this.settings, "WeatherCompactMode", false);
-                            widgets::set_setting(
-                                &mut this.settings,
-                                "WeatherCompactMode",
-                                serde_json::Value::Bool(next),
-                            );
-                            this.auto_save(cx);
-                        }),
-                    ),
+                    self.widget_bool_switch("sw-weather-compact", t, "WeatherCompactMode", cx),
                 ));
                 weather_rows
             }
-            "stats" => vec![
-                self.target_row(
-                    "Cpu",
-                    t,
-                    Some("\u{E950}"),
-                    loc::t("Cpu"),
-                    ios_switch(
-                        "sw-meter-cpu",
+            "stats" => {
+                let meter_sw =
+                    |id: &'static str, mask: u32, cx: &mut Context<Self>| -> AnyElement {
+                        ios_switch(
+                            id,
+                            t,
+                            self.settings.stats_meters & mask != 0,
+                            cx.listener(move |this, _, _, cx| {
+                                this.settings.stats_meters ^= mask;
+                                this.auto_save(cx);
+                            }),
+                        )
+                        .into_any_element()
+                    };
+                vec![
+                    self.target_row(
+                        "Cpu",
                         t,
-                        self.settings.stats_meters & 1 != 0,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.stats_meters ^= 1;
-                            this.auto_save(cx);
-                        }),
+                        Some("\u{E950}"),
+                        loc::t("Cpu"),
+                        meter_sw("sw-meter-cpu", 1, cx),
                     ),
-                ),
-                self.target_row(
-                    "Memory",
-                    t,
-                    Some("\u{E964}"),
-                    loc::t("Memory"),
-                    ios_switch(
-                        "sw-meter-mem",
+                    self.target_row(
+                        "Memory",
                         t,
-                        self.settings.stats_meters & 2 != 0,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.stats_meters ^= 2;
-                            this.auto_save(cx);
-                        }),
+                        Some("\u{E964}"),
+                        loc::t("Memory"),
+                        meter_sw("sw-meter-mem", 2, cx),
                     ),
-                ),
-                self.target_row(
-                    "Gpu",
-                    t,
-                    Some("\u{E7F4}"),
-                    loc::t("Gpu"),
-                    ios_switch(
-                        "sw-meter-gpu",
+                    self.target_row(
+                        "Gpu",
                         t,
-                        self.settings.stats_meters & 16 != 0,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.stats_meters ^= 16;
-                            this.auto_save(cx);
-                        }),
+                        Some("\u{E7F4}"),
+                        loc::t("Gpu"),
+                        meter_sw("sw-meter-gpu", 16, cx),
                     ),
-                ),
-                self.target_row_desc(
-                    "GpuTemperature",
-                    t,
-                    Some("\u{E9CA}"),
-                    loc::t("GpuTemperature"),
-                    loc::t("StatsAvailabilityNote"),
-                    ios_switch(
-                        "sw-meter-gputemp",
+                    self.target_row_desc(
+                        "GpuTemperature",
                         t,
-                        self.settings.stats_meters & 32 != 0,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.stats_meters ^= 32;
-                            this.auto_save(cx);
-                        }),
+                        Some("\u{E9CA}"),
+                        loc::t("GpuTemperature"),
+                        loc::t("StatsAvailabilityNote"),
+                        meter_sw("sw-meter-gputemp", 32, cx),
                     ),
-                ),
-            ],
+                ]
+            }
             "bluetoothbattery" => {
                 let extra_ignored = self
                     .settings
@@ -9831,35 +9279,20 @@ impl SettingsView {
                         t,
                         Some("\u{E850}"),
                         loc::t("WirelessBatteryAlertLabel"),
-                        self.make_dropdown(
+                        self.enum_dropdown(
                             "bt-low-threshold",
                             t,
-                            [
-                                (0, loc::t("WirelessBatteryAlertOff")),
-                                (10, "10%".to_owned()),
-                                (20, "20%".to_owned()),
-                                (30, "30%".to_owned()),
-                            ]
-                            .into_iter()
-                            .map(|(threshold, label)| {
-                                let entity = cx.entity().downgrade();
-                                DropdownOption {
-                                    label: SharedString::from(label),
-                                    flag_path: None,
-                                    glyph: None,
-                                    selected: self.settings.wireless_battery_low_threshold
-                                        == threshold,
-                                    on_select: std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            this.open_dropdown = None;
-                                            this.settings.wireless_battery_low_threshold =
-                                                threshold;
-                                            this.auto_save(cx);
-                                        });
-                                    }),
-                                }
-                            })
-                            .collect(),
+                            vec![
+                                (loc::t("WirelessBatteryAlertOff"), 0),
+                                ("10%".to_owned(), 10),
+                                ("20%".to_owned(), 20),
+                                ("30%".to_owned(), 30),
+                            ],
+                            self.settings.wireless_battery_low_threshold,
+                            |this, threshold, cx| {
+                                this.settings.wireless_battery_low_threshold = threshold;
+                                this.auto_save(cx);
+                            },
                             cx,
                         ),
                     ),
@@ -9871,29 +9304,18 @@ impl SettingsView {
                             "WirelessBatteryPollInterval",
                             &[&self.settings.wireless_battery_poll_seconds.to_string()],
                         ),
-                        self.make_dropdown(
+                        self.enum_dropdown(
                             "bt-poll-interval",
                             t,
                             [15, 30, 60, 120, 300]
                                 .into_iter()
-                                .map(|secs| {
-                                    let entity = cx.entity().downgrade();
-                                    DropdownOption {
-                                        label: SharedString::from(format!("{secs}s")),
-                                        flag_path: None,
-                                        glyph: None,
-                                        selected: self.settings.wireless_battery_poll_seconds
-                                            == secs,
-                                        on_select: std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                this.open_dropdown = None;
-                                                this.settings.wireless_battery_poll_seconds = secs;
-                                                this.auto_save(cx);
-                                            });
-                                        }),
-                                    }
-                                })
+                                .map(|secs| (format!("{secs}s"), secs))
                                 .collect(),
+                            self.settings.wireless_battery_poll_seconds,
+                            |this, secs, cx| {
+                                this.settings.wireless_battery_poll_seconds = secs;
+                                this.auto_save(cx);
+                            },
                             cx,
                         ),
                     ),
@@ -9909,15 +9331,12 @@ impl SettingsView {
                                 "WirelessBatteryListenOnlyOff"
                             })],
                         ),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-bt-listen-only",
                             t,
                             self.settings.wireless_battery_listen_only,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.wireless_battery_listen_only =
-                                    !this.settings.wireless_battery_listen_only;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.wireless_battery_listen_only,
+                            cx,
                         ),
                     ),
                     self.target_row(
@@ -9944,30 +9363,13 @@ impl SettingsView {
                     ),
                 ]
             }
-            "storage" => {
-                let compact = widgets::setting_bool(&self.settings, "StorageCompactMode", false);
-                vec![self.target_row(
-                    "StorageCompactMode",
-                    t,
-                    Some("\u{EDA2}"),
-                    loc::t("StorageCompactMode"),
-                    ios_switch(
-                        "sw-storage-compact",
-                        t,
-                        compact,
-                        cx.listener(|this, _, _, cx| {
-                            let next =
-                                !widgets::setting_bool(&this.settings, "StorageCompactMode", false);
-                            widgets::set_setting(
-                                &mut this.settings,
-                                "StorageCompactMode",
-                                serde_json::Value::Bool(next),
-                            );
-                            this.auto_save(cx);
-                        }),
-                    ),
-                )]
-            }
+            "storage" => vec![self.target_row(
+                "StorageCompactMode",
+                t,
+                Some("\u{EDA2}"),
+                loc::t("StorageCompactMode"),
+                self.widget_bool_switch("sw-storage-compact", t, "StorageCompactMode", cx),
+            )],
             "media" => vec![self.target_row(
                 "ShowMedia",
                 t,
@@ -9994,15 +9396,12 @@ impl SettingsView {
                     Some("\u{E767}"),
                     loc::t("WheelVolume"),
                     loc::t("WheelVolumeDescription"),
-                    ios_switch(
+                    self.bool_switch(
                         "sw-audio-wheel-volume",
                         t,
                         self.settings.wheel_volume_enabled,
-                        cx.listener(|this, _, _, cx| {
-                            this.settings.wheel_volume_enabled =
-                                !this.settings.wheel_volume_enabled;
-                            this.auto_save(cx);
-                        }),
+                        |s| &mut s.wheel_volume_enabled,
+                        cx,
                     ),
                 )
                 .into_any_element(),
@@ -10661,15 +10060,12 @@ impl SettingsView {
                         Some("\u{E8A1}"),
                         loc::t("DynamicIslandEnable"),
                         loc::t("DynamicIslandEnableDescription"),
-                        ios_switch(
+                        self.bool_switch(
                             "di-enable",
                             t,
                             self.settings.dynamic_island_enable,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dynamic_island_enable =
-                                    !this.settings.dynamic_island_enable;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.dynamic_island_enable,
+                            cx,
                         ),
                     )
                     .into_any_element(),
@@ -10758,37 +10154,24 @@ impl SettingsView {
                             Some("\u{E7B3}"),
                             loc::t("DynamicIslandVisibility"),
                             loc::t("DynamicIslandVisibilityDescription"),
-                            self.make_dropdown(
+                            self.enum_dropdown(
                                 "di-vis",
                                 t,
-                                [
+                                vec![
                                     (
-                                        DynamicIslandVisibilityMode::Always,
                                         loc::t("DynamicIslandVisibilityAlways"),
+                                        DynamicIslandVisibilityMode::Always,
                                     ),
                                     (
-                                        DynamicIslandVisibilityMode::DesktopOnly,
                                         loc::t("DynamicIslandVisibilityDesktopOnly"),
+                                        DynamicIslandVisibilityMode::DesktopOnly,
                                     ),
-                                ]
-                                .into_iter()
-                                .map(|(mode, label)| {
-                                    let entity = cx.entity().downgrade();
-                                    DropdownOption {
-                                        label: SharedString::from(label),
-                                        flag_path: None,
-                                        glyph: None,
-                                        selected: self.settings.dynamic_island_visibility == mode,
-                                        on_select: std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                this.open_dropdown = None;
-                                                this.settings.dynamic_island_visibility = mode;
-                                                this.auto_save(cx);
-                                            });
-                                        }),
-                                    }
-                                })
-                                .collect(),
+                                ],
+                                self.settings.dynamic_island_visibility,
+                                |this, mode, cx| {
+                                    this.settings.dynamic_island_visibility = mode;
+                                    this.auto_save(cx);
+                                },
                                 cx,
                             ),
                         ),
@@ -10802,15 +10185,12 @@ impl SettingsView {
                             Some("\u{E740}"),
                             loc::t("DynamicIslandHideFullscreen"),
                             loc::t("DynamicIslandHideFullscreenDescription"),
-                            ios_switch(
+                            self.bool_switch(
                                 "di-hide-fs",
                                 t,
                                 self.settings.dynamic_island_hide_in_fullscreen,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.dynamic_island_hide_in_fullscreen =
-                                        !this.settings.dynamic_island_hide_in_fullscreen;
-                                    this.auto_save(cx);
-                                }),
+                                |s| &mut s.dynamic_island_hide_in_fullscreen,
+                                cx,
                             ),
                         ),
                     )
@@ -10823,15 +10203,12 @@ impl SettingsView {
                             Some("\u{ED1A}"),
                             loc::t("DynamicIslandAutoHide"),
                             loc::t("DynamicIslandAutoHideDescription"),
-                            ios_switch(
+                            self.bool_switch(
                                 "di-auto-hide",
                                 t,
                                 self.settings.dynamic_island_auto_hide,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.dynamic_island_auto_hide =
-                                        !this.settings.dynamic_island_auto_hide;
-                                    this.auto_save(cx);
-                                }),
+                                |s| &mut s.dynamic_island_auto_hide,
+                                cx,
                             ),
                         ),
                     )
@@ -10843,33 +10220,20 @@ impl SettingsView {
                             Some("\u{E81E}"),
                             loc::t("DynamicIslandBackground"),
                             loc::t("DynamicIslandBackgroundDescription"),
-                            self.make_dropdown(
+                            self.enum_dropdown(
                                 "di-bg",
                                 t,
-                                [
+                                vec![
                                     (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
                                     (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
                                     (loc::t("SurfaceNone"), SurfaceBackground::None),
                                     (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
-                                ]
-                                .into_iter()
-                                .map(|(label, bg)| {
-                                    let entity = cx.entity().downgrade();
-                                    DropdownOption {
-                                        label: SharedString::from(label),
-                                        flag_path: None,
-                                        glyph: None,
-                                        selected: self.settings.dynamic_island_background == bg,
-                                        on_select: std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                this.open_dropdown = None;
-                                                this.settings.dynamic_island_background = bg;
-                                                this.auto_save(cx);
-                                            });
-                                        }),
-                                    }
-                                })
-                                .collect(),
+                                ],
+                                self.settings.dynamic_island_background,
+                                |this, bg, cx| {
+                                    this.settings.dynamic_island_background = bg;
+                                    this.auto_save(cx);
+                                },
                                 cx,
                             ),
                         ),
@@ -10902,15 +10266,12 @@ impl SettingsView {
                             t,
                             Some("\u{E790}"),
                             loc::t("DynamicIslandUseTheme"),
-                            ios_switch(
+                            self.bool_switch(
                                 "di-use-theme",
                                 t,
                                 self.settings.dynamic_island_use_theme,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.dynamic_island_use_theme =
-                                        !this.settings.dynamic_island_use_theme;
-                                    this.auto_save(cx);
-                                }),
+                                |s| &mut s.dynamic_island_use_theme,
+                                cx,
                             ),
                         ),
                     )
@@ -10924,26 +10285,20 @@ impl SettingsView {
                             // No `DynamicIslandOpacity` locale key exists; reuse the generic Opacity label.
                             loc::t("SurfaceOpacityLabel"),
                             loc::t("DynamicIslandOpacityDescription"),
-                            live_slider(
+                            self.setting_slider(
                                 "di-opacity",
                                 t,
                                 ((self.settings.dynamic_island_opacity as f32) - 0.1) / 0.9,
                                 19,
                                 loc::t_fmt("OpacityPercent", &[&di_opacity_pct.to_string()]),
-                                |i| {
-                                    let entity = cx.entity().downgrade();
-                                    std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            let next = (0.10 + (i as f64) * 0.05).clamp(0.10, 1.0);
-                                            if (this.settings.dynamic_island_opacity - next).abs()
-                                                > 0.001
-                                            {
-                                                this.settings.dynamic_island_opacity = next;
-                                                this.auto_save(cx);
-                                            }
-                                        });
-                                    })
+                                |this, i, _, cx| {
+                                    let next = (0.10 + (i as f64) * 0.05).clamp(0.10, 1.0);
+                                    if (this.settings.dynamic_island_opacity - next).abs() > 0.001 {
+                                        this.settings.dynamic_island_opacity = next;
+                                        this.auto_save(cx);
+                                    }
                                 },
+                                cx,
                             ),
                         ),
                     )
@@ -11376,17 +10731,14 @@ impl SettingsView {
                         t,
                         Some("\u{E9C5}"),
                         loc::t("CheckUpdatesSetting"),
-                        ios_switch(
+                        self.bool_switch(
                             "sw-check-updates",
                             t,
                             self.settings.check_updates,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.check_updates = !this.settings.check_updates;
-                                this.auto_save(cx);
-                            }),
+                            |s| &mut s.check_updates,
+                            cx,
                         ),
-                    )
-                    .into_any_element(),
+                    ),
                     div()
                         .w_full()
                         .text_size(px(fonts::scaled_size(12.0)))

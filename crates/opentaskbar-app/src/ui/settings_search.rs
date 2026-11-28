@@ -76,576 +76,457 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         loc::t("SectionBehavior"),
         loc::t("SectionDisplays")
     );
-    let mut entries = vec![
-        // Dock — layout & dimensions
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockAlignment",
-            &dock_layout,
-            "position edge bottom left right top alignment",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockSize",
-            &dock_layout,
-            "icon size compact medium large",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "StartPlacement",
-            &dock_layout,
-            "start button placement end hidden in widgets trailing",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "StartWidgetIndex",
-            &dock_layout,
-            "start widget index position order",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockScale",
-            &dock_layout,
-            "zoom scale percentage",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockBottomGap",
-            &dock_layout,
-            "bottom margin distance pixels",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockIconPadding",
-            &dock_layout,
-            "icon spacing padding pixels",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "LayoutFullWidth",
-            &dock_layout,
-            "fill screen edge to edge width",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "ContentAlignment",
-            &dock_layout,
-            "content align start center end icons",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockWidthMode",
-            &dock_layout,
-            "width mode pixels percent fill auto",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockHeightMode",
-            &dock_layout,
-            "height mode pixels percent fill auto",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockTopGap",
-            &dock_layout,
-            "top gap pixels percent margin",
-        ),
-        // Dock — behavior & displays
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "AutoHide",
-            &dock_behavior,
-            "hide smart always never",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "AllMonitors",
-            &dock_behavior,
-            "multi monitor displays all screens",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "FocusMode",
-            &dock_behavior,
-            "focus mode minimal widgets",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "RevealDockOnWinKey",
-            &dock_behavior,
-            "windows key reveal show hotkey",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "CurrentDesktopOnly",
-            &dock_behavior,
-            "virtual desktop current only",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "PreviewsEnabled",
-            &dock_behavior,
-            "hover thumbnail preview disabled hint",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "WheelVolumeEnabled",
-            &dock_behavior,
-            "mouse wheel over dock change volume",
-        ),
-        // Dock — interactions
-        // These row_ids must stay identical to the `target_row` ids in `ui/settings.rs`.
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "ShowSearchButton",
-            &loc::t("SectionInteractions"),
-            "search button show hide ara gizle",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "ShowTaskViewButton",
-            &loc::t("SectionInteractions"),
-            "task view virtual desktop gizle gorev gorunumu",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "TrayApps",
-            &loc::t("SectionInteractions"),
-            "system tray icons apps",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "RecycleBin",
-            &loc::t("SectionInteractions"),
-            "trash delete files",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "WidgetShowDesktop",
-            &loc::t("SectionInteractions"),
-            "show desktop button",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "MiddleClickAction",
-            &loc::t("SectionInteractions"),
-            "middle click close new window mouse wheel",
-        ),
-        // Widgets — inline card settings (clock, stats, weather, bluetooth battery)
-        SettingsSearchEntry::widget_setting(
+    let mut entries = Vec::with_capacity(96);
+
+    let mut add = |page: SettingsPage, section: &str, items: &[(&str, &str, &'static str)]| {
+        for &(title_key, row_id, keywords) in items {
+            let id = if row_id.is_empty() { title_key } else { row_id };
+            entries.push(SettingsSearchEntry::with_row_id(
+                page, title_key, section, keywords, id,
+            ));
+        }
+    };
+
+    // Dock — layout & dimensions
+    add(
+        SettingsPage::Dock,
+        &dock_layout,
+        &[
+            (
+                "DockAlignment",
+                "",
+                "position edge bottom left right top alignment",
+            ),
+            ("DockSize", "", "icon size compact medium large"),
+            (
+                "StartPlacement",
+                "",
+                "start button placement end hidden in widgets trailing",
+            ),
+            ("StartWidgetIndex", "", "start widget index position order"),
+            ("DockScale", "", "zoom scale percentage"),
+            ("DockBottomGap", "", "bottom margin distance pixels"),
+            ("DockIconPadding", "", "icon spacing padding pixels"),
+            ("LayoutFullWidth", "", "fill screen edge to edge width"),
+            (
+                "ContentAlignment",
+                "",
+                "content align start center end icons",
+            ),
+            ("DockWidthMode", "", "width mode pixels percent fill auto"),
+            ("DockHeightMode", "", "height mode pixels percent fill auto"),
+            ("DockTopGap", "", "top gap pixels percent margin"),
+        ],
+    );
+    // Dock — behavior & displays
+    add(
+        SettingsPage::Dock,
+        &dock_behavior,
+        &[
+            ("AutoHide", "", "hide smart always never"),
+            ("AllMonitors", "", "multi monitor displays all screens"),
+            ("FocusMode", "", "focus mode minimal widgets"),
+            ("RevealDockOnWinKey", "", "windows key reveal show hotkey"),
+            ("CurrentDesktopOnly", "", "virtual desktop current only"),
+            (
+                "PreviewsEnabled",
+                "",
+                "hover thumbnail preview disabled hint",
+            ),
+            (
+                "WheelVolumeEnabled",
+                "",
+                "mouse wheel over dock change volume",
+            ),
+        ],
+    );
+    // Dock — interactions (row_ids must stay identical to `target_row` ids in `ui/settings.rs`)
+    add(
+        SettingsPage::Dock,
+        "SectionInteractions",
+        &[
+            ("ShowSearchButton", "", "search button show hide ara gizle"),
+            (
+                "ShowTaskViewButton",
+                "",
+                "task view virtual desktop gizle gorev gorunumu",
+            ),
+            ("TrayApps", "", "system tray icons apps"),
+            ("RecycleBin", "", "trash delete files"),
+            ("WidgetShowDesktop", "", "show desktop button"),
+            (
+                "MiddleClickAction",
+                "",
+                "middle click close new window mouse wheel",
+            ),
+        ],
+    );
+    // Dynamic Island
+    add(
+        SettingsPage::DynamicIsland,
+        "DynamicIslandTitle",
+        &[
+            (
+                "DynamicIslandStyleLabel",
+                "",
+                "dynamic island style notch floating pill",
+            ),
+            (
+                "DynamicIslandLayoutLabel",
+                "",
+                "dynamic island layout paged strip carousel",
+            ),
+            (
+                "DynamicIslandShowFocusWidgets",
+                "",
+                "dynamic island focus mode widgets show",
+            ),
+            (
+                "DynamicIslandVisibility",
+                "",
+                "dynamic island visibility desktop always top above windows full screen",
+            ),
+            (
+                "DynamicIslandHideFullscreen",
+                "",
+                "dynamic island fullscreen hide app display",
+            ),
+            (
+                "DynamicIslandAutoHide",
+                "",
+                "dynamic island auto hide top edge hover",
+            ),
+            (
+                "SurfaceOpacityLabel",
+                "DynamicIslandOpacity",
+                "dynamic island transparency opacity",
+            ),
+            (
+                "DynamicIslandWidgetLocation",
+                "",
+                "dynamic island widget location display dock",
+            ),
+        ],
+    );
+    // Widgets — inline card settings
+    const WIDGET_SETTINGS: &[(&str, &str, &str, &str, &str)] = &[
+        (
             "clock",
             "ClockFormat24Hour",
-            &loc::t("WidgetClock"),
+            "WidgetClock",
+            "",
             "time 24 hour am pm clock",
-            "ClockFormat24Hour",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "clock",
             "ClockShowSeconds",
-            &loc::t("WidgetClock"),
+            "WidgetClock",
+            "",
             "clock seconds time",
-            "ClockShowSeconds",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "clock",
             "DateStyleDayShort",
-            &loc::t("WidgetClock"),
+            "WidgetClock",
+            "",
             "weekday date day",
-            "DateStyleDayShort",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "clock",
             "ClockDateLayout",
-            &loc::t("WidgetClock"),
+            "WidgetClock",
+            "",
             "date beside below layout",
-            "ClockDateLayout",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "clock",
             "ClockDateFormat",
-            &loc::t("WidgetClock"),
+            "WidgetClock",
+            "",
             "date format yyyy mm dd",
-            "ClockDateFormat",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "stats",
             "Cpu",
-            &loc::t("StatsSettingsHeading"),
+            "StatsSettingsHeading",
+            "",
             "cpu processor meter percentage",
-            "Cpu",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "stats",
             "Memory",
-            &loc::t("StatsSettingsHeading"),
+            "StatsSettingsHeading",
+            "",
             "ram memory meter percentage",
-            "Memory",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "stats",
             "Gpu",
-            &loc::t("StatsSettingsHeading"),
+            "StatsSettingsHeading",
+            "",
             "gpu graphics meter percentage",
-            "Gpu",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "stats",
             "GpuTemperature",
-            &loc::t("StatsSettingsHeading"),
+            "StatsSettingsHeading",
+            "",
             "gpu temperature thermal degrees celsius fahrenheit sicaklik",
-            "GpuTemperature",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandStyleLabel",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island style notch floating pill",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandLayoutLabel",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island layout paged strip carousel",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandShowFocusWidgets",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island focus mode widgets show",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandVisibility",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island visibility desktop always top above windows full screen",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandHideFullscreen",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island fullscreen hide app display",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandAutoHide",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island auto hide top edge hover",
-        ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::DynamicIsland,
-            "SurfaceOpacityLabel",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island transparency opacity",
-            "DynamicIslandOpacity",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::DynamicIsland,
-            "DynamicIslandWidgetLocation",
-            &loc::t("DynamicIslandTitle"),
-            "dynamic island widget location display dock",
-        ),
-        SettingsSearchEntry::widget_setting(
+        (
             "weather",
             "WeatherUnit",
-            &loc::t("WidgetWeather"),
+            "WidgetWeather",
+            "",
             "weather temperature unit celsius fahrenheit c f",
-            "WeatherUnit",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "weather",
             "WeatherCompactMode",
-            &loc::t("WidgetWeather"),
+            "WidgetWeather",
+            "",
             "weather compact mode chip",
-            "WeatherCompactMode",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "storage",
             "StorageCompactMode",
-            &loc::t("WidgetStorage"),
+            "WidgetStorage",
+            "",
             "storage compact mode drive disk",
-            "StorageCompactMode",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "media",
             "WidgetShowInDockMedia",
-            &loc::t("WidgetMedia"),
-            "show media music player dock",
+            "WidgetMedia",
             "ShowMedia",
+            "show media music player dock",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "countdown",
             "CountdownDefaultMinutes",
-            &loc::t("WidgetCountdown"),
+            "WidgetCountdown",
+            "",
             "countdown timer default minutes duration",
-            "CountdownDefaultMinutes",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "bluetoothbattery",
             "WirelessBatteryAlertLabel",
-            &loc::t("WidgetBluetoothBattery"),
-            "wireless bluetooth battery low alert threshold percent",
+            "WidgetBluetoothBattery",
             "WirelessBatteryLowThreshold",
+            "wireless bluetooth battery low alert threshold percent",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "bluetoothbattery",
             "RestoreIgnoredDevices",
-            &loc::t("WidgetBluetoothBattery"),
+            "WidgetBluetoothBattery",
+            "",
             "wireless bluetooth restore ignored hidden devices",
-            "RestoreIgnoredDevices",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "focus",
             "FocusMinutesLabel",
-            &loc::t("WidgetFocus"),
-            "pomodoro focus minutes duration",
+            "WidgetFocus",
             "FocusMinutes",
+            "pomodoro focus minutes duration",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "focus",
             "FocusBreakMinutesLabel",
-            &loc::t("WidgetFocus"),
-            "pomodoro break minutes rest",
+            "WidgetFocus",
             "FocusBreakMinutes",
+            "pomodoro break minutes rest",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "focus",
             "FocusSessionsLabel",
-            &loc::t("WidgetFocus"),
-            "pomodoro sessions count rounds",
+            "WidgetFocus",
             "FocusSessions",
+            "pomodoro sessions count rounds",
         ),
-        SettingsSearchEntry::widget_setting(
+        (
             "aiusage_claude",
             "AiUsageRingLabel",
-            &loc::t("WidgetAiUsage"),
+            "WidgetAiUsage",
+            "",
             "ai usage ring quota highest session weekly",
-            "AiUsageRingLabel",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
-            "WidgetDensityCompact",
-            &loc::t("WidgetDensity"),
-            "density override per widget shrink priority compact full",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
-            "ShrinkPriority",
-            &loc::t("WidgetDensity"),
-            "shrink priority overflow compact bias",
-        ),
-        // Themes
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "ThemePack",
-            &loc::t("SectionTheme"),
-            "theme pack gallery presets catppuccin gruvbox nord prism solarized tokyo night",
-        ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::Themes,
-            "ThemeStudioTitle",
-            &loc::t("SectionTheme"),
-            "theme studio custom preset liquid glass acrylic mica oled flat minimal vibrant",
-            "ThemeStudio",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "Theme",
-            &loc::t("SectionTheme"),
-            "dark light system appearance",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "ThemeApplicationIcons",
-            &loc::t("SectionTheme"),
-            "application icons theme icon pack",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "DockBackground",
-            &loc::t("SectionTheme"),
-            "glass solid none background",
-        ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::Themes,
-            "SurfaceOpacityLabel",
-            &loc::t("SectionTheme"),
-            "dock transparency opacity",
-            "SurfaceOpacityLabel:Dock",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "DockCornerRadius",
-            &loc::t("SectionTheme"),
-            "round corners radius visual",
-        ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::Themes,
-            "ThemeAdvancedTokens",
-            &loc::t("SectionTheme"),
-            "theme tokens editor advanced color brush",
-            "ThemeTokens",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "GlassBlurLabel",
-            &loc::t("SectionGlassEffect"),
-            "glass blur bulaniklik clear crystal frost",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "GlassSaturationLabel",
-            &loc::t("SectionGlassEffect"),
-            "glass vibrancy saturation canlilik doygunluk clear crystal",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "GlassEdgeGlowLabel",
-            &loc::t("SectionGlassEffect"),
-            "glass edge glow light kenar isigi clear crystal",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "GlassPointerLightLabel",
-            &loc::t("SectionGlassEffect"),
-            "glass pointer cursor reflection imlec yansima clear crystal",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "Animations",
-            &loc::t("Animations"),
-            "motion effects animation",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "Magnification",
-            &loc::t("Animations"),
-            "fisheye icon magnification magnify",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "FisheyeIntensity",
-            &loc::t("Animations"),
-            "fisheye magnification strength intensity subtle normal strong",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "MagnificationExpandsDock",
-            &loc::t("Animations"),
-            "magnification expands dock grow widen cursor",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "AnimationFps",
-            &loc::t("Animations"),
-            "fps frame rate hz refresh animations",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "SurfaceDock",
-            &loc::t("SectionSurfaces"),
-            "dock acrylic material surface",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "SurfaceMenu",
-            &loc::t("SectionSurfaces"),
-            "menu acrylic material surface",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "SurfaceWidget",
-            &loc::t("SectionSurfaces"),
-            "widget acrylic material surface",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Themes,
-            "SurfaceSettings",
-            &loc::t("SectionSurfaces"),
-            "settings acrylic material surface",
-        ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::Themes,
-            "SurfaceOpacityLabel",
-            &loc::t("SectionSurfaces"),
-            "surface transparent opacity",
-            "SurfaceOpacityLabel:Surfaces",
-        ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::Themes,
-            "ThemeBrushPicker",
-            &loc::t("SectionTheme"),
-            "hsv gradient alpha hex stops angle brush picker",
-            "ThemeBrushPicker",
-        ),
-        // Preferences
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "WindowPickerTitle",
-            &loc::t("SectionSystem"),
-            "window picker switch previous next page",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "Language",
-            &loc::t("Preferences"),
-            "locale culture language translation",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "Profiles",
-            &loc::t("Preferences"),
-            "profile dock layout preset",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "CheckUpdatesSetting",
-            &loc::t("CheckForUpdates"),
-            "update check automatic version",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "Startup",
-            &loc::t("SectionSystem"),
-            "run at startup boot launch",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "SettingsBackup",
-            &loc::t("Backup"),
-            "export import backup restore json",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::Preferences,
-            "ResetDefaults",
-            &loc::t("Backup"),
-            "reset restore defaults factory",
-        ),
-        // About
-        SettingsSearchEntry::new(
-            SettingsPage::About,
-            "Version",
-            &loc::t("About"),
-            "build version",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::About,
-            "DataFolder",
-            &loc::t("Diagnostics"),
-            "data folder path files",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::About,
-            "OpenLogFile",
-            &loc::t("Diagnostics"),
-            "log file diagnostics open",
-        ),
-        SettingsSearchEntry::new(
-            SettingsPage::About,
-            "WindowsTaskbar",
-            &loc::t("Diagnostics"),
-            "restore windows original taskbar",
         ),
     ];
+    add(
+        SettingsPage::Widgets,
+        "WidgetDensity",
+        &[
+            (
+                "WidgetDensityCompact",
+                "",
+                "density override per widget shrink priority compact full",
+            ),
+            (
+                "ShrinkPriority",
+                "",
+                "shrink priority overflow compact bias",
+            ),
+        ],
+    );
+    // Themes
+    add(
+        SettingsPage::Themes,
+        "SectionTheme",
+        &[
+            (
+                "ThemePack",
+                "",
+                "theme pack gallery presets catppuccin gruvbox nord prism solarized tokyo night",
+            ),
+            (
+                "ThemeStudioTitle",
+                "ThemeStudio",
+                "theme studio custom preset liquid glass acrylic mica oled flat minimal vibrant",
+            ),
+            ("Theme", "", "dark light system appearance"),
+            (
+                "ThemeApplicationIcons",
+                "",
+                "application icons theme icon pack",
+            ),
+            ("DockBackground", "", "glass solid none background"),
+            (
+                "SurfaceOpacityLabel",
+                "SurfaceOpacityLabel:Dock",
+                "dock transparency opacity",
+            ),
+            ("DockCornerRadius", "", "round corners radius visual"),
+            (
+                "ThemeAdvancedTokens",
+                "ThemeTokens",
+                "theme tokens editor advanced color brush",
+            ),
+            (
+                "ThemeBrushPicker",
+                "",
+                "hsv gradient alpha hex stops angle brush picker",
+            ),
+        ],
+    );
+    add(
+        SettingsPage::Themes,
+        "SectionGlassEffect",
+        &[
+            (
+                "GlassBlurLabel",
+                "",
+                "glass blur bulaniklik clear crystal frost",
+            ),
+            (
+                "GlassSaturationLabel",
+                "",
+                "glass vibrancy saturation canlilik doygunluk clear crystal",
+            ),
+            (
+                "GlassEdgeGlowLabel",
+                "",
+                "glass edge glow light kenar isigi clear crystal",
+            ),
+            (
+                "GlassPointerLightLabel",
+                "",
+                "glass pointer cursor reflection imlec yansima clear crystal",
+            ),
+        ],
+    );
+    add(
+        SettingsPage::Themes,
+        "Animations",
+        &[
+            ("Animations", "", "motion effects animation"),
+            ("Magnification", "", "fisheye icon magnification magnify"),
+            (
+                "FisheyeIntensity",
+                "",
+                "fisheye magnification strength intensity subtle normal strong",
+            ),
+            (
+                "MagnificationExpandsDock",
+                "",
+                "magnification expands dock grow widen cursor",
+            ),
+            ("AnimationFps", "", "fps frame rate hz refresh animations"),
+        ],
+    );
+    add(
+        SettingsPage::Themes,
+        "SectionSurfaces",
+        &[
+            ("SurfaceDock", "", "dock acrylic material surface"),
+            ("SurfaceMenu", "", "menu acrylic material surface"),
+            ("SurfaceWidget", "", "widget acrylic material surface"),
+            ("SurfaceSettings", "", "settings acrylic material surface"),
+            (
+                "SurfaceOpacityLabel",
+                "SurfaceOpacityLabel:Surfaces",
+                "surface transparent opacity",
+            ),
+        ],
+    );
+    // Preferences
+    add(
+        SettingsPage::Preferences,
+        "SectionSystem",
+        &[
+            (
+                "WindowPickerTitle",
+                "",
+                "window picker switch previous next page",
+            ),
+            ("Startup", "", "run at startup boot launch"),
+        ],
+    );
+    add(
+        SettingsPage::Preferences,
+        "Preferences",
+        &[
+            ("Language", "", "locale culture language translation"),
+            ("Profiles", "", "profile dock layout preset"),
+        ],
+    );
+    add(
+        SettingsPage::Preferences,
+        "CheckForUpdates",
+        &[("CheckUpdatesSetting", "", "update check automatic version")],
+    );
+    add(
+        SettingsPage::Preferences,
+        "Backup",
+        &[
+            ("SettingsBackup", "", "export import backup restore json"),
+            ("ResetDefaults", "", "reset restore defaults factory"),
+        ],
+    );
+    // About
+    add(
+        SettingsPage::About,
+        "About",
+        &[("Version", "", "build version")],
+    );
+    add(
+        SettingsPage::About,
+        "Diagnostics",
+        &[
+            ("DataFolder", "", "data folder path files"),
+            ("OpenLogFile", "", "log file diagnostics open"),
+            ("WindowsTaskbar", "", "restore windows original taskbar"),
+        ],
+    );
+
+    for &(widget_id, title_key, section_key, row_id, keywords) in WIDGET_SETTINGS {
+        let id = if row_id.is_empty() { title_key } else { row_id };
+        entries.push(SettingsSearchEntry::widget_setting(
+            widget_id,
+            title_key,
+            section_key,
+            keywords,
+            id,
+        ));
+    }
 
     for widget in widgets::catalog_widgets() {
         entries.push(SettingsSearchEntry {
@@ -907,469 +788,112 @@ type RowDef = (
     &'static [&'static str],
 );
 
-/// Rows mirrored from `ui/settings.rs`; keep in sync when adding a setting row.
-pub const SETTINGS_ROWS: &[RowDef] = &[
-    // Dock — Layout & Dimensions
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Alignment",
-        "Position",
-        &["dock", "left", "center", "right"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Dock Edge",
-        "Edge",
-        &["vertical", "left", "right", "side"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Dock Size",
-        "Size",
-        &["compact", "medium", "large"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Scale",
-        "DockScale",
-        &["zoom", "icon size"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Bottom Margin",
-        "DockBottomGapPixels",
-        &["gap", "margin", "bottom"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Top Gap",
-        "DockTopGapPixels",
-        &["top gap", "DockTopGapUnit", "DockTopGapPercent"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Icon Padding",
-        "DockIconPadding",
-        &["spacing"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Full Width",
-        "Layout",
-        &["FullWidth", "stretch"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Width Mode",
-        "DockWidthMode",
-        &["DockWidthPixels", "DockWidthPercent", "fixed", "percent"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Height Mode",
-        "DockHeightMode",
-        &["DockHeightPixels", "DockHeightPercent", "side dock"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Content Alignment",
-        "ContentAlignment",
-        &["ContentAlignStart", "ContentAlignCenter", "ContentAlignEnd"],
-    ),
-    (
-        "Dock",
-        "Layout & Dimensions",
-        "Reset Width",
-        "DockCustomWidthDips",
-        &["auto", "width"],
-    ),
-    // Dock — Behavior & Displays
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Auto-Hide",
-        "AutoHideMode",
-        &["hide", "smart", "always"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "All Monitors",
-        "ShowOnAllMonitors",
-        &["display", "multi monitor"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Target Display",
-        "TargetDisplay",
-        &["monitor", "screen"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Focus Mode",
-        "FocusMode",
-        &["distraction"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Reveal on Win Key",
-        "RevealDockOnWinKey",
-        &["winkey", "windows key"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Current Desktop Only",
-        "CurrentDesktopOnly",
-        &["virtual desktop"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Wheel Volume",
-        "WheelVolumeEnabled",
-        &["mouse wheel", "audio"],
-    ),
-    (
-        "Dock",
-        "Behavior & Displays",
-        "Previews Enabled",
-        "PreviewsEnabled",
-        &["PreviewDisabledHint", "hover", "thumbnail"],
-    ),
-    (
-        "Themes",
-        "Motion",
-        "Magnification Expands Dock",
-        "MagnificationExpandsDock",
-        &["MagnificationExpandsDockDescription", "fisheye", "grow"],
-    ),
-    // Dock — Utilities
-    (
-        "Dock",
-        "SearchSectionDockUtilities",
-        "Background Apps",
-        "ShowTrayButton",
-        &["tray", "system tray"],
-    ),
-    (
-        "Dock",
-        "SearchSectionDockUtilities",
-        "Recycle Bin",
-        "ShowRecycleBin",
-        &["bin", "trash"],
-    ),
-    (
-        "Dock",
-        "SearchSectionDockUtilities",
-        "Show Desktop Strip",
-        "ShowDesktopButton",
-        &["show desktop"],
-    ),
-    (
-        "Dock",
-        "SearchSectionDockUtilities",
-        "Search Button",
-        "ShowSearchButton",
-        &["search"],
-    ),
-    (
-        "Dock",
-        "SearchSectionDockUtilities",
-        "Task View Button",
-        "ShowTaskViewButton",
-        &["task view"],
-    ),
-    (
-        "Dock",
-        "SearchSectionDockUtilities",
-        "App Groups",
-        "AppGroups",
-        &["group"],
-    ),
-    // Themes
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Theme",
-        "Theme",
-        &["dark", "light", "system"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Theme Pack",
-        "ThemePack",
-        &["gallery", "swatch", "bundled"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Application Icons",
-        "ThemeApplicationIcons",
-        &["icon pack"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Background",
-        "DockBackground",
-        &["glass", "solid", "acrylic"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Opacity",
-        "DockOpacity",
-        &["transparency"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Corner Radius",
-        "DockCornerRadius",
-        &["round"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Theme Editor",
-        "ThemeTokens",
-        &["token", "brush", "color", "editor"],
-    ),
-    (
-        "Themes",
-        "SearchSectionThemeSurfaces",
-        "Theme Brush Picker",
-        "ThemeBrushPicker",
-        &["hsv", "gradient", "alpha", "hex", "stops", "angle"],
-    ),
-    (
-        "Themes",
-        "Motion",
-        "Smooth Animations",
-        "AnimationsEnabled",
-        &["animation"],
-    ),
-    (
-        "Themes",
-        "Motion",
-        "Magnification",
-        "MagnificationEnabled",
-        &["fisheye", "magnify"],
-    ),
-    // Widgets
-    (
-        "Widgets",
-        "Widgets",
-        "Clock & Date",
-        "ShowClockWidget",
-        &["time", "calendar"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "System Stats",
-        "ShowSystemStatsWidget",
-        &["cpu", "ram", "gpu"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Enabled Widgets",
-        "EnabledWidgets",
-        &["catalog", "density"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Widget Order",
-        "WidgetOrder",
-        &["reorder"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Weather City",
-        "WeatherCity",
-        &["country", "province", "location"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Weather Unit",
-        "WeatherUnit",
-        &["celsius", "fahrenheit"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Focus Minutes",
-        "FocusMinutes",
-        &["pomodoro"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Focus Break Minutes",
-        "FocusBreakMinutes",
-        &["break"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Focus Sessions",
-        "FocusSessions",
-        &["session"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Wireless Battery Poll",
-        "WirelessBatteryPollSeconds",
-        &["bluetooth", "interval"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Wireless Battery Threshold",
-        "WirelessBatteryLowThreshold",
-        &["low", "percent"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "AI Usage Ring",
-        "AiUsageRing",
-        &["quota", "providers", "AiUsageRingLabel"],
-    ),
-    (
-        "Widgets",
-        "Widgets",
-        "Show Media",
-        "ShowMedia",
-        &["music", "player"],
-    ),
-    (
-        "Widgets",
-        "Widget Density",
-        "Density Override",
-        "WidgetDensityOverride",
-        &["WidgetDensityCompact", "WidgetDensityFull", "per widget"],
-    ),
-    (
-        "Widgets",
-        "Widget Density",
-        "Shrink Priority",
-        "ShrinkPriority",
-        &["compact", "overflow"],
-    ),
-    (
-        "Preferences",
-        "System",
-        "Window Picker",
-        "WindowPickerEnabled",
-        &[
-            "WindowPickerTitle",
-            "WindowPickerPrevious",
-            "WindowPickerNext",
-        ],
-    ),
-    // Preferences
-    (
-        "Preferences",
-        "System",
-        "Start with Windows",
-        "Startup",
-        &["startup", "run", "registry"],
-    ),
-    (
-        "Preferences",
-        "Hotkeys",
-        "Launcher Hotkey",
-        "LauncherHotkey",
-        &["capture", "shortcut", "key"],
-    ),
-    (
-        "Preferences",
-        "Hotkeys",
-        "Dock Hotkey",
-        "DockHotkey",
-        &["capture", "shortcut", "key"],
-    ),
-    (
-        "Preferences",
-        "Accounts",
-        "Cursor Sign In",
-        "CursorAuth",
-        &["oauth", "pkce", "ai", "account"],
-    ),
-    (
-        "Preferences",
-        "Backup",
-        "SettingsBackup",
-        "SettingsBackup",
-        &["json", "export", "import"],
-    ),
-    (
-        "Preferences",
-        "Backup",
-        "Full Backup (.otbackup)",
-        "FullBackup",
-        &["zip", "pins", "theme", "archive"],
-    ),
-    (
-        "Preferences",
-        "Backup",
-        "Factory Defaults",
-        "Reset",
-        &["reset", "defaults"],
-    ),
-    // About
-    ("About", "Application", "Version", "Version", &["build"]),
-    (
-        "About",
-        "Diagnostics & Recovery",
-        "Data Folder",
-        "DataFolder",
-        &["localappdata", "path"],
-    ),
-    (
-        "About",
-        "Diagnostics & Recovery",
-        "Runtime Log",
-        "LogFile",
-        &["diagnostics"],
-    ),
-    (
-        "About",
-        "Diagnostics & Recovery",
-        "Windows Taskbar",
-        "RestoreTaskbar",
-        &["restore", "recovery"],
-    ),
-    (
-        "About",
-        "Links",
-        "GitHub",
-        "GitHub",
-        &["source", "repository", "issues"],
-    ),
-];
+macro_rules! settings_rows {
+    ($(($page:expr, $section:expr) => [$(($label:expr, $field:expr, $kw:expr)),* $(,)?]),* $(,)?) => {
+        /// Rows mirrored from `ui/settings.rs`; keep in sync when adding a setting row.
+        pub const SETTINGS_ROWS: &[RowDef] = &[
+            $($(($page, $section, $label, $field, $kw),)*)*
+        ];
+    };
+}
+
+settings_rows! {
+    ("Dock", "Layout & Dimensions") => [
+        ("Alignment", "Position", &["dock", "left", "center", "right"]),
+        ("Dock Edge", "Edge", &["vertical", "left", "right", "side"]),
+        ("Dock Size", "Size", &["compact", "medium", "large"]),
+        ("Scale", "DockScale", &["zoom", "icon size"]),
+        ("Bottom Margin", "DockBottomGapPixels", &["gap", "margin", "bottom"]),
+        ("Top Gap", "DockTopGapPixels", &["top gap", "DockTopGapUnit", "DockTopGapPercent"]),
+        ("Icon Padding", "DockIconPadding", &["spacing"]),
+        ("Full Width", "Layout", &["FullWidth", "stretch"]),
+        ("Width Mode", "DockWidthMode", &["DockWidthPixels", "DockWidthPercent", "fixed", "percent"]),
+        ("Height Mode", "DockHeightMode", &["DockHeightPixels", "DockHeightPercent", "side dock"]),
+        ("Content Alignment", "ContentAlignment", &["ContentAlignStart", "ContentAlignCenter", "ContentAlignEnd"]),
+        ("Reset Width", "DockCustomWidthDips", &["auto", "width"]),
+    ],
+    ("Dock", "Behavior & Displays") => [
+        ("Auto-Hide", "AutoHideMode", &["hide", "smart", "always"]),
+        ("All Monitors", "ShowOnAllMonitors", &["display", "multi monitor"]),
+        ("Target Display", "TargetDisplay", &["monitor", "screen"]),
+        ("Focus Mode", "FocusMode", &["distraction"]),
+        ("Reveal on Win Key", "RevealDockOnWinKey", &["winkey", "windows key"]),
+        ("Current Desktop Only", "CurrentDesktopOnly", &["virtual desktop"]),
+        ("Wheel Volume", "WheelVolumeEnabled", &["mouse wheel", "audio"]),
+        ("Previews Enabled", "PreviewsEnabled", &["PreviewDisabledHint", "hover", "thumbnail"]),
+    ],
+    ("Themes", "Motion") => [
+        ("Magnification Expands Dock", "MagnificationExpandsDock", &["MagnificationExpandsDockDescription", "fisheye", "grow"]),
+    ],
+    ("Dock", "SearchSectionDockUtilities") => [
+        ("Background Apps", "ShowTrayButton", &["tray", "system tray"]),
+        ("Recycle Bin", "ShowRecycleBin", &["bin", "trash"]),
+        ("Show Desktop Strip", "ShowDesktopButton", &["show desktop"]),
+        ("Search Button", "ShowSearchButton", &["search"]),
+        ("Task View Button", "ShowTaskViewButton", &["task view"]),
+        ("App Groups", "AppGroups", &["group"]),
+    ],
+    ("Themes", "SearchSectionThemeSurfaces") => [
+        ("Theme", "Theme", &["dark", "light", "system"]),
+        ("Theme Pack", "ThemePack", &["gallery", "swatch", "bundled"]),
+        ("Application Icons", "ThemeApplicationIcons", &["icon pack"]),
+        ("Background", "DockBackground", &["glass", "solid", "acrylic"]),
+        ("Opacity", "DockOpacity", &["transparency"]),
+        ("Corner Radius", "DockCornerRadius", &["round"]),
+        ("Theme Editor", "ThemeTokens", &["token", "brush", "color", "editor"]),
+        ("Theme Brush Picker", "ThemeBrushPicker", &["hsv", "gradient", "alpha", "hex", "stops", "angle"]),
+    ],
+    ("Themes", "Motion") => [
+        ("Smooth Animations", "AnimationsEnabled", &["animation"]),
+        ("Magnification", "MagnificationEnabled", &["fisheye", "magnify"]),
+    ],
+    ("Widgets", "Widgets") => [
+        ("Clock & Date", "ShowClockWidget", &["time", "calendar"]),
+        ("System Stats", "ShowSystemStatsWidget", &["cpu", "ram", "gpu"]),
+        ("Enabled Widgets", "EnabledWidgets", &["catalog", "density"]),
+        ("Widget Order", "WidgetOrder", &["reorder"]),
+        ("Weather City", "WeatherCity", &["country", "province", "location"]),
+        ("Weather Unit", "WeatherUnit", &["celsius", "fahrenheit"]),
+        ("Focus Minutes", "FocusMinutes", &["pomodoro"]),
+        ("Focus Break Minutes", "FocusBreakMinutes", &["break"]),
+        ("Focus Sessions", "FocusSessions", &["session"]),
+        ("Wireless Battery Poll", "WirelessBatteryPollSeconds", &["bluetooth", "interval"]),
+        ("Wireless Battery Threshold", "WirelessBatteryLowThreshold", &["low", "percent"]),
+        ("AI Usage Ring", "AiUsageRing", &["quota", "providers", "AiUsageRingLabel"]),
+        ("Show Media", "ShowMedia", &["music", "player"]),
+    ],
+    ("Widgets", "Widget Density") => [
+        ("Density Override", "WidgetDensityOverride", &["WidgetDensityCompact", "WidgetDensityFull", "per widget"]),
+        ("Shrink Priority", "ShrinkPriority", &["compact", "overflow"]),
+    ],
+    ("Preferences", "System") => [
+        ("Window Picker", "WindowPickerEnabled", &["WindowPickerTitle", "WindowPickerPrevious", "WindowPickerNext"]),
+        ("Start with Windows", "Startup", &["startup", "run", "registry"]),
+    ],
+    ("Preferences", "Hotkeys") => [
+        ("Launcher Hotkey", "LauncherHotkey", &["capture", "shortcut", "key"]),
+        ("Dock Hotkey", "DockHotkey", &["capture", "shortcut", "key"]),
+    ],
+    ("Preferences", "Accounts") => [
+        ("Cursor Sign In", "CursorAuth", &["oauth", "pkce", "ai", "account"]),
+    ],
+    ("Preferences", "Backup") => [
+        ("SettingsBackup", "SettingsBackup", &["json", "export", "import"]),
+        ("Full Backup (.otbackup)", "FullBackup", &["zip", "pins", "theme", "archive"]),
+        ("Factory Defaults", "Reset", &["reset", "defaults"]),
+    ],
+    ("About", "Application") => [
+        ("Version", "Version", &["build"]),
+    ],
+    ("About", "Diagnostics & Recovery") => [
+        ("Data Folder", "DataFolder", &["localappdata", "path"]),
+        ("Runtime Log", "LogFile", &["diagnostics"]),
+        ("Windows Taskbar", "RestoreTaskbar", &["restore", "recovery"]),
+    ],
+    ("About", "Links") => [
+        ("GitHub", "GitHub", &["source", "repository", "issues"]),
+    ],
+}
 
 /// `DockWidgetOption.HasSettings` counterpart. Delegates to the registry's
 /// `WidgetOption` so search results stay in sync with the authoritative
