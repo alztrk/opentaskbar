@@ -13,9 +13,11 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, HWND_MESSAGE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+    GetMessageW, GetSystemMetrics, HWND_MESSAGE, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, LoadIconW,
+    LoadImageW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXSMICON, SM_CYSMICON,
     TranslateMessage, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSEXW,
 };
 
@@ -73,6 +75,7 @@ struct HostedIcon {
     id: u32,
     executable_path: String,
     icon: HANDLE,
+    owns_icon: bool,
 }
 
 static HOST_HWND: AtomicUsize = AtomicUsize::new(0);
@@ -117,7 +120,7 @@ unsafe extern "system" fn host_wnd_proc(
                         ..Default::default()
                     };
                     Shell_NotifyIconW(NIM_DELETE, &data);
-                    if !icon.icon.is_null() {
+                    if icon.owns_icon && !icon.icon.is_null() {
                         DestroyIcon(icon.icon);
                     }
                 }
@@ -159,6 +162,42 @@ pub fn start(icons: &[String]) -> bool {
     false
 }
 
+/// Extracts an icon from the target executable, falling back to this module's embedded
+/// resource ID `1` or the system `IDI_APPLICATION` icon. Returns `(handle, owns_icon)`.
+fn resolve_tray_icon(path_wide: &[u16]) -> (HANDLE, bool) {
+    unsafe {
+        let raw_icon = ExtractIconW(std::ptr::null_mut(), path_wide.as_ptr(), 0);
+        // ExtractIconW returns 0 (no icon) or 1 (not an executable/DLL/ICO) on failure.
+        if (raw_icon as usize) > 1 {
+            return (raw_icon, true);
+        }
+
+        let module = GetModuleHandleW(std::ptr::null());
+        if !module.is_null() {
+            let cx = GetSystemMetrics(SM_CXSMICON);
+            let cy = GetSystemMetrics(SM_CYSMICON);
+            let embedded = LoadImageW(
+                module,
+                std::ptr::without_provenance::<u16>(1),
+                IMAGE_ICON,
+                cx,
+                cy,
+                LR_SHARED,
+            );
+            if !embedded.is_null() {
+                return (embedded, false);
+            }
+        }
+
+        let default_icon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+        if !default_icon.is_null() {
+            return (default_icon, false);
+        }
+
+        (std::ptr::null_mut(), false)
+    }
+}
+
 fn run(icons: Vec<String>) {
     unsafe {
         let class_name = wide("OpenTaskBarTrayIconHost");
@@ -193,31 +232,37 @@ fn run(icons: Vec<String>) {
             let mut hosted = hosted.borrow_mut();
             for (index, path) in icons.iter().enumerate() {
                 let path_wide = wide(path);
-                let icon = ExtractIconW(std::ptr::null_mut(), path_wide.as_ptr(), 0);
+                let (icon, owns_icon) = resolve_tray_icon(&path_wide);
                 let name = std::path::Path::new(path)
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or(path)
                     .to_owned();
+                let mut u_flags = NIF_MESSAGE | NIF_TIP;
+                if !icon.is_null() {
+                    u_flags |= NIF_ICON;
+                }
                 let mut data = NotifyIconDataW {
                     cb_size: size_of::<NotifyIconDataW>() as u32,
                     hwnd,
                     u_id: index as u32 + 1,
-                    u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                    u_flags,
                     u_callback_message: TRAY_MESSAGE,
                     h_icon: icon,
                     ..Default::default()
                 };
                 let tip = wide(&name);
-                let copy = tip.len().min(data.sz_tip.len());
+                // Reserve the final u16 for the NUL terminator.
+                let copy = tip.len().min(data.sz_tip.len() - 1);
                 data.sz_tip[..copy].copy_from_slice(&tip[..copy]);
                 if Shell_NotifyIconW(NIM_ADD, &data) != 0 {
                     hosted.push(HostedIcon {
                         id: data.u_id,
                         executable_path: path.clone(),
                         icon,
+                        owns_icon,
                     });
-                } else if !icon.is_null() {
+                } else if owns_icon && !icon.is_null() {
                     DestroyIcon(icon);
                 }
             }

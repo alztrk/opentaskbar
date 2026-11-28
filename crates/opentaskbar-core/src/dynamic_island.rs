@@ -89,20 +89,29 @@ pub fn window_width_for_page(
     )
 }
 
+/// Returns whether `a` and `b` refer to the same widget after canonicalizing legacy aliases
+/// (for example `"stats"` vs `"SystemStats"`, `"keyboard"` vs `"KeyboardLayout"`, and
+/// `"aiusage_claude"` vs `"AiUsageClaude"`).
+pub fn same_widget_id(a: &str, b: &str) -> bool {
+    crate::settings::canonical_widget_setting_id(a)
+        .eq_ignore_ascii_case(&crate::settings::canonical_widget_setting_id(b))
+}
+
+fn canonical_widget_key(id: &str) -> String {
+    crate::settings::canonical_widget_setting_id(id).to_ascii_lowercase()
+}
+
 /// Returns whether `widget_id` is assigned to `device_name` (or `*` for all displays).
 pub fn is_assigned_to_display(
     placements: &HashMap<String, String>,
     widget_id: &str,
     device_name: &str,
 ) -> bool {
-    let Some((_, target)) = placements
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(widget_id))
-    else {
-        return false;
-    };
-    target.eq_ignore_ascii_case(DYNAMIC_ISLAND_ALL_DISPLAYS)
-        || target.eq_ignore_ascii_case(device_name)
+    placements.iter().any(|(k, target)| {
+        same_widget_id(k, widget_id)
+            && (target.eq_ignore_ascii_case(DYNAMIC_ISLAND_ALL_DISPLAYS)
+                || target.eq_ignore_ascii_case(device_name))
+    })
 }
 
 /// Returns whether `widget_id` is assigned to at least one connected display.
@@ -139,20 +148,20 @@ pub fn order_widgets(
 ) -> Vec<String> {
     let available: HashSet<String> = available_widgets
         .iter()
-        .map(|w| w.to_ascii_lowercase())
+        .map(|w| canonical_widget_key(w))
         .collect();
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(available_widgets.len());
 
     let mut push_if_available = |candidate: &str| {
-        let lower = candidate.to_ascii_lowercase();
-        if available.contains(&lower) && seen.insert(lower) {
-            // Preserve the canonical casing from `available_widgets` when present.
-            if let Some(canon) = available_widgets
+        let key = canonical_widget_key(candidate);
+        if available.contains(&key) && seen.insert(key) {
+            // Preserve the caller's representation from `available_widgets` when present.
+            if let Some(existing) = available_widgets
                 .iter()
-                .find(|w| w.eq_ignore_ascii_case(candidate))
+                .find(|w| same_widget_id(w, candidate))
             {
-                out.push(canon.clone());
+                out.push(existing.clone());
             } else {
                 out.push(candidate.to_owned());
             }
@@ -179,21 +188,22 @@ pub fn order_widgets(
 }
 
 /// Moves `widget_id` one step earlier (`offset == -1`) or later (`offset == 1`) in `order`.
+/// Matches `widget_id` canonically and returns canonical setting IDs when a swap occurs.
 pub fn move_widget(order: &[String], widget_id: &str, offset: i32) -> Vec<String> {
     if offset != -1 && offset != 1 {
         return order.to_vec();
     }
-    let Some(index) = order
-        .iter()
-        .position(|id| id.eq_ignore_ascii_case(widget_id))
-    else {
+    let Some(index) = order.iter().position(|id| same_widget_id(id, widget_id)) else {
         return order.to_vec();
     };
     let target = index as isize + offset as isize;
     if target < 0 || target >= order.len() as isize {
         return order.to_vec();
     }
-    let mut moved = order.to_vec();
+    let mut moved: Vec<String> = order
+        .iter()
+        .map(|id| crate::settings::canonical_widget_setting_id(id))
+        .collect();
     moved.swap(index, target as usize);
     moved
 }
@@ -355,5 +365,90 @@ mod tests {
         // Clamped to the reference expanded minimum on a narrow monitor.
         assert_eq!(window_width_for_page(None, 0.0, 420.0, true), 388.0);
         assert_eq!(window_width_for_page(None, 0.0, 1920.0, false), 456.0);
+    }
+
+    #[test]
+    fn canonical_widget_matching_covers_aliases_and_all_ai_usage_providers() {
+        let pairs = [
+            ("stats", "SystemStats"),
+            ("keyboard", "KeyboardLayout"),
+            ("aiusage_claude", "AiUsageClaude"),
+            ("aiusage_codex", "AiUsageCodex"),
+            ("aiusage_opencode", "AiUsageOpenCode"),
+            ("aiusage_copilot", "AiUsageCopilot"),
+            ("aiusage_deepseek", "AiUsageDeepSeek"),
+            ("aiusage_openrouter", "AiUsageOpenRouter"),
+            ("aiusage_cursor", "AiUsageCursor"),
+        ];
+
+        let mut placements = HashMap::new();
+        for (alias, canonical) in pairs {
+            assert!(
+                same_widget_id(alias, canonical),
+                "{alias} must match {canonical}"
+            );
+            assert!(
+                same_widget_id(canonical, alias),
+                "{canonical} must match {alias}"
+            );
+            placements.insert(canonical.to_owned(), DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned());
+        }
+        assert!(!same_widget_id("stats", "keyboard"));
+        assert!(!same_widget_id("aiusage_claude", "aiusage_cursor"));
+
+        for (alias, canonical) in pairs {
+            assert!(
+                is_assigned_to_display(&placements, alias, "DISPLAY1"),
+                "{alias} must match placement for {canonical}"
+            );
+            assert!(
+                is_assigned_to_any_display(&placements, alias, &["DISPLAY1"]),
+                "{alias} must match connected display placement for {canonical}"
+            );
+        }
+
+        let aliases: Vec<&str> = pairs.iter().map(|(alias, _)| *alias).collect();
+        let matched = widgets_for_display(&aliases, &placements, "DISPLAY1");
+        assert_eq!(matched.len(), pairs.len());
+
+        // Ordering matches canonical display_order/widget_order against snake_case available IDs.
+        let available = vec![
+            "stats".to_owned(),
+            "keyboard".to_owned(),
+            "aiusage_claude".to_owned(),
+            "aiusage_cursor".to_owned(),
+        ];
+        let ordered = order_widgets(
+            &available,
+            Some(&["AiUsageCursor".to_owned(), "SystemStats".to_owned()]),
+            Some(&["KeyboardLayout".to_owned(), "AiUsageClaude".to_owned()]),
+            &[],
+        );
+        assert_eq!(
+            ordered,
+            vec!["aiusage_cursor", "stats", "keyboard", "aiusage_claude"]
+        );
+
+        // Moving matches across aliases and emits canonical setting IDs.
+        let moved = move_widget(&available, "SystemStats", 1);
+        assert_eq!(
+            moved,
+            vec![
+                "KeyboardLayout",
+                "SystemStats",
+                "AiUsageClaude",
+                "AiUsageCursor"
+            ]
+        );
+        let moved_ai = move_widget(&moved, "aiusage_cursor", -1);
+        assert_eq!(
+            moved_ai,
+            vec![
+                "KeyboardLayout",
+                "SystemStats",
+                "AiUsageCursor",
+                "AiUsageClaude"
+            ]
+        );
     }
 }

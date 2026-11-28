@@ -38,6 +38,8 @@ mod dock;
 mod platform;
 #[cfg(windows)]
 mod ui;
+#[cfg(all(test, windows))]
+mod verification_suite;
 #[cfg(windows)]
 mod widgets;
 #[cfg(windows)]
@@ -113,19 +115,13 @@ pub(crate) fn apply_native_flyout_reposition(settings: &opentaskbar_core::settin
 
 /// Shared startup wiring for the Settings process and the dock process.
 #[cfg(windows)]
-fn apply_startup_context(settings: &opentaskbar_core::settings::DockSettings) {
+#[must_use]
+fn apply_startup_context(
+    settings: &opentaskbar_core::settings::DockSettings,
+) -> design::windows_palette::PaletteListener {
     let _ = platform::theme_packs::install_bundled();
-    design::theme::ThemeManager::apply(settings.theme, Some(settings));
-    // Theme-pack token overrides saved by the in-app editor must reach the
-    // live palette before any window is created.
-    design::theme::apply_saved_token_overrides(settings);
-    let _ = design::windows_palette::install_listener();
-    platform::icon_pack::set_active_pack(None);
-    if !settings.theme_pack.trim().is_empty() {
-        // Shared (uppercase) `Themes` root — same folder as the reference build.
-        let dir = opentaskbar_core::paths::theme_root().join(&settings.theme_pack);
-        platform::icon_pack::set_active_pack(Some(dir.as_path()));
-    }
+    crate::design::theme::sync_from_settings(settings);
+    design::windows_palette::install_listener()
 }
 
 fn main() {
@@ -159,7 +155,7 @@ fn main() {
                 opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
             design::fonts::apply_settings(&settings);
-            apply_startup_context(&settings);
+            let _palette_listener = apply_startup_context(&settings);
             ui::settings::run_settings_window();
             return;
         }
@@ -191,7 +187,7 @@ fn main() {
             opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
         opentaskbar_core::i18n::init(Some(&settings.language));
         design::fonts::apply_settings(&settings);
-        apply_startup_context(&settings);
+        let _palette_listener = apply_startup_context(&settings);
         platform::startup_registration::sync_on_startup(false, false);
         opentaskbar_shell::watchdog::arm();
         apply_native_flyout_reposition(&settings);
@@ -243,6 +239,11 @@ fn main() {
             );
             opentaskbar_shell::taskbar::restore_from_journal();
         }
+        platform::start_menu_state::uninstall_hook();
+        platform::taskbar_pin_monitor::stop_watch();
+        drop(_palette_listener);
+        drop(_lock);
+        std::process::exit(if panicked { 1 } else { 0 });
     }
 }
 
@@ -267,6 +268,39 @@ mod tests {
             paths::theme_root().file_name().unwrap(),
             Path::new("Themes").file_name().unwrap(),
             "uppercase T is required for reference theme-pack parity"
+        );
+    }
+
+    #[test]
+    fn palette_listener_is_not_discarded_in_apply_startup_context() {
+        let src = include_str!("main.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let discarded = ["let _ = ", "design::windows_palette::install_listener()"].concat();
+        assert!(
+            !prod.contains(&discarded),
+            "apply_startup_context must not discard the PaletteListener guard"
+        );
+        assert!(
+            prod.contains("-> design::windows_palette::PaletteListener"),
+            "apply_startup_context must return PaletteListener"
+        );
+    }
+
+    #[test]
+    fn main_exits_cleanly_after_teardown() {
+        let src = include_str!("main.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            prod.contains("platform::start_menu_state::uninstall_hook()"),
+            "main must uninstall the start menu hook on exit"
+        );
+        assert!(
+            prod.contains("platform::taskbar_pin_monitor::stop_watch()"),
+            "main must stop the taskbar pin monitor on exit"
+        );
+        assert!(
+            prod.contains("std::process::exit("),
+            "main must terminate cleanly with std::process::exit after teardown"
         );
     }
 }

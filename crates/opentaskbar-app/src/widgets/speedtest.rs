@@ -4,7 +4,7 @@
 //! per-stream result grid. All network work runs on detached worker threads behind an
 //! `AtomicBool` cancellation flag so the dock UI thread never blocks.
 
-use std::io::{Read, Write};
+use std::mem::size_of;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
+use windows_sys::Win32::Networking::WinHttp::{
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetTimeouts,
+};
 
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
@@ -20,7 +26,7 @@ pub const STREAM_COUNT: usize = 6;
 /// Measurement window per stream.
 pub const TEST_WINDOW_MS: u64 = 5_000;
 const TEST_HOST: &str = "speed.cloudflare.com";
-const TEST_PORT: u16 = 80;
+const TEST_PORT: u16 = 443;
 const CONNECT_TIMEOUT_MS: u64 = 2_000;
 
 /// Lifecycle of a speed test, mirroring `NetSpeedWidget.SpeedTestState`.
@@ -256,33 +262,80 @@ pub fn measure_ping(cancel: &AtomicBool) -> Option<u32> {
 }
 
 fn download_stream(index: usize, cancel: Arc<AtomicBool>, deadline: Instant) -> u64 {
-    let Some(addr) = resolve_host(TEST_HOST, TEST_PORT) else {
-        return 0;
-    };
-    let Ok(mut stream) =
-        TcpStream::connect_timeout(&addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
-    else {
-        return 0;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let request = format!(
-        "GET /__down?bytes=104857600&stream={index} HTTP/1.1\r\nHost: {TEST_HOST}\r\nUser-Agent: OpenTaskbar/1.0\r\nConnection: close\r\n\r\n"
-    );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return 0;
-    }
-    let started = Instant::now();
-    let mut buf = [0u8; 64 * 1024];
-    let mut total = 0u64;
-    while Instant::now() < deadline && !cancel.load(Ordering::Acquire) {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => total = total.saturating_add(n as u64),
-            Err(_) => break,
+    let agent: Vec<u16> = "OpenTaskbar/1.0\0".encode_utf16().collect();
+    let host_w: Vec<u16> = TEST_HOST.encode_utf16().chain(Some(0)).collect();
+    let verb_w: Vec<u16> = "GET\0".encode_utf16().collect();
+    let path_str = format!("/__down?bytes=104857600&stream={index}");
+    let path_w: Vec<u16> = path_str.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let session = WinHttpOpen(
+            agent.as_ptr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+        if session.is_null() {
+            return 0;
         }
+        let timeout = CONNECT_TIMEOUT_MS as i32;
+        let _ = WinHttpSetTimeouts(session, timeout, timeout, timeout, timeout);
+        let connect = WinHttpConnect(session, host_w.as_ptr(), TEST_PORT, 0);
+        if connect.is_null() {
+            WinHttpCloseHandle(session);
+            return 0;
+        }
+        let req = WinHttpOpenRequest(
+            connect,
+            verb_w.as_ptr(),
+            path_w.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            WINHTTP_FLAG_SECURE,
+        );
+        if req.is_null() {
+            WinHttpCloseHandle(connect);
+            WinHttpCloseHandle(session);
+            return 0;
+        }
+        let sent = WinHttpSendRequest(req, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) != 0
+            && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
+        let mut total = 0u64;
+        let started = Instant::now();
+        if sent {
+            let mut status: u32 = 0;
+            let mut status_sz = size_of::<u32>() as u32;
+            let status_ok = WinHttpQueryHeaders(
+                req,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut status as *mut u32).cast(),
+                &mut status_sz,
+                std::ptr::null_mut(),
+            ) != 0
+                && (200..300).contains(&status);
+            if status_ok {
+                let mut buf = [0u8; 64 * 1024];
+                while Instant::now() < deadline && !cancel.load(Ordering::Acquire) {
+                    let mut read: u32 = 0;
+                    if WinHttpReadData(req, buf.as_mut_ptr().cast(), buf.len() as u32, &mut read)
+                        == 0
+                        || read == 0
+                    {
+                        break;
+                    }
+                    total = total.saturating_add(u64::from(read));
+                }
+            }
+        }
+        WinHttpCloseHandle(req);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        let secs = started.elapsed().as_secs_f64().max(0.1);
+        (total as f64 / secs) as u64
     }
-    let secs = started.elapsed().as_secs_f64().max(0.1);
-    (total as f64 / secs) as u64
 }
 
 /// Formats throughput in reference style (`Mbit/s` above 1 Mbit, else `kbit/s`).
@@ -340,23 +393,34 @@ pub fn build_speedtest_flyout(
     ];
     if let Some(result) = result {
         blocks.push(FlyoutBlock::Separator);
+        let max_stream_bps = result
+            .per_stream_bps
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(1)
+            .max(1);
         for (idx, bps) in result.per_stream_bps.iter().enumerate() {
-            let ratio = (*bps as f32 / result.aggregate_bps().max(1) as f32) * STREAM_COUNT as f32;
+            let ratio = (*bps as f32 / max_stream_bps as f32).clamp(0.0, 1.0);
             blocks.push(FlyoutBlock::ProgressBar {
                 label: loc::t_fmt("SpeedTestStream", &[&(idx + 1).to_string()]),
                 value_text: format_throughput(*bps),
-                ratio: ratio.clamp(0.0, 1.0),
+                ratio,
                 tone: BarTone::Accent,
             });
         }
     }
     blocks.push(FlyoutBlock::Separator);
-    blocks.push(FlyoutBlock::ButtonBar(vec![
-        (1, loc::t("Start"), state == SpeedTestState::Idle),
-        (2, loc::t("SpeedTestCancel"), false),
-        (3, loc::t("SpeedTestRetry"), false),
-        (4, loc::t("SpeedTestRestartButton"), false),
-    ]));
+    let buttons = match state {
+        SpeedTestState::Idle => vec![(1, loc::t("Start"), true)],
+        SpeedTestState::MeasuringPing | SpeedTestState::Downloading => {
+            vec![(2, loc::t("SpeedTestCancel"), true)]
+        }
+        SpeedTestState::Finished | SpeedTestState::Cancelled | SpeedTestState::Failed => {
+            vec![(4, loc::t("SpeedTestRunAgain"), true)]
+        }
+    };
+    blocks.push(FlyoutBlock::ButtonBar(buttons));
     FlyoutSpec {
         title: loc::t("SpeedTestTitle"),
         subtitle: Some(loc::t_fmt(
@@ -451,5 +515,39 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(controller.state, SpeedTestState::Failed);
+    }
+
+    #[test]
+    fn flyout_buttons_match_state_and_scale_bars_by_max() {
+        let idle = build_speedtest_flyout(SpeedTestState::Idle, None);
+        assert!(
+            idle.blocks
+                .iter()
+                .any(|b| matches!(b, FlyoutBlock::ButtonBar(v) if v.len() == 1 && v[0].0 == 1))
+        );
+        let running = build_speedtest_flyout(SpeedTestState::Downloading, None);
+        assert!(
+            running
+                .blocks
+                .iter()
+                .any(|b| matches!(b, FlyoutBlock::ButtonBar(v) if v.len() == 1 && v[0].0 == 2))
+        );
+        let res = SpeedTestResult {
+            per_stream_bps: vec![1_000_000, 2_000_000, 4_000_000],
+            ..Default::default()
+        };
+        let done = build_speedtest_flyout(SpeedTestState::Finished, Some(&res));
+        let ratios: Vec<f32> = done
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                FlyoutBlock::ProgressBar { ratio, .. } => Some(*ratio),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ratios.len(), 3);
+        assert!((ratios[0] - 0.25).abs() < 0.01);
+        assert!((ratios[1] - 0.50).abs() < 0.01);
+        assert!((ratios[2] - 1.00).abs() < 0.01);
     }
 }

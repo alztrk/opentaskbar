@@ -71,7 +71,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    WS_VISIBLE, WindowFromPoint,
 };
 
 pub mod dcomp;
@@ -93,9 +93,8 @@ use self::layout::{
     hide_offset, insertion_index, is_full_screen_on_monitor, is_injected_key_event,
     keyboard_next_index, magnification_expands_dock, revealed_guard_should_hide, section_width,
     shell_gap, show_search_button, show_task_view_button, slot_gap, start_menu_hide_fallback,
-    step_shell_spring, step_spring, use_hover_icon, vsync_tick_allowed, wheel_scroll_step,
-    wheel_to_axis_delta, widget_gap, win_key_modifier_pressed, win_key_reveal_allowed,
-    win_key_reveal_enabled,
+    step_shell_spring, use_hover_icon, vsync_tick_allowed, wheel_scroll_step, wheel_to_axis_delta,
+    widget_gap, win_key_modifier_pressed, win_key_reveal_allowed, win_key_reveal_enabled,
 };
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
@@ -108,7 +107,7 @@ use crate::platform::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
     WidgetContextAction,
 };
-use crate::ui::flyout::{FlyoutBlock, FlyoutSpec};
+use crate::ui::flyout::{FlyoutBlock, FlyoutEdge, FlyoutIcon, FlyoutOptions, FlyoutSpec};
 use crate::ui::menu::{self, BorderStyle, MenuEntry};
 use crate::ui::settings as settings_ui;
 use crate::widgets::{self, HOVER_INTENT_MS, HoverChange, HoverPhase, WidgetRuntime, registry};
@@ -163,6 +162,16 @@ const HOTKEY_DOCK_ID: i32 = 0x4F02;
 /// can never be mistaken for a dock context action.
 const NATIVE_APP_MENU_ID_BASE: u32 = 7000;
 const GROUP_FLYOUT_ROW_ID_BASE: u32 = 100;
+/// Folder-stack flyout: footer "Open in File Explorer" button and item rows.
+const STACK_FLYOUT_OPEN_FOLDER_ID: u32 = 1;
+const STACK_FLYOUT_ROW_ID_BASE: u32 = 100;
+/// The scroll viewport sits 1 DIP inside each pill edge (`vp_left = pill_left + 1`).
+/// The pill must include both insets or a dock that fits on screen reports a
+/// bogus 2 DIP overflow (and a right scroll chevron) at rest.
+const VIEWPORT_INSET_DIPS: f32 = 1.0;
+/// `FILE_ATTRIBUTE_HIDDEN` / `FILE_ATTRIBUTE_SYSTEM` for folder-stack filtering.
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 /// Runtime-resolved settings applied once per settings load (never on the mouse
 /// hot path). The core `effective_*` functions own the resolution; the dock
 /// caches their answers so a 1000 Hz mouse stream never re-reads disk.
@@ -173,6 +182,10 @@ struct EffectiveMetrics {
     top_gap_dips: Option<i32>,
     bottom_gap_dips: Option<i32>,
     widget_densities: HashMap<String, f32>,
+    /// Live resting content width (shell, unmagnified apps, live widget widths,
+    /// trail, and viewport insets). Lets the window grow with dynamic widget widths
+    /// (Clock seconds, Stats columns, ...) that the static descriptors don't know.
+    live_rest_content_dips: Option<f32>,
 }
 
 impl EffectiveMetrics {
@@ -205,6 +218,7 @@ impl EffectiveMetrics {
             top_gap_dips: Some(settings::effective_top_gap(settings)),
             bottom_gap_dips: Some(settings::effective_bottom_gap(settings)),
             widget_densities,
+            live_rest_content_dips: None,
         }
     }
 
@@ -224,11 +238,199 @@ impl EffectiveMetrics {
 
 /// Vertically centers app icons inside the dock pill (matching shell buttons), while reserving
 /// clean room at the bottom for the running/active indicator dot inside the pill clip.
+/// `AnimationFpsCap` (`0` = unlimited, `30`/`60`/`120`): clamps an effective frame rate.
+fn apply_fps_cap(fps: u32, settings: &DockSettings) -> u32 {
+    match u32::try_from(settings.animation_fps_cap) {
+        Ok(cap) if cap > 0 => fps.min(cap),
+        _ => fps,
+    }
+}
+
+/// VSync producer target for a `hz` monitor: `0` paces with `DwmFlush` (native refresh),
+/// any other value is a fixed rate below the refresh (`animation_fps` and
+/// `animation_fps_cap` both apply, the lower one wins).
+pub(crate) fn target_fps_for_hz(settings: &DockSettings, hz: u32) -> u32 {
+    if !effective_animations_enabled(settings.animations_enabled, settings.focus_mode) {
+        return 0;
+    }
+    let hz = hz.max(15);
+    let requested = match settings.animation_fps {
+        Some(fps) if fps < hz => fps.clamp(15, hz),
+        _ => hz,
+    };
+    let capped = apply_fps_cap(requested, settings).max(15);
+    if capped < hz { capped } else { 0 }
+}
+
+/// Public crate entry point mirroring `DockState::compute_target_fps`.
+pub(crate) fn compute_target_fps(settings: &DockSettings, device_name: &str) -> u32 {
+    DockState::compute_target_fps(settings, device_name)
+}
+
+/// OLED display care: the dock switches to `TrueBlack` while the low-battery trigger or
+/// the Night Light trigger is active; otherwise the configured background applies.
+pub fn effective_dock_background(
+    settings: &DockSettings,
+    on_low_battery: bool,
+    night_light_on: bool,
+) -> SurfaceBackground {
+    if (settings.oled_auto_trigger_enabled && on_low_battery)
+        || (settings.oled_auto_on_night_light && night_light_on)
+    {
+        SurfaceBackground::TrueBlack
+    } else {
+        settings.dock_background
+    }
+}
+
+/// Deterministic burn-in shift cycle (logical pixels).
+const BURN_IN_SHIFT_CYCLE: [(i32, i32); 8] = [
+    (0, 0),
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, -1),
+];
+
+/// `(dx, dy)` burn-in nudge after `elapsed_minutes`: one cycle step every
+/// `burn_in_shift_minutes`, `(0, 0)` while the feature is off.
+fn burn_in_shift_px(settings: &DockSettings, elapsed_minutes: u64) -> (i32, i32) {
+    if !settings.burn_in_shift_enabled {
+        return (0, 0);
+    }
+    let interval = settings.burn_in_shift_minutes.clamp(5, 120) as u64;
+    BURN_IN_SHIFT_CYCLE[((elapsed_minutes / interval) % BURN_IN_SHIFT_CYCLE.len() as u64) as usize]
+}
+
+/// Ambient mode dims the dock after this much user inactivity.
+const AMBIENT_IDLE_SECS: u64 = 5 * 60;
+const AMBIENT_DIM_OPACITY: f32 = 0.45;
+
+/// Milliseconds since the last keyboard/mouse input (`GetLastInputInfo`).
+fn idle_millis() -> Option<u64> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO {
+        cbSize: size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a valid, correctly sized LASTINPUTINFO.
+    if unsafe { GetLastInputInfo(&mut info) } == 0 {
+        return None;
+    }
+    // Both counters are 32-bit tick counts; wrapping subtraction handles the 49.7 day wrap.
+    let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    Some(u64::from(now.wrapping_sub(info.dwTime)))
+}
+
+/// ShrinkPriority compaction: when the resting widgets overflow by `overflow_dips`, the
+/// lowest-priority widgets (`widget_shrink_priority`) are compacted first until the
+/// overflow is absorbed. `bias > 0` compacts harder and reaches higher priorities,
+/// `bias < 0` compacts gentler and protects more widgets; `0` uses the 0.84 scale.
+pub(crate) fn widget_shrink_factors(
+    widths: &[(&'static str, f32)],
+    overflow_dips: f32,
+    bias: i32,
+) -> HashMap<&'static str, f32> {
+    let mut out = HashMap::new();
+    if !overflow_dips.is_finite() || overflow_dips <= 0.5 || widths.is_empty() {
+        return out;
+    }
+    let bias = bias.clamp(-10, 10);
+    let scale = if bias >= 0 {
+        0.84 - 0.016 * bias as f32
+    } else {
+        0.84 + 0.012 * (-bias) as f32
+    };
+    // Priority ceiling: bias 0 lets every regular widget (<= 100) compact.
+    let ceiling = 100 + bias * 8;
+    let mut order: Vec<(u8, usize)> = widths
+        .iter()
+        .enumerate()
+        .map(|(idx, (id, _))| (settings::widget_shrink_priority(id), idx))
+        .filter(|(priority, _)| i32::from(*priority) <= ceiling)
+        .collect();
+    order.sort_by_key(|(priority, idx)| (*priority, *idx));
+    let mut saved = 0.0_f32;
+    for (_, idx) in order {
+        if saved >= overflow_dips {
+            break;
+        }
+        let (id, width) = widths[idx];
+        if !width.is_finite() || width <= 0.0 {
+            continue;
+        }
+        saved += width * (1.0 - scale);
+        out.insert(id, scale);
+    }
+    out
+}
+
 fn app_icon_vertical_metrics(pill_top: f32, pill_h: f32, icon_size: f32) -> (f32, f32, f32) {
     let top = pill_top + ((pill_h - icon_size) * 0.5 - 1.5).max(4.0);
     let bottom = top + icon_size;
-    let dot_top = (bottom + 3.0).min(pill_top + pill_h - 5.5);
+    // Running/active indicator sits 2 DIP higher than before so it never hugs
+    // (or gets clipped by) the pill's rounded bottom edge.
+    let dot_top = (bottom + 3.0).min(pill_top + pill_h - 7.5);
     (top, bottom, dot_top)
+}
+
+/// Returns `(show_clock_widget, show_system_stats_widget)` for a profile's
+/// `enabled_widgets` list, matching canonical, legacy and mixed-case IDs
+/// (`Clock`, `clock`, `SystemStats`, `stats`, ...).
+fn profile_widget_flags(enabled_widgets: &[String]) -> (bool, bool) {
+    let matches = |target: &str| {
+        enabled_widgets
+            .iter()
+            .any(|w| settings::canonical_widget_setting_id(w).eq_ignore_ascii_case(target))
+    };
+    (matches("Clock"), matches("SystemStats"))
+}
+
+/// Reads one folder stack: visible (non-hidden, non-system, non-temp) children.
+/// `None` when the folder cannot be read.
+fn read_stack_entries(path: &str) -> Option<Vec<layout::StackEntry>> {
+    use std::os::windows::fs::MetadataExt;
+    let dir = Path::new(path);
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut out = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let attrs = meta.file_attributes();
+        if !layout::stack_entry_visible(
+            &name,
+            attrs & FILE_ATTRIBUTE_HIDDEN != 0,
+            attrs & FILE_ATTRIBUTE_SYSTEM != 0,
+        ) {
+            continue;
+        }
+        let modified_secs = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
+        out.push(layout::StackEntry {
+            path: entry.path().to_string_lossy().into_owned(),
+            name,
+            is_dir: meta.is_dir(),
+            modified_secs,
+        });
+    }
+    Some(out)
+}
+
+/// Number of visible items in a folder stack (tooltip suffix).
+fn stack_item_count(path: &str) -> Option<usize> {
+    read_stack_entries(path).map(|entries| entries.len())
+}
+
+fn open_folder_in_explorer(path: &str) {
+    pins::launch_with_args("explorer.exe".to_owned(), format!("\"{path}\""));
 }
 
 /// Registered `WM_APP_SETTINGS_RELOAD` value, shared by every dock window.
@@ -508,10 +710,9 @@ fn shell_section_width(settings: &DockSettings) -> f32 {
 }
 
 fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
-    let active: Vec<_> = widgets::active_widgets(settings)
-        .into_iter()
-        .filter(|wd| wd.id != "media" || settings.show_media)
-        .collect();
+    // `active_widgets` already honours the Settings toggle for every widget
+    // (Media included); a second `show_media` gate hid a freshly enabled Media chip.
+    let active = widgets::active_widgets(settings);
     let start_in_widgets = layout::start_strip_group(settings)
         == layout::StartStripGroup::InWidgets
         && is_shell_button_visible(settings, ShellButton::Start);
@@ -533,6 +734,21 @@ fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
 }
 
 fn base_trail_width(settings: &DockSettings) -> f32 {
+    base_trail_width_for(settings, stack_folder_count(settings))
+}
+
+/// Folder stacks rendered as individual dock icons (one per non-empty path).
+fn stack_folder_count(settings: &DockSettings) -> usize {
+    settings
+        .stack_folders
+        .iter()
+        .filter(|path| !path.trim().is_empty())
+        .count()
+}
+
+/// Trailing group `| [Folder...] [PinnedTray...] [Tray] [Bin]` without the
+/// pinned tray icons: every folder stack, Tray and Bin is one `base x base` cell.
+fn base_trail_width_for(settings: &DockSettings, stack_count: usize) -> f32 {
     let mut w = 0.0;
     let base = layout::size_profile(settings).cell;
     if settings.show_tray_button {
@@ -541,6 +757,7 @@ fn base_trail_width(settings: &DockSettings) -> f32 {
     if settings.show_recycle_bin {
         w += base + widget_gap(settings);
     }
+    w += stack_count as f32 * (base + widget_gap(settings));
     if w > 0.0 {
         w + 13.0 // left TrayGroupDivider + breathing room
     } else {
@@ -595,6 +812,23 @@ struct WidgetVisual {
     last_key: String,
 }
 
+/// One folder stack drawn as its own native folder icon in the trailing group.
+struct StackVisual {
+    path: String,
+    label: String,
+    /// Hover/press backdrop (inside the pill clip).
+    bg: VisualNode,
+    /// Folder icon (in the headroom-capable scroll container so magnification
+    /// can lift it above the pill).
+    icon: VisualNode,
+    bound_source: String,
+    bound_has_icon: bool,
+    scale: f32,
+    scale_velocity: f32,
+    /// `(read_at, visible item count)` for the hover tooltip (2 s TTL).
+    cached_count: Option<(Instant, usize)>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResizeEdge {
     Left,
@@ -634,16 +868,24 @@ fn compute_scroll_metrics(
     let content_w = content_strip_width(shell_w, apps_w, right_w, 0.0);
     let max_scroll = (content_w - vp_w).max(0.0);
     let offset = scroll_offset.clamp(0.0, max_scroll);
-    // The leading shell group (and therefore Start) is pinned to the inner edge.
-    // `content_alignment` only shifts the *trailing* anchor, so growing spacing
-    // can never drag Start left. A scrolling strip always starts at the edge.
-    let shell_start_x = vp_left + CONTENT_EDGE_PAD_DIPS - offset;
+    // The strip is one contiguous run: `[shell][apps][widgets] | [trail]`.
+    // `content_alignment` positions that *whole* run inside a pill wider than
+    // its content (fixed/percent width, or a dragged custom width). Shifting
+    // only the trailing anchor split the slack into a bogus gap between the
+    // last widget and the trail divider plus a second gap right of the Recycle
+    // Bin. A content-fitted pill has no slack, so Start stays at the inner
+    // edge there; a scrolling strip always starts at the edge.
+    let strip_shift = if max_scroll > 0.5 {
+        0.0
+    } else {
+        content_alignment_offset(vp_w, content_w, alignment)
+    };
+    let shell_start_x = vp_left + CONTENT_EDGE_PAD_DIPS - offset + strip_shift;
     let apps_start_x = shell_start_x + shell_w;
-    let trailing_shift = content_alignment_offset(vp_w, content_w, alignment);
     let right_anchor_x = if max_scroll > 0.5 {
         vp_left + content_w - CONTENT_EDGE_PAD_DIPS - offset
     } else {
-        (vp_left + content_w - CONTENT_EDGE_PAD_DIPS - offset + trailing_shift)
+        (vp_left + content_w - CONTENT_EDGE_PAD_DIPS + strip_shift)
             .min(vp_right - CONTENT_EDGE_PAD_DIPS)
     };
     ScrollMetrics {
@@ -659,9 +901,61 @@ fn compute_scroll_metrics(
     }
 }
 
+/// Pill width that exactly holds a content strip plus both viewport insets
+/// (P0-4). Shared by window sizing, live pill geometry and the tests.
+fn pill_width_for_content(content_strip_w: f32) -> f32 {
+    (content_strip_w + VIEWPORT_INSET_DIPS * 2.0).max(160.0)
+}
+
+/// Scroll viewport inside a pill: flush with its rounded edges, 1 DIP inset.
+fn pill_viewport(pill_left: f32, pill_w: f32) -> (f32, f32) {
+    let vp_left = pill_left + VIEWPORT_INSET_DIPS;
+    let vp_right = (pill_left + pill_w - VIEWPORT_INSET_DIPS).max(vp_left + 1.0);
+    (vp_left, vp_right)
+}
+
 fn scroll_min_pill_width(settings: &DockSettings) -> f32 {
     let base = layout::size_profile(settings).cell;
     (base * 2.5 + 36.0).max(160.0)
+}
+
+/// DIPs to exclude from the content clip on the left/right edge while the
+/// matching scroll chevron is visible (the chevron band is `SCROLL_EDGE_W_DIPS`).
+fn scroll_chevron_insets(can_scroll_left: bool, can_scroll_right: bool) -> (f32, f32) {
+    let band = |shown: bool| if shown { SCROLL_EDGE_W_DIPS } else { 0.0 };
+    (band(can_scroll_left), band(can_scroll_right))
+}
+
+/// Zeroes the corner radii on a clip edge that was inset for a scroll chevron.
+fn square_inset_clip_corners(clip: &IDCompositionRectangleClip, left: bool, right: bool) {
+    unsafe {
+        if left {
+            let _ = clip.SetTopLeftRadiusX2(0.0);
+            let _ = clip.SetTopLeftRadiusY2(0.0);
+            let _ = clip.SetBottomLeftRadiusX2(0.0);
+            let _ = clip.SetBottomLeftRadiusY2(0.0);
+        }
+        if right {
+            let _ = clip.SetTopRightRadiusX2(0.0);
+            let _ = clip.SetTopRightRadiusY2(0.0);
+            let _ = clip.SetBottomRightRadiusX2(0.0);
+            let _ = clip.SetBottomRightRadiusY2(0.0);
+        }
+    }
+}
+
+/// Folder-stack row title: the file name without a shortcut's `.lnk` / `.url`
+/// extension (case-insensitive). The row keeps the full path for launching.
+fn stack_entry_display_name(name: &str) -> String {
+    for ext in [".lnk", ".url"] {
+        if name.len() > ext.len()
+            && let Some(stem) = name.get(..name.len() - ext.len())
+            && name[stem.len()..].eq_ignore_ascii_case(ext)
+        {
+            return stem.to_owned();
+        }
+    }
+    name.to_owned()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -838,8 +1132,33 @@ struct DockState {
     bin_surf_px: f32,
     bin_is_full: bool,
     widget_visuals: Vec<WidgetVisual>,
-    widget_runtime: WidgetRuntime,
+    /// One native folder icon per `settings.stack_folders` entry (none on a light strip).
+    stack_visuals: Vec<StackVisual>,
+    /// `imageres.dll,-3` folder icon used until a stack's own icon resolves.
+    folder_fallback_surf: Option<IDCompositionSurface>,
+    hovered_stack: Option<usize>,
+    pressed_stack: Option<usize>,
+    /// Pointer x while over the folder stacks (in-place magnification only).
+    stack_hover_x: Option<f32>,
+    /// Declared before `widget_runtime` so the islands (which hold a
+    /// `dynamic_island::SharedRuntime` into it) are destroyed first on drop.
     dynamic_island: Option<dynamic_island::DynamicIslandManager>,
+    /// The single widget runtime shared with every Dynamic Island. Boxed so its
+    /// address stays stable while `DockState` moves.
+    widget_runtime: Box<WidgetRuntime>,
+    /// ShrinkPriority compaction factor per widget while the dock overflows.
+    widget_shrink: HashMap<&'static str, f32>,
+    /// Current ambient-mode dim level (`1.0` = full opacity).
+    ambient_opacity: f32,
+    /// OLED care inputs sampled on the 2 s widget tick.
+    oled_low_battery: bool,
+    oled_night_light: bool,
+    /// Start of the burn-in shift cycle and the last applied shift.
+    burn_in_epoch: Instant,
+    burn_in_applied: (i32, i32),
+    /// Resolved pill corner radius (user override > theme-pack `DockRadius` > profile),
+    /// shared by the pill surfaces, the glass host and the scroll clip.
+    pill_radius_dips: f32,
     show_desktop_corner: Option<ShowDesktopCorner>,
     dot_running: IDCompositionSurface,
     dot_active: IDCompositionSurface,
@@ -896,6 +1215,18 @@ struct DockState {
     keyboard_idx: Option<usize>,
     /// Cached peak magnification scale for the current hover session.
     session_max_scale: f32,
+    /// Resting scroll metrics frozen when a hover session starts, so the fisheye
+    /// targets (rest centers) cannot drift while the strip magnifies. Cleared on
+    /// mouse leave / layout changes and once the arch has fully decayed.
+    hover_rest_sm: Option<ScrollMetrics>,
+    /// macOS fixed-point shift `p - f(p)` applied to the live strip (expanding docks).
+    fisheye_shift: f32,
+    /// Last pointer used for the fixed-point anchor, kept while the arch decays.
+    fisheye_anchor_x: Option<f32>,
+    /// Pairs `WH_MOUSE_LL`-routed wheel notches with their `WM_MOUSEWHEEL` twins.
+    wheel_dedup: layout::WheelDedup,
+    /// Last foreground window outside OpenTaskbar (Keyboard Layout widget target).
+    keyboard_target_hwnd: usize,
     /// Fisheye scale/velocity of the three shell glyphs (Start/Search/TaskView).
     /// They share the app-icon spring and gate but have their own spring state.
     shell_scales: [f32; 3],
@@ -1298,13 +1629,12 @@ fn pill_height_dips(settings: &DockSettings) -> f32 {
 fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
     let profile = layout::size_profile(settings);
     let icons_w = section_width(profile.cell, slot_gap(settings), slot_count);
-    content_strip_width(
+    pill_width_for_content(content_strip_width(
         shell_section_width(settings),
         icons_w,
         widgets_section_width(settings, slot_count, mon_w_dips),
         0.0,
-    )
-    .max(160.0)
+    ))
 }
 
 fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
@@ -1332,14 +1662,25 @@ fn compute_window_dips_with(
     // WS-1 `effective_width` overrides Auto/Pixels/Percent width modes.
     if let Some(width) = effective.width_dips {
         resting_w = width.min((mon_w_dips - 16.0).max(200.0));
+    } else if !settings.full_width
+        && settings.dock_custom_width_dips.is_none()
+        && let Some(live) = effective.live_rest_content_dips
+    {
+        // Live widget widths can exceed the static descriptors: never size the
+        // window below the real resting content.
+        resting_w = resting_w.max(live).min((mon_w_dips - 16.0).max(200.0));
     }
     let peak = profile_peak(settings);
     let expands = magnification_expands_dock(settings);
-    let mag_extra = if settings.magnification_enabled && !settings.full_width && !expands {
-        base * peak * 2.8
-    } else {
-        0.0
-    };
+    // Fixed-width magnification happens in place (zero slot extras), so it
+    // needs no horizontal room. Only an expanding dock reserves a full arch so
+    // a hover can never pop scroll chevrons or clip the Tray/Recycle Bin.
+    let mag_extra =
+        if fisheye_enabled(settings) && !settings.full_width && expands && slot_count > 0 {
+            layout::fisheye_expansion_reserve_dips(base + slot_gap(settings), peak) + 8.0
+        } else {
+            0.0
+        };
     let mag_headroom = if expands {
         // `MagnificationExpandsDock` grows the surface itself: no headroom strip.
         0.0
@@ -1524,6 +1865,9 @@ impl DockState {
         light_strip: bool,
     ) -> windows::core::Result<Self> {
         let dpi = monitor.dpi_scale;
+        // Theme pack, Windows accent and editor overrides must be live before the
+        // first surface is drawn so startup matches a later live reload.
+        crate::design::theme::sync_from_settings(&settings);
         let is_dark = resolve_is_dark(settings.theme);
         set_win_key_reveal_gate(&settings);
         let dcomp = DcompEngine::new(hwnd)?;
@@ -1546,7 +1890,7 @@ impl DockState {
                 (0xff, 0xff, 0xff, 0.10),
                 (0xff, 0xff, 0xff, 0.16),
                 (0xff, 0xff, 0xff, 0.14),
-                (0xd4, 0xd4, 0xd8, 0.85),
+                (0xd4, 0xd4, 0xd8, 0.94),
                 (0xff, 0xff, 0xff, 1.0),
             )
         } else {
@@ -1726,7 +2070,9 @@ impl DockState {
             icon_cache::extract_recycle_bin_icon(true)
                 .and_then(|raw| dcomp.create_app_icon_surface(&raw).ok()),
         ) {
-            (Some(empty), Some(full)) => (empty, full, 64.0),
+            // The Recycle Bin is extracted at 128 px for crispness: scale by its
+            // real surface size, not the 64 px app-icon size.
+            (Some(empty), Some(full)) => (empty, full, icon_cache::RECYCLE_BIN_ICON_PX as f32),
             _ => (
                 dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinEmpty, glyph_px, is_dark)?,
                 dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)?,
@@ -1739,11 +2085,19 @@ impl DockState {
         } else {
             &bin_empty_surf
         }));
+        let folder_fallback_surf = icon_cache::extract_default_folder_icon()
+            .and_then(|raw| dcomp.create_app_icon_surface(&raw).ok());
 
         let corner_h = pill_h + settings.dock_bottom_gap_pixels.max(0) as f32;
         let all_monitors = win32::enumerate_monitors();
+        let mut widget_runtime = Box::<WidgetRuntime>::default();
+        widget_runtime.tick(&settings);
         let dynamic_island = if monitor.is_primary {
-            let mut mgr = dynamic_island::DynamicIslandManager::new();
+            // SAFETY: the runtime is boxed (stable address), owned by this `DockState`
+            // next to the manager, which is declared (and therefore dropped) first; both
+            // live on this UI thread.
+            let shared = unsafe { dynamic_island::SharedRuntime::new(&mut widget_runtime) };
+            let mut mgr = dynamic_island::DynamicIslandManager::new(shared);
             mgr.apply(&settings, &all_monitors, is_dark);
             Some(mgr)
         } else {
@@ -1840,8 +2194,20 @@ impl DockState {
             bin_surf_px,
             bin_is_full,
             widget_visuals: Vec::new(),
-            widget_runtime: WidgetRuntime::default(),
+            stack_visuals: Vec::new(),
+            folder_fallback_surf,
+            hovered_stack: None,
+            pressed_stack: None,
+            stack_hover_x: None,
             dynamic_island,
+            widget_runtime,
+            widget_shrink: HashMap::new(),
+            ambient_opacity: 1.0,
+            oled_low_battery: false,
+            oled_night_light: false,
+            burn_in_epoch: Instant::now(),
+            burn_in_applied: (0, 0),
+            pill_radius_dips: radius,
             show_desktop_corner,
             dot_running,
             dot_active,
@@ -1885,6 +2251,11 @@ impl DockState {
             resize_drag: None,
             keyboard_idx: None,
             session_max_scale: layout::HOVER_SCALE,
+            hover_rest_sm: None,
+            fisheye_shift: 0.0,
+            fisheye_anchor_x: None,
+            wheel_dedup: layout::WheelDedup::default(),
+            keyboard_target_hwnd: 0,
             shell_scales: [1.0; 3],
             shell_velocities: [0.0; 3],
             drag_hover_started: None,
@@ -1914,7 +2285,10 @@ impl DockState {
             shutdown,
             target_fps,
         };
-        state.rebuild_visual_tree();
+        // Startup takes the same themed path as a live reload (OLED inputs, theme-pack
+        // pill/indicator/radius tokens); it ends with `rebuild_visual_tree`.
+        state.sample_oled_inputs();
+        state.rebuild_theme_surfaces();
         state.refresh_widgets();
         state.request_missing_icons();
         state.update_visuals();
@@ -1928,10 +2302,7 @@ impl DockState {
             return 0;
         }
         let hz = win32::monitor_refresh_hz(device_name);
-        match settings.animation_fps {
-            Some(fps) if fps < hz => fps.clamp(15, hz),
-            _ => 0,
-        }
+        target_fps_for_hz(settings, hz)
     }
 
     fn widget_anim_interval_ms(&self) -> u32 {
@@ -1941,7 +2312,7 @@ impl DockState {
             .animation_fps
             .map(|f| f.clamp(15, hz))
             .unwrap_or(hz);
-        (1000 / fps.max(15)).max(4)
+        (1000 / apply_fps_cap(fps, &self.settings).max(15)).max(4)
     }
 
     fn spawn_vsync_thread(&self) {
@@ -2095,6 +2466,14 @@ impl DockState {
             self.pill_scroll_container.add_child(&wv.node);
         }
 
+        self.sync_stack_visuals();
+        for sv in &self.stack_visuals {
+            // Backdrop stays inside the rounded pill clip; the folder icon lives in
+            // the headroom-capable container so magnification can lift it.
+            self.pill_scroll_container.add_child(&sv.bg);
+            self.scroll_container.add_child(&sv.icon);
+        }
+
         self.pill_scroll_container.add_child(&self.widget_divider);
         let count = visible_tray_pin_count(&self.settings, self.slots.len(), self.mon_w_dips());
         self.tray_pin_visuals.truncate(count);
@@ -2130,9 +2509,68 @@ impl DockState {
             .add_child(&self.dcomp.root, &self.scroll_next_node);
         self.dcomp.add_child(&self.dcomp.root, &self.drag_ghost);
         self.dcomp.add_child(&self.dcomp.root, &self.tooltip_node);
+        // Any structural rebuild invalidates the frozen resting layout.
+        self.hover_rest_sm = None;
     }
 
-    fn sync_widget_visuals(&mut self) {
+    /// Reconciles `stack_visuals` with `settings.stack_folders`, reusing the
+    /// DComp nodes of folders that stay. A light strip carries no folder stacks.
+    fn sync_stack_visuals(&mut self) {
+        let desired: Vec<String> = if self.light_strip {
+            Vec::new()
+        } else {
+            self.settings
+                .stack_folders
+                .iter()
+                .map(|path| path.trim())
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let same = self.stack_visuals.len() == desired.len()
+            && self
+                .stack_visuals
+                .iter()
+                .zip(desired.iter())
+                .all(|(sv, path)| sv.path == *path);
+        if same {
+            return;
+        }
+        let mut previous = std::mem::take(&mut self.stack_visuals);
+        for path in desired {
+            if let Some(pos) = previous.iter().position(|sv| sv.path == path) {
+                self.stack_visuals.push(previous.remove(pos));
+                continue;
+            }
+            let (Ok(bg), Ok(icon)) = (self.dcomp.create_node(), self.dcomp.create_node()) else {
+                break;
+            };
+            bg.hide();
+            icon.hide();
+            self.stack_visuals.push(StackVisual {
+                label: layout::stack_label(&path),
+                path,
+                bg,
+                icon,
+                bound_source: String::new(),
+                bound_has_icon: false,
+                scale: 1.0,
+                scale_velocity: 0.0,
+                cached_count: None,
+            });
+        }
+        let count = self.stack_visuals.len();
+        if self.hovered_stack.is_some_and(|index| index >= count) {
+            self.hovered_stack = None;
+        }
+        if self.pressed_stack.is_some_and(|index| index >= count) {
+            self.pressed_stack = None;
+        }
+    }
+
+    /// Visible dock widgets in `settings.widget_order` (canonical, case-insensitive),
+    /// unlisted widgets keeping their catalog order.
+    fn ordered_dock_widgets(&self) -> Vec<&'static widgets::WidgetDescriptor> {
         let active: Vec<&'static widgets::WidgetDescriptor> =
             widgets::active_widgets(&self.settings)
                 .into_iter()
@@ -2140,9 +2578,10 @@ impl DockState {
                     // A secondary light strip reserves shelf space but carries no
                     // widget cards; `secondary_widgets = false` suppresses them on
                     // any secondary dock, while island placement keeps its priority.
+                    // `active_widgets` already applies the Settings toggles (Media
+                    // included), so there is no second `show_media` gate here.
                     !self.light_strip
                         && (!self.is_secondary || self.settings.secondary_widgets)
-                        && (wd.id != "media" || self.settings.show_media)
                         && !dynamic_island::is_widget_placed_on_connected_display(
                             &self.settings,
                             wd.id,
@@ -2150,6 +2589,63 @@ impl DockState {
                         )
                 })
                 .collect();
+        let ids: Vec<&'static str> = active.iter().map(|wd| wd.id).collect();
+        layout::apply_widget_order(&ids, &self.settings.widget_order)
+            .into_iter()
+            .filter_map(|id| active.iter().find(|wd| wd.id == id).copied())
+            .collect()
+    }
+
+    /// Live chip width: settings-driven dynamic width times the density override.
+    fn widget_width_for(&self, id: &str) -> f32 {
+        self.widget_full_width_for(id) * self.widget_shrink.get(id).copied().unwrap_or(1.0)
+    }
+
+    /// Live chip width before any ShrinkPriority overflow compaction.
+    fn widget_full_width_for(&self, id: &str) -> f32 {
+        self.widget_runtime
+            .widget_width_dips_with_settings(id, &self.settings)
+            * self.effective.widget_density(id)
+    }
+
+    /// Recomputes ShrinkPriority compaction from the resting overflow. Widgets that do
+    /// not fit the available pill width compact lowest-priority first (`ShrinkPriority`
+    /// bias), before the dock falls back to scroll chevrons. Returns `true` on change.
+    fn update_widget_shrink(&mut self) -> bool {
+        let next = if self.widget_visuals.is_empty() || self.settings.full_width {
+            HashMap::new()
+        } else {
+            let full: Vec<(&'static str, f32)> = self
+                .widget_visuals
+                .iter()
+                .map(|wv| (wv.id, self.widget_full_width_for(wv.id)))
+                .collect();
+            let full_sum: f32 = full.iter().map(|(_, w)| *w).sum();
+            let current_sum: f32 = self.widget_visuals.iter().map(|wv| wv.width_dips).sum();
+            let natural = self.rest_content_width_at(Instant::now()) - current_sum + full_sum;
+            let mon_w = self.mon_w_dips();
+            let available = self
+                .effective
+                .width_dips
+                .map_or(mon_w - 16.0, |w| w.min(mon_w - 16.0))
+                .max(200.0);
+            widget_shrink_factors(
+                &full,
+                natural - available,
+                self.settings.shrink_priority_bias(),
+            )
+        };
+        if next == self.widget_shrink {
+            return false;
+        }
+        self.widget_shrink = next;
+        true
+    }
+
+    /// Reconciles `widget_visuals` with the enabled widgets. Returns `true` when
+    /// the set changed (the visual tree was rebuilt), so callers re-size the window.
+    fn sync_widget_visuals(&mut self) -> bool {
+        let active = self.ordered_dock_widgets();
         let same = self.widget_visuals.len() == active.len()
             && self
                 .widget_visuals
@@ -2157,14 +2653,13 @@ impl DockState {
                 .zip(active.iter())
                 .all(|(v, d)| v.id == d.id);
         if same {
-            return;
+            return false;
         }
         self.widget_visuals.clear();
         for wd in active {
             if let (Ok(bg), Ok(node)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
                 bg.hide();
-                let width_dips = self.widget_runtime.widget_width_dips(wd.id)
-                    * self.effective.widget_density(wd.id);
+                let width_dips = self.widget_width_for(wd.id);
                 self.widget_visuals.push(WidgetVisual {
                     id: wd.id,
                     width_dips,
@@ -2175,21 +2670,54 @@ impl DockState {
             }
         }
         self.rebuild_visual_tree();
+        true
+    }
+
+    /// `true` when `stack_visuals` no longer mirrors `settings.stack_folders`.
+    /// Stacks are only re-synced inside `rebuild_visual_tree`, so a settings
+    /// reload that adds/removes a folder must rebuild before sizing the window.
+    fn stack_visuals_stale(&self) -> bool {
+        let desired = if self.light_strip {
+            Vec::new()
+        } else {
+            self.settings
+                .stack_folders
+                .iter()
+                .map(|path| path.trim())
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>()
+        };
+        desired.len() != self.stack_visuals.len()
+            || desired
+                .iter()
+                .zip(self.stack_visuals.iter())
+                .any(|(path, sv)| sv.path != *path)
     }
 
     fn refresh_widgets(&mut self) -> bool {
-        self.sync_widget_visuals();
+        if dynamic_island::is_modal_flyout_active() {
+            return false;
+        }
+        // A newly enabled/removed widget changes the strip width; the window
+        // must follow, or the pill stays clamped to the old window (bogus
+        // overflow + scroll chevrons) until some unrelated resize happens.
+        let structure_changed = self.sync_widget_visuals();
         self.widget_runtime.tick(&self.settings);
+        // The islands share this runtime: they only re-render what changed.
         if let Some(island) = &mut self.dynamic_island {
             island.tick();
         }
+        self.update_widget_shrink();
         let mut changed = false;
         let mut width_changed = false;
         let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
         let mut key_scratch = String::with_capacity(256);
-        for wv in &mut self.widget_visuals {
-            let live_w =
-                self.widget_runtime.widget_width_dips(wv.id) * self.effective.widget_density(wv.id);
+        let live_widths: Vec<f32> = self
+            .widget_visuals
+            .iter()
+            .map(|wv| self.widget_width_for(wv.id))
+            .collect();
+        for (wv, live_w) in self.widget_visuals.iter_mut().zip(live_widths) {
             if (live_w - wv.width_dips).abs() > 0.5 {
                 wv.width_dips = live_w;
                 wv.last_key.clear();
@@ -2235,7 +2763,7 @@ impl DockState {
                 changed = true;
             }
         }
-        if width_changed {
+        if width_changed || structure_changed {
             self.sync_window_bounds();
         }
         if self.settings.show_recycle_bin {
@@ -2513,6 +3041,63 @@ impl DockState {
         false
     }
 
+    /// Dock background after OLED care triggers (see `effective_dock_background`).
+    fn effective_background(&self) -> SurfaceBackground {
+        effective_dock_background(&self.settings, self.oled_low_battery, self.oled_night_light)
+    }
+
+    /// Samples the OLED auto-trigger inputs. Only the enabled triggers touch the
+    /// system (one `GetSystemPowerStatus` / one registry read). Returns `true` when the
+    /// effective dock background changed.
+    fn sample_oled_inputs(&mut self) -> bool {
+        let before = self.effective_background();
+        self.oled_low_battery = self.settings.oled_auto_trigger_enabled && {
+            let threshold = u32::try_from(self.settings.oled_low_battery_threshold).unwrap_or(0);
+            let battery = widgets::telemetry::sample_battery();
+            threshold > 0 && battery.has_battery && !battery.on_ac && battery.percent <= threshold
+        };
+        self.oled_night_light = self.settings.oled_auto_on_night_light
+            && widgets::telemetry::read_night_light().unwrap_or(false);
+        self.effective_background() != before
+    }
+
+    /// Display-care work on the existing 2 s widget timer (never per frame): OLED
+    /// auto-triggers, the burn-in shift step and ambient-mode idle dimming.
+    fn display_care_tick(&mut self) {
+        if self.sample_oled_inputs() {
+            self.rebuild_theme_surfaces();
+            self.update_visuals();
+        }
+        let burn = burn_in_shift_px(&self.settings, self.burn_in_epoch.elapsed().as_secs() / 60);
+        if burn != self.burn_in_applied {
+            self.burn_in_applied = burn;
+            self.update_visuals();
+        }
+        let idle = self.settings.ambient_mode_enabled
+            && idle_millis().is_some_and(|ms| ms >= AMBIENT_IDLE_SECS * 1000);
+        self.set_ambient_dim(idle);
+    }
+
+    /// Smoothly dims the dock to `0.45` while ambient mode is idle, and restores it as
+    /// soon as input resumes (compositor-side animation, no extra UI frames).
+    fn set_ambient_dim(&mut self, dim: bool) {
+        let target = if dim { AMBIENT_DIM_OPACITY } else { 1.0 };
+        if (self.ambient_opacity - target).abs() < 0.001 {
+            return;
+        }
+        let duration = if !self.animations_effective() {
+            0.0
+        } else if dim {
+            1.2
+        } else {
+            0.25
+        };
+        self.dcomp
+            .animate_root_opacity(self.ambient_opacity, target, duration);
+        self.dcomp.commit();
+        self.ambient_opacity = target;
+    }
+
     fn rebuild_theme_surfaces(&mut self) {
         let dpi = self.dpi;
         let is_dark = self.is_dark;
@@ -2536,13 +3121,29 @@ impl DockState {
         let radius = if self.settings.dock_corner_radius.is_some() {
             self.settings.corner_radius_dips()
         } else {
-            materials
-                .radii
-                .get("DockRadius")
-                .map(|corner| corner.top_left as f32)
-                .filter(|value| (*value - 20.0).abs() > 0.5) // stock reference radius
+            // Theme pack / editor `DockRadius` wins over the size profile.
+            dcomp::custom_token_radius(&["DockRadius"])
+                .or_else(|| {
+                    materials
+                        .radii
+                        .get("DockRadius")
+                        .map(|corner| corner.top_left as f32)
+                        .filter(|value| (*value - 20.0).abs() > 0.5) // stock reference radius
+                })
+                .map(|value| value.clamp(0.0, 32.0))
                 .unwrap_or_else(|| self.settings.corner_radius_dips())
         };
+        self.pill_radius_dips = radius;
+        // OLED care can force `TrueBlack` (low battery / Night Light triggers).
+        let dock_background = self.effective_background();
+        // Running / active indicator dots follow `IndicatorBrush` and
+        // `IndicatorForegroundBrush` (or the accent) of an active theme pack.
+        let indicator_rgb = |keys: &[&str]| {
+            dcomp::custom_token_rgba(keys)
+                .map(|c| (c.r, c.g, c.b, (f32::from(c.a) / 255.0).max(0.55)))
+        };
+        let dot_run_theme = indicator_rgb(&["IndicatorBrush"]);
+        let dot_act_theme = indicator_rgb(&["IndicatorForegroundBrush", "AccentBrush"]);
         let glass_fill = design::glass::glass_surface_color_for(
             design::theme::SurfaceKind::Dock,
             is_dark,
@@ -2560,7 +3161,7 @@ impl DockState {
                 rgba(themed_rgb("WidgetCardHover", (0xff, 0xff, 0xff)), 0.10),
                 rgba(themed_rgb("WidgetCardPressed", (0xff, 0xff, 0xff)), 0.16),
                 rgba(themed_rgb("DockHighlight", (0xff, 0xff, 0xff)), 0.14),
-                (0xd4, 0xd4, 0xd8, 0.85),
+                (0xd4, 0xd4, 0xd8, 0.94),
                 (0xff, 0xff, 0xff, 1.0),
             )
         } else {
@@ -2573,14 +3174,21 @@ impl DockState {
                 (0x18, 0x18, 0x1b, 0.95),
             )
         };
+        let dot_run_rgb = dot_run_theme.unwrap_or(dot_run_rgb);
+        let dot_act_rgb = dot_act_theme.unwrap_or(dot_act_rgb);
 
-        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+        let mut glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
             &self.settings,
-            self.settings.dock_background,
+            dock_background,
             self.settings.dock_opacity,
             is_dark,
             false,
         );
+        if dock_background != SurfaceBackground::TrueBlack {
+            let (tint, rim) =
+                design::theme::theme_surface_tint("DockMaterial", "DockBorderMaterial");
+            glass_cfg = glass_cfg.with_theme_tint(tint, rim);
+        }
         if let Some(ref mut glass) = self.spatial_glass {
             glass.apply_config(glass_cfg);
         }
@@ -2591,14 +3199,12 @@ impl DockState {
         let has_custom_border = self.settings.dock_border_color.is_some()
             || (self.settings.dock_border_thickness - 1.0).abs() > 0.05;
 
-        let true_black = self.settings.dock_background == SurfaceBackground::TrueBlack;
+        let true_black = dock_background == SurfaceBackground::TrueBlack;
         // Use the same opacity→mode decision as the theme/material layer so the
         // generated materials and the DComp pill can never disagree.
-        let effective_background = design::theme::background_for_opacity(
-            self.settings.dock_background,
-            self.settings.dock_opacity,
-        );
-        let bg_alpha = match self.settings.dock_background {
+        let effective_background =
+            design::theme::background_for_opacity(dock_background, self.settings.dock_opacity);
+        let bg_alpha = match dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
             SurfaceBackground::Glass if glass_host_active => 0.0_f32,
@@ -2609,7 +3215,7 @@ impl DockState {
             },
             SurfaceBackground::TrueBlack => 1.0_f32,
         };
-        let bd_alpha = if self.settings.dock_background == SurfaceBackground::None
+        let bd_alpha = if dock_background == SurfaceBackground::None
             || true_black
             || (glass_host_active && !has_custom_border)
         {
@@ -2737,7 +3343,7 @@ impl DockState {
         ) {
             self.bin_empty_surf = empty;
             self.bin_full_surf = full;
-            self.bin_surf_px = 64.0;
+            self.bin_surf_px = icon_cache::RECYCLE_BIN_ICON_PX as f32;
         } else {
             if let Ok(s) = self.dcomp.create_shell_glyph_surface(
                 ShellGlyph::RecycleBinEmpty,
@@ -2778,6 +3384,15 @@ impl DockState {
         }
         for sv in &mut self.slot_visuals {
             sv.bound_dot_state = 255;
+        }
+        if let Some(surf) = icon_cache::extract_default_folder_icon()
+            .and_then(|raw| self.dcomp.create_app_icon_surface(&raw).ok())
+        {
+            self.folder_fallback_surf = Some(surf);
+        }
+        for sv in &mut self.stack_visuals {
+            sv.bound_source.clear();
+            sv.bound_has_icon = false;
         }
         self.rebuild_visual_tree();
     }
@@ -2835,6 +3450,15 @@ impl DockState {
             )
         };
         crate::platform::icon_pack::set_active_pack(theme_dir.as_deref());
+        // Live theme engine: theme pack, Windows accent layer, icon pack and editor
+        // token overrides are re-synced before any surface is rebuilt.
+        crate::design::theme::sync_from_settings(&self.settings);
+        // `ui_font_family` / `ui_font_size` / `InterfaceFont` apply immediately.
+        self.dcomp.clear_text_format_cache();
+        self.sample_oled_inputs();
+        if !self.settings.ambient_mode_enabled {
+            self.set_ambient_dim(false);
+        }
         register_global_hotkeys(self.hwnd as HWND, &self.settings);
         let registry_icons = tray_host::enumerate_tray_icons();
         let pinned_paths: Vec<String> = self
@@ -2892,7 +3516,27 @@ impl DockState {
                 desired_total_px,
             );
         }
+        // The strip may have changed completely: start from the leading edge and
+        // drop hover/tooltip state that points at cells which moved or vanished.
+        self.scroll_offset = 0.0;
+        self.scroll_target = 0.0;
+        self.hovered_widget = None;
+        self.hovered_widget_sub = None;
+        self.hovered_stack = None;
+        self.hovered_idx = None;
+        self.hovered_scroll = None;
+        self.tooltip_cache = None;
+        self.tooltip_node.hide();
         self.sync_slots(false);
+        // Bring widget and folder-stack visuals in line with the new settings
+        // *before* sizing the window. Sizing first measured the previous
+        // widget/stack set, and the later `sync_widget_visuals` rebuild never
+        // re-sized, so enabling widgets left the window (and the pill clamped
+        // to it) at the old width with a scrolling strip.
+        let widgets_rebuilt = self.sync_widget_visuals();
+        if !widgets_rebuilt && self.stack_visuals_stale() {
+            self.rebuild_visual_tree();
+        }
         self.sync_window_bounds();
         // Settings reload is a deliberate full rebuild, not a hot-path wake-up.
         let _ = self.refresh_widgets();
@@ -2902,12 +3546,17 @@ impl DockState {
 
     fn request_missing_icons(&mut self) {
         let mut missing = Vec::new();
-        let sources = self.slots.iter().map(|slot| &slot.icon_source).chain(
-            self.settings
-                .user_pinned_background_apps
-                .iter()
-                .take(self.tray_pin_visuals.len()),
-        );
+        let sources = self
+            .slots
+            .iter()
+            .map(|slot| &slot.icon_source)
+            .chain(
+                self.settings
+                    .user_pinned_background_apps
+                    .iter()
+                    .take(self.tray_pin_visuals.len()),
+            )
+            .chain(self.stack_visuals.iter().map(|sv| &sv.path));
         for source in sources {
             if !self.icon_surfaces.contains_key(source) {
                 if let Some(raw) = icon_cache::read_cached_raw(source)
@@ -3063,6 +3712,7 @@ impl DockState {
                     .iter()
                     .map(String::as_str),
             )
+            .chain(self.stack_visuals.iter().map(|sv| sv.path.as_str()))
             .chain(self.in_flight_icons.iter().map(String::as_str))
             .collect();
         self.icon_surfaces
@@ -3070,6 +3720,11 @@ impl DockState {
     }
 
     fn sync_window_bounds(&mut self) {
+        // Feed the live resting content width (dynamic widget widths, stacks) into
+        // the window sizing so the HWND always holds the whole resting strip.
+        let live = self.rest_content_width_at(Instant::now());
+        self.effective.live_rest_content_dips = Some(live);
+        self.hover_rest_sm = None;
         let rect = compute_window_rect_with(
             &self.settings,
             self.slots.len(),
@@ -3102,15 +3757,23 @@ impl DockState {
     }
 
     fn live_trail_section_width(&self) -> f32 {
-        let base_w = base_trail_width(&self.settings);
+        let stacks = self.stack_visuals.len();
+        let base_w = base_trail_width_for(&self.settings, stacks);
         if base_w > 0.0 {
-            let pins_w = if self.settings.show_tray_button {
-                self.tray_pin_visuals.len() as f32
-                    * tray_pin_cell(layout::size_profile(&self.settings).cell)
+            let pins = if self.settings.show_tray_button {
+                self.tray_pin_visuals.len()
+            } else {
+                0
+            };
+            let pins_w = pins as f32 * tray_pin_cell(layout::size_profile(&self.settings).cell);
+            // Pinned tray icons carry no trailing gap of their own; a folder stack
+            // to their left needs one.
+            let pins_gap = if pins > 0 && stacks > 0 {
+                widget_gap(&self.settings)
             } else {
                 0.0
             };
-            base_w + pins_w
+            base_w + pins_w + pins_gap
         } else {
             0.0
         }
@@ -3136,6 +3799,27 @@ impl DockState {
     }
 
     fn live_pill_geometry_at(&self, now: Instant) -> (f32, f32, f32, f32) {
+        self.pill_geometry_impl(now, false)
+    }
+
+    /// Pill geometry with every slot at rest (scale 1, no fixed-point shift).
+    fn rest_pill_geometry_at(&self, now: Instant) -> (f32, f32, f32, f32) {
+        self.pill_geometry_impl(now, true)
+    }
+
+    /// Resting content strip width including both viewport insets. This is the
+    /// exact width the pill needs so `compute_scroll_metrics` reports no
+    /// overflow at rest (P0-4: the old pill was 2 DIP short of its viewport).
+    fn rest_content_width_at(&self, now: Instant) -> f32 {
+        pill_width_for_content(content_strip_width(
+            shell_lead_width(&self.settings),
+            self.rest_apps_width_at(now),
+            self.live_widgets_section_width(),
+            0.0,
+        ))
+    }
+
+    fn pill_geometry_impl(&self, now: Instant, resting: bool) -> (f32, f32, f32, f32) {
         let mon_w = self.mon_w_dips();
         let (win_w, win_h) =
             compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
@@ -3146,15 +3830,19 @@ impl DockState {
             fixed_w.min(win_w).min(max_w)
         } else {
             // Match `scroll_metrics_for_pill_at` exactly through `content_strip_width`
-            // so a dock that fits on the monitor never triggers false scroll overflow chevrons.
-            let icons_w = self.live_apps_width_dips_at(now);
-            let live_content = content_strip_width(
+            // (+ both viewport insets) so a dock that fits on the monitor never
+            // triggers false scroll overflow chevrons.
+            let icons_w = if resting {
+                self.rest_apps_width_at(now)
+            } else {
+                self.live_apps_width_dips_at(now)
+            };
+            let live_content = pill_width_for_content(content_strip_width(
                 shell_lead_width(&self.settings),
                 icons_w,
                 self.live_widgets_section_width(),
                 0.0,
-            )
-            .max(160.0);
+            ));
             let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
             let target = self
                 .settings
@@ -3166,7 +3854,12 @@ impl DockState {
             .effective
             .height_dips
             .unwrap_or_else(|| pill_height_dips(&self.settings));
-        let pill_left = (win_w - pill_w) * 0.5;
+        let mut pill_left = (win_w - pill_w) * 0.5;
+        if !resting && self.fisheye_shift != 0.0 {
+            // macOS fixed-point anchoring: the whole strip moves so the point under
+            // the cursor stays put, while the pill stays inside the window.
+            pill_left = (pill_left + self.fisheye_shift).clamp(0.0, (win_w - pill_w).max(0.0));
+        }
         let pill_top = win_h - self.effective.bottom_inset_dips() - pill_h;
         (pill_left, pill_top, pill_w, pill_h)
     }
@@ -3179,8 +3872,13 @@ impl DockState {
         if self.slots.is_empty() {
             return 0.0;
         }
-        let gap = slot_gap(&self.settings);
         let widths = self.slot_widths(now);
+        self.apps_width_from(&widths, now)
+    }
+
+    /// Strip width for per-slot widths, honouring closing slots' layout fraction.
+    fn apps_width_from(&self, widths: &[f32], now: Instant) -> f32 {
+        let gap = slot_gap(&self.settings);
         let mut w = 0.0;
         let mut largest_fraction = 0.0_f32;
         for (slot, width) in self.slots.iter().zip(widths) {
@@ -3191,43 +3889,74 @@ impl DockState {
         (w - gap * largest_fraction).max(0.0)
     }
 
-    /// Conservative un-magnified width used to size the expansion budget. Kept
-    /// separate from `live_apps_width_dips_at` so it can never recurse.
-    fn raw_apps_width(&self, now: Instant) -> f32 {
+    /// Un-magnified strip width (every slot at `base`). Never depends on the
+    /// expansion budget, so the budget can be derived from it without recursion.
+    fn rest_apps_width_at(&self, now: Instant) -> f32 {
         if self.slots.is_empty() {
             return 0.0;
         }
         let base = layout::size_profile(&self.settings).cell;
-        let gap = slot_gap(&self.settings);
-        let mut w = 0.0;
-        let mut largest_fraction = 0.0_f32;
-        for slot in &self.slots {
-            let fraction = slot.layout_fraction(now);
-            w += (base * slot.scale + gap) * fraction;
-            largest_fraction = largest_fraction.max(fraction);
+        let widths = vec![base; self.slots.len()];
+        self.apps_width_from(&widths, now)
+    }
+
+    /// Horizontal growth available to a hover arch (P0-1/P0-2).
+    ///
+    /// Fixed-width docks magnify in place (`0`). Expanding docks may grow up to
+    /// the largest pill the window/monitor can hold, measured against the
+    /// *resting* content, so a hover never overflows into scrolling and never
+    /// clips the trailing Tray / Recycle Bin.
+    fn fisheye_growth_available(&self, now: Instant) -> f32 {
+        let fisheye = fisheye_enabled(&self.settings);
+        let expands = magnification_expands_dock(&self.settings);
+        if !fisheye || !expands || self.slots.is_empty() {
+            return 0.0;
         }
-        (w - gap * largest_fraction).max(0.0)
+        let mon_w = self.mon_w_dips();
+        let (win_w, _) =
+            compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
+        let max_w = (mon_w - 16.0).max(200.0);
+        let rest_content = self.rest_content_width_at(now);
+        let content_driven = !self.settings.full_width
+            && self.effective.width_dips.is_none()
+            && self.settings.dock_custom_width_dips.is_none();
+        let max_extent = if content_driven {
+            // The window keeps 12 DIP on each side for the pill's soft shadow.
+            (win_w - 24.0).max(rest_content).min(max_w).min(win_w)
+        } else {
+            // A fixed pill never grows: only its internal slack can absorb the arch.
+            self.rest_pill_geometry_at(now).2
+        };
+        layout::fisheye_growth_budget(expands, fisheye, max_extent, rest_content)
+    }
+
+    /// The hover session's expansion budget, computed once per frame.
+    fn fisheye_budget_at(&self, now: Instant) -> layout::ExpansionBudget {
+        let profile = layout::size_profile(&self.settings);
+        let cell = profile.cell + slot_gap(&self.settings);
+        capture_expansion_budget(
+            cell,
+            profile.icon,
+            profile_max_scale(&self.settings),
+            self.fisheye_growth_available(now),
+            0.0,
+            0.0,
+            self.session_max_scale,
+        )
     }
 
     /// `DockFisheyeLayout.ComputeSlotExtras`: each slot grows by at most 95% of
-    /// its growth delta and the whole arch is clamped to the free pill budget.
+    /// its growth delta and the whole arch is clamped to the free budget. A
+    /// fixed-width dock has a zero budget, so its slots never widen (P0-2).
     fn slot_widths(&self, now: Instant) -> Vec<f32> {
-        let profile = layout::size_profile(&self.settings);
-        let base = profile.cell;
-        let cell = base + slot_gap(&self.settings);
-        let configured = profile_max_scale(&self.settings);
-        let budget = capture_expansion_budget(
-            cell,
-            profile.icon,
-            configured,
-            self.mon_w_dips(),
-            self.raw_apps_width(now),
-            0.0,
-            self.session_max_scale,
-        );
+        let base = layout::size_profile(&self.settings).cell;
+        let available = self.fisheye_growth_available(now);
+        let bases = vec![base; self.slots.len()];
+        if available <= 0.0 {
+            return bases;
+        }
         let scales: Vec<f32> = self.slots.iter().map(|slot| slot.scale).collect();
-        let bases = vec![base; scales.len()];
-        let extras = compute_slot_extras(&scales, &bases, budget.available_dips);
+        let extras = compute_slot_extras(&scales, &bases, available);
         bases
             .into_iter()
             .zip(extras)
@@ -3255,10 +3984,23 @@ impl DockState {
         pill_w: f32,
         now: Instant,
     ) -> ScrollMetrics {
+        self.scroll_metrics_impl(pill_left, pill_w, now, false)
+    }
+
+    fn scroll_metrics_impl(
+        &self,
+        pill_left: f32,
+        pill_w: f32,
+        now: Instant,
+        resting: bool,
+    ) -> ScrollMetrics {
         // Flush with the outer rounded edges of the dock pill (matching `MainWindow.xaml`).
-        let vp_left = pill_left + 1.0;
-        let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
-        let apps_w = self.live_apps_width_dips_at(now);
+        let (vp_left, vp_right) = pill_viewport(pill_left, pill_w);
+        let apps_w = if resting {
+            self.rest_apps_width_at(now)
+        } else {
+            self.live_apps_width_dips_at(now)
+        };
         let mut widgets_w = self.live_widgets_strip_width(apps_w > 0.0);
         let mut trail_w = self.live_trail_section_width();
         let group = layout::start_strip_group(&self.settings);
@@ -3286,6 +4028,31 @@ impl DockState {
     fn live_scroll_metrics(&self) -> ScrollMetrics {
         let (pill_left, _, pill_w, _) = self.live_pill_geometry();
         self.scroll_metrics_for_pill(pill_left, pill_w)
+    }
+
+    /// Unmagnified layout (P0-3/P1-5): fisheye targets, hover index, keyboard
+    /// focus and Start/preview anchors all read slot centers from here. The
+    /// value frozen at the start of a hover session is reused while it still
+    /// matches the current scroll offset, so rest centers cannot drift mid-hover.
+    fn rest_scroll_metrics(&self) -> ScrollMetrics {
+        if let Some(sm) = self.hover_rest_sm
+            && (sm.offset - self.scroll_offset.clamp(0.0, sm.max_scroll)).abs() < 0.01
+        {
+            return sm;
+        }
+        self.compute_rest_scroll_metrics(Instant::now())
+    }
+
+    fn compute_rest_scroll_metrics(&self, now: Instant) -> ScrollMetrics {
+        let (pill_left, _, pill_w, _) = self.rest_pill_geometry_at(now);
+        self.scroll_metrics_impl(pill_left, pill_w, now, true)
+    }
+
+    /// Freezes the resting layout for the hover session that is starting.
+    fn begin_hover_session(&mut self) {
+        if self.hover_rest_sm.is_none() {
+            self.hover_rest_sm = Some(self.compute_rest_scroll_metrics(Instant::now()));
+        }
     }
 
     /// Slot centers in one O(N) pass. `resting` matches `resting_slot_center_x` (unscaled
@@ -3396,6 +4163,12 @@ impl DockState {
     /// places Start immediately before the trailing tray/bin group; `InWidgets`
     /// inserts it at `StartWidgetIndex` inside the widget strip.
     fn shell_center_x_in(&self, kind: ShellButton, sm: &ScrollMetrics) -> f32 {
+        self.shell_center_x_with(kind, sm, self.live_apps_width_dips())
+    }
+
+    /// Same as `shell_center_x_in` for an explicit apps width (resting layouts
+    /// pass the unmagnified width so `InWidgets` Start matches its rest slot).
+    fn shell_center_x_with(&self, kind: ShellButton, sm: &ScrollMetrics, apps_w: f32) -> f32 {
         let base = layout::size_profile(&self.settings).cell;
         if !is_shell_button_visible(&self.settings, kind) {
             return sm.shell_start_x + base * 0.5;
@@ -3407,7 +4180,6 @@ impl DockState {
                     sm.right_anchor_x - self.live_trail_section_width() - base * 0.5 - 2.0
                 }
                 layout::StartStripGroup::InWidgets => {
-                    let apps_w = self.live_apps_width_dips();
                     let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
                     let index = layout::resolved_start_widget_index(
                         &self.settings,
@@ -3486,18 +4258,83 @@ impl DockState {
         (tray, bin, widget_rects)
     }
 
-    /// DIP rect of a shell button, resolved with the same layout as hit testing
-    /// and drawing. `None` means the button is hidden in the current settings.
+    /// Folder-stack cells, left to right in `stack_visuals` order (`0..len`).
+    /// Trailing layout: `| [Folder...] [PinnedTray...] [Tray] [Bin]`.
+    fn stack_rects_dips(&self) -> Vec<DipRect> {
+        let count = self.stack_visuals.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let (_, pill_top, _, pill_h) = self.live_pill_geometry();
+        let sm = self.live_scroll_metrics();
+        self.stack_rects_in(&sm, pill_top, pill_h)
+    }
+
+    fn stack_rects_in(&self, sm: &ScrollMetrics, pill_top: f32, pill_h: f32) -> Vec<DipRect> {
+        let count = self.stack_visuals.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let base = layout::size_profile(&self.settings).cell;
+        let gap = widget_gap(&self.settings);
+        let mut right_cursor = sm.right_anchor_x;
+        if self.settings.show_recycle_bin {
+            right_cursor -= base + gap;
+        }
+        if self.settings.show_tray_button {
+            right_cursor -= base + gap;
+            let pins = self.tray_pin_visuals.len();
+            if pins > 0 {
+                right_cursor -= tray_pin_cell(base) * pins as f32 + gap;
+            }
+        }
+        let mut rects = vec![(0.0, 0.0, 0.0, 0.0); count];
+        for index in (0..count).rev() {
+            rects[index] = (
+                right_cursor - base,
+                pill_top + 6.0,
+                right_cursor,
+                pill_top + pill_h - 6.0,
+            );
+            right_cursor -= base + gap;
+        }
+        rects
+    }
+
+    fn hit_stack(&self, mx: f32, my: f32) -> Option<usize> {
+        if self.stack_visuals.is_empty() {
+            return None;
+        }
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        if my < pill_top || my > pill_top + pill_h {
+            return None;
+        }
+        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
+        if mx < sm.vp_left || mx > sm.vp_right {
+            return None;
+        }
+        self.stack_rects_in(&sm, pill_top, pill_h)
+            .iter()
+            .position(|&(l, _, r, _)| mx >= l && mx <= r)
+    }
+
+    /// DIP rect of a shell button, resolved from the *resting* layout so the
+    /// Start/Search anchors (and their flyouts) never follow a magnified,
+    /// shifted strip (P1-7). `None` means the button is hidden.
     fn shell_button_anchor_dips(&self, kind: ShellButton) -> Option<DipRect> {
         if !is_shell_button_visible(&self.settings, kind) {
             return None;
         }
         let base = layout::size_profile(&self.settings).cell;
-        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
-        let center_x = self.live_shell_center_x(kind).clamp(
-            pill_left + 1.0,
-            (pill_left + pill_w - 1.0).max(pill_left + 1.0),
-        );
+        let now = Instant::now();
+        let (pill_left, pill_top, pill_w, pill_h) = self.rest_pill_geometry_at(now);
+        let rest_sm = self.rest_scroll_metrics();
+        let center_x = self
+            .shell_center_x_with(kind, &rest_sm, self.rest_apps_width_at(now))
+            .clamp(
+                pill_left + 1.0,
+                (pill_left + pill_w - 1.0).max(pill_left + 1.0),
+            );
         Some(centered_shell_rect(
             center_x,
             base,
@@ -3545,17 +4382,114 @@ impl DockState {
         }
     }
 
-    fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
-        let (_, pill_top, _, _) = self.live_pill_geometry();
-        let sm = self.live_scroll_metrics();
-        let mut win_rc: RECT = unsafe { std::mem::zeroed() };
-        unsafe {
-            GetWindowRect(self.hwnd as HWND, &mut win_rc);
+    /// Visible dock pill in physical screen pixels: excludes the transparent
+    /// magnification/tooltip headroom and follows the auto-hide slide, so menus
+    /// and flyouts attach to what the user actually sees.
+    fn visible_pill_screen_rect(&self) -> Option<windows::Win32::Foundation::RECT> {
+        use opentaskbar_core::settings::DockEdge;
+        let mut bounds = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd as HWND, &mut bounds) } == 0
+            || bounds.right <= bounds.left
+            || bounds.bottom <= bounds.top
+        {
+            return None;
         }
-        let cx_dips = ((rect.0 + rect.2) * 0.5).clamp(sm.vp_left, sm.vp_right);
-        let anchor_x = win_rc.left + (cx_dips * self.dpi).round() as i32;
-        let anchor_y = win_rc.top + ((pill_top - 8.0) * self.dpi).round() as i32;
-        (anchor_x, anchor_y)
+        let px = |v: f32| (v * self.dpi).round() as i32;
+        let (x, y, w, h) = self.live_pill_geometry();
+        let edge = effective_edge(&self.settings);
+        let slide = px(self.hide_progress * hide_offset(edge, h + VERTICAL_EDGE_GAP + 10.0));
+        let headroom = if magnification_expands_dock(&self.settings) {
+            0
+        } else {
+            px(layout::HEADROOM_DIPS)
+        };
+        let (left, top, right, bottom) = match edge {
+            DockEdge::Left => (
+                bounds.left + slide.min(0),
+                bounds.top,
+                (bounds.right - headroom + slide).max(bounds.left + 1),
+                bounds.bottom,
+            ),
+            DockEdge::Right => (
+                (bounds.left + headroom + slide).min(bounds.right - 1),
+                bounds.top,
+                bounds.right + slide.max(0),
+                bounds.bottom,
+            ),
+            DockEdge::Bottom => (
+                bounds.left + px(x),
+                (bounds.top + px(y) + slide).min(bounds.bottom - 1),
+                bounds.left + px(x + w),
+                (bounds.top + px(y + h) + slide).min(bounds.bottom),
+            ),
+        };
+        Some(windows::Win32::Foundation::RECT {
+            left,
+            top,
+            right: right.max(left + 1),
+            bottom: bottom.max(top + 1),
+        })
+    }
+
+    /// Popup-menu anchor for every dock context menu: the visible pill plus the
+    /// dock edge, so menus open beside the dock instead of at the raw cursor.
+    fn dock_menu_anchor(&self) -> Option<menu::MenuAnchor> {
+        use opentaskbar_core::settings::DockEdge;
+        let edge = match effective_edge(&self.settings) {
+            DockEdge::Bottom => menu::MenuEdge::Bottom,
+            DockEdge::Left => menu::MenuEdge::Left,
+            DockEdge::Right => menu::MenuEdge::Right,
+        };
+        Some(menu::MenuAnchor {
+            visible_rect: self.visible_pill_screen_rect()?,
+            edge: Some(edge),
+        })
+    }
+
+    /// Which way dock flyouts open (away from the dock's screen edge).
+    fn dock_flyout_edge(&self) -> FlyoutEdge {
+        use opentaskbar_core::settings::DockEdge;
+        match effective_edge(&self.settings) {
+            DockEdge::Bottom => FlyoutEdge::Bottom,
+            DockEdge::Left => FlyoutEdge::Left,
+            DockEdge::Right => FlyoutEdge::Right,
+        }
+    }
+
+    /// Screen anchor for a flyout opened from the dock item `rect` (DIPs).
+    /// Bottom docks anchor above the visible pill, centered on the item; side
+    /// docks anchor beside the pill.
+    fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
+        let gap = (8.0 * self.dpi).round() as i32;
+        let Some(pill) = self.visible_pill_screen_rect() else {
+            let (_, pill_top, _, _) = self.live_pill_geometry();
+            let sm = self.live_scroll_metrics();
+            let (win_x, win_y, _, _) = self.dock_screen_rect();
+            let cx_dips = ((rect.0 + rect.2) * 0.5).clamp(sm.vp_left, sm.vp_right);
+            return (
+                win_x + (cx_dips * self.dpi).round() as i32,
+                win_y + ((pill_top - 8.0) * self.dpi).round() as i32,
+            );
+        };
+        match self.dock_flyout_edge() {
+            FlyoutEdge::Left => (pill.right + gap, (pill.top + pill.bottom) / 2),
+            FlyoutEdge::Right => (pill.left - gap, (pill.top + pill.bottom) / 2),
+            FlyoutEdge::Bottom | FlyoutEdge::Top => {
+                let sm = self.live_scroll_metrics();
+                let (pill_left, _, _, _) = self.live_pill_geometry();
+                let center = ((rect.0 + rect.2) * 0.5).clamp(sm.vp_left, sm.vp_right);
+                (
+                    pill.left + ((center - pill_left) * self.dpi).round() as i32,
+                    pill.top - gap,
+                )
+            }
+        }
+    }
+
+    /// Flyout anchor at the middle of the visible pill (group flyouts).
+    fn flyout_anchor_center_px(&self) -> (i32, i32) {
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        self.flyout_anchor_px((pill_left, pill_top, pill_left + pill_w, pill_top + pill_h))
     }
 
     fn hit_rect(rc: Option<(f32, f32, f32, f32)>, mx: f32, my: f32) -> bool {
@@ -3619,6 +4553,18 @@ impl DockState {
         if mx < sm.vp_left || mx > sm.vp_right {
             return false;
         }
+        // Fitts's law: the strip between the pill and the screen edge (bottom
+        // inset) still belongs to the app icons above it, so slamming the
+        // pointer to the edge keeps the app under it hoverable and clickable.
+        let apps_w = self.live_apps_width_dips();
+        if !layout::is_vertical(effective_edge(&self.settings))
+            && apps_w > 0.0
+            && my > pill_top + pill_h
+            && mx >= sm.apps_start_x
+            && mx <= sm.apps_start_x + apps_w
+        {
+            return true;
+        }
         let icon_size = layout::size_profile(&self.settings).icon;
         let (_, icon_base_bottom, _) = app_icon_vertical_metrics(pill_top, pill_h, icon_size);
         let centers = self.slot_centers(&sm, false);
@@ -3658,21 +4604,22 @@ impl DockState {
     }
 
     fn update_hovered_index_from_mouse(&mut self) {
-        let Some(mx) = self.hover_mouse_x else {
-            self.hovered_idx = None;
-            return;
-        };
-        let sm = self.live_scroll_metrics();
+        self.hovered_idx = self.hover_mouse_x.and_then(|mx| self.slot_index_at(mx));
+    }
+
+    /// App slot whose *resting* cell contains `mx`. Rest space equals pointer
+    /// space under fixed-point anchoring (`f(p) == p`), so this is the icon that
+    /// is visually under the cursor in both fisheye modes.
+    fn slot_index_at(&self, mx: f32) -> Option<usize> {
+        let sm = self.rest_scroll_metrics();
         if mx < sm.vp_left || mx > sm.vp_right {
-            self.hovered_idx = None;
-            return;
+            return None;
         }
         let base = layout::size_profile(&self.settings).cell;
         let gap = slot_gap(&self.settings);
         let max_dist = (base + gap) * 0.55;
         let centers = self.slot_centers(&sm, true);
-        self.hovered_idx = self
-            .slots
+        self.slots
             .iter()
             .enumerate()
             .filter(|(_, slot)| !slot.is_exiting())
@@ -3683,30 +4630,29 @@ impl DockState {
             .filter(|(_, cx, _)| *cx >= sm.vp_left - base * 0.4 && *cx <= sm.vp_right + base * 0.4)
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .filter(|(_, _, d)| *d <= max_dist)
-            .map(|(i, _, _)| i);
+            .map(|(i, _, _)| i)
     }
 
-    fn target_scale_for(&self, center_x: f32) -> f32 {
+    /// Resting (unmagnified, unshifted) center of slot `idx` (P1-4 keyboard
+    /// focus, P2 preview anchor).
+    fn rest_slot_center_x(&self, idx: usize) -> f32 {
+        let sm = self.rest_scroll_metrics();
+        self.slot_centers(&sm, true)
+            .get(idx)
+            .copied()
+            .unwrap_or(sm.apps_start_x)
+    }
+
+    /// Raised-cosine target for a resting center. `budget` is computed once per
+    /// frame (not per slot). Fixed-width docks have no budget, so the peak is the
+    /// no-overlap scale (`compute_no_overlap_max_scale`).
+    fn target_scale_with(&self, center_x: f32, budget: &layout::ExpansionBudget) -> f32 {
         if self.drag.is_some_and(|d| d.active) {
             return 1.0;
         }
         if !fisheye_enabled(&self.settings) || self.hover_mouse_x.is_none() {
             return 1.0;
         }
-        let profile = layout::size_profile(&self.settings);
-        let cell = profile.cell + slot_gap(&self.settings);
-        // `HoverScale = 1.5` is the ceiling; the expansion budget trims it to the
-        // available pill space so neighbouring icons never overlap.
-        let configured_max = profile_max_scale(&self.settings);
-        let budget = capture_expansion_budget(
-            cell,
-            profile.icon,
-            configured_max,
-            self.mon_w_dips(),
-            self.raw_apps_width(Instant::now()),
-            self.live_scroll_metrics().max_scroll,
-            self.session_max_scale,
-        );
         fisheye_target_scale(
             &self.settings,
             self.hover_mouse_x,
@@ -3714,6 +4660,39 @@ impl DockState {
             budget.effective_max_scale,
             budget.fraction,
         )
+    }
+
+    /// Updates the macOS fixed-point shift so the resting point under the cursor
+    /// maps onto itself (`f(p) == p`) and growth splits to both sides.
+    fn update_fisheye_shift(&mut self, rest_sm: &ScrollMetrics) {
+        let expands = magnification_expands_dock(&self.settings);
+        let anchor = self.hover_mouse_x.or(self.fisheye_anchor_x);
+        let Some(pointer) = anchor.filter(|_| expands && fisheye_enabled(&self.settings)) else {
+            self.fisheye_shift = 0.0;
+            return;
+        };
+        let rest_centers = self.slot_centers(rest_sm, true);
+        let mon_w = self.mon_w_dips();
+        let (win_w, _) =
+            compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
+        let (pill_left, _, pill_w, _) = self.live_pill_geometry();
+        let live_sm = self.scroll_metrics_for_pill(pill_left, pill_w);
+        // The shift actually applied this frame (after the in-window clamp).
+        let unshifted_left = (win_w - pill_w) * 0.5;
+        let applied = pill_left - unshifted_left;
+        let live_centers: Vec<f32> = self
+            .slot_centers(&live_sm, false)
+            .into_iter()
+            .map(|center| center - applied)
+            .collect();
+        let target = layout::fisheye_fixed_point_shift(&rest_centers, &live_centers, pointer);
+        // Keep the shifted pill inside the window (the reserve covers one full arch).
+        let min_shift = -unshifted_left;
+        let max_shift = (win_w - pill_w - unshifted_left).max(min_shift);
+        self.fisheye_shift = target.clamp(min_shift, max_shift);
+        if self.fisheye_shift.abs() < 0.05 {
+            self.fisheye_shift = 0.0;
+        }
     }
 
     fn step_animations(&mut self, now: Instant) -> bool {
@@ -3739,6 +4718,12 @@ impl DockState {
             }
             self.shell_scales = [1.0; 3];
             self.shell_velocities = [0.0; 3];
+            for sv in &mut self.stack_visuals {
+                sv.scale = 1.0;
+                sv.scale_velocity = 0.0;
+            }
+            self.fisheye_shift = 0.0;
+            self.fisheye_anchor_x = None;
             self.hide_progress = if self.target_hidden { 1.0 } else { 0.0 };
             self.scroll_offset = self
                 .scroll_target
@@ -3794,11 +4779,19 @@ impl DockState {
             self.hide_progress = hide_target;
         }
 
-        let resting_centers = self.slot_centers(&scroll_metrics, true);
+        // Fisheye targets come from the *resting* layout (frozen per hover
+        // session) and the budget is computed once per frame: O(N), and the
+        // arch cannot feed back into its own targets.
+        let rest_sm = self.rest_scroll_metrics();
+        let budget = self.fisheye_budget_at(now);
+        let resting_centers = self.slot_centers(&rest_sm, true);
         let scale_targets: Vec<f32> = resting_centers
             .iter()
-            .map(|&center| self.target_scale_for(center))
+            .map(|&center| self.target_scale_with(center, &budget))
             .collect();
+        // Crisp critically damped tracking while hovering, softer decay on exit.
+        let (stiffness, damping) = layout::fisheye_spring_params(self.hover_mouse_x.is_some());
+        let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
         for (idx, slot) in self.slots.iter_mut().enumerate() {
             if slot.close_started.is_some() {
                 if slot.is_exiting() || close_progress(slot.close_started, now) < 1.0 {
@@ -3811,9 +4804,15 @@ impl DockState {
                 continue;
             }
             let target = scale_targets[idx];
-            let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
-            let (scale, velocity, settled) =
-                step_spring(slot.scale, target, slot.scale_velocity, dt, max_scale);
+            let (scale, velocity, settled) = layout::step_spring_with(
+                slot.scale,
+                target,
+                slot.scale_velocity,
+                dt,
+                max_scale,
+                stiffness,
+                damping,
+            );
             slot.scale = scale;
             slot.scale_velocity = velocity;
             if !settled {
@@ -3838,13 +4837,18 @@ impl DockState {
         }
 
         // Shell buttons get the very same raised-cosine target + spring as app
-        // slots. Their centers come from the shared shell layout, so hovering
-        // Start magnifies Start (and its neighbours) instead of doing nothing.
+        // slots, evaluated on the resting layout. A Start button outside the lead
+        // group (`AfterApps` / `InWidgets`) sits in a non-magnified zone (P1-6).
+        let rest_apps_w = self.rest_apps_width_at(now);
         let shell_targets = ShellButton::ALL.map(|kind| {
-            let center = self.live_shell_center_x(kind);
-            self.target_scale_for(center)
+            if kind == ShellButton::Start
+                && layout::start_strip_group(&self.settings) != layout::StartStripGroup::Head
+            {
+                return 1.0;
+            }
+            let center = self.shell_center_x_with(kind, &rest_sm, rest_apps_w);
+            self.target_scale_with(center, &budget)
         });
-        let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
         moving |= step_shell_spring(
             &mut self.shell_scales,
             &mut self.shell_velocities,
@@ -3852,6 +4856,53 @@ impl DockState {
             dt,
             max_scale,
         );
+
+        // Folder stacks magnify in place (fixed cells, no-overlap peak).
+        if !self.stack_visuals.is_empty() {
+            let profile = layout::size_profile(&self.settings);
+            let stack_peak = layout::compute_no_overlap_max_scale(
+                profile.cell + widget_gap(&self.settings),
+                profile.icon,
+                profile_max_scale(&self.settings),
+            );
+            let centers: Vec<f32> = self
+                .stack_rects_dips()
+                .iter()
+                .map(|&(l, _, r, _)| (l + r) * 0.5)
+                .collect();
+            let hover_x = if self.drag.is_some_and(|d| d.active) {
+                None
+            } else {
+                self.stack_hover_x
+            };
+            let (stack_k, stack_c) = layout::fisheye_spring_params(hover_x.is_some());
+            for (sv, center) in self.stack_visuals.iter_mut().zip(centers) {
+                let target = fisheye_target_scale(&self.settings, hover_x, center, stack_peak, 0.0);
+                let (scale, velocity, settled) = layout::step_spring_with(
+                    sv.scale,
+                    target,
+                    sv.scale_velocity,
+                    dt,
+                    stack_peak.max(1.0),
+                    stack_k,
+                    stack_c,
+                );
+                sv.scale = scale;
+                sv.scale_velocity = velocity;
+                moving |= !settled;
+            }
+        }
+
+        // macOS fixed-point anchoring for expanding docks: the strip shifts so the
+        // hovered point stays under the cursor and growth splits left and right.
+        self.update_fisheye_shift(&rest_sm);
+        let arch_active = self.slots.iter().any(|s| (s.scale - 1.0).abs() > 0.004);
+        if self.hover_mouse_x.is_none() && !arch_active {
+            // The arch has fully decayed: end the hover session.
+            self.fisheye_anchor_x = None;
+            self.fisheye_shift = 0.0;
+            self.hover_rest_sm = None;
+        }
 
         if !moving {
             self.last_frame = None;
@@ -4008,7 +5059,10 @@ impl DockState {
         if let Some(existing) = self.fallback_surfaces.get(&ch) {
             return Some(existing.clone());
         }
-        let created = self.dcomp.create_fallback_tile_surface(&ch, 64).ok()?;
+        let created = self
+            .dcomp
+            .create_fallback_tile_surface(&ch, icon_cache::ICON_PX)
+            .ok()?;
         self.fallback_surfaces.insert(ch, created.clone());
         Some(created)
     }
@@ -4056,7 +5110,7 @@ impl DockState {
                 visual.bg.hide();
             }
             let dim = base * if pressed { 0.56 } else { 0.64 };
-            let scale = dim * dpi / 64.0;
+            let scale = dim * dpi / icon_cache::ICON_PX as f32;
             visual.icon.set_transform(
                 scale,
                 scale,
@@ -4064,6 +5118,83 @@ impl DockState {
                 (icon_top + (base - dim) * 0.5) * dpi,
             );
         }
+    }
+
+    /// Draws every folder stack: hover/press backdrop inside the pill and the
+    /// native folder icon scaled from the bottom baseline (`ICON_PX` surfaces).
+    fn update_stack_visuals(
+        &mut self,
+        rects: &[DipRect],
+        shell_top: f32,
+        icon_base_bottom: f32,
+        icon_size: f32,
+    ) {
+        let dpi = self.dpi;
+        let icon_px = icon_cache::ICON_PX as f32;
+        for index in 0..self.stack_visuals.len().min(rects.len()) {
+            let path = self.stack_visuals[index].path.clone();
+            let has_icon = self.icon_surfaces.get(&path).is_some_and(Option::is_some);
+            if self.stack_visuals[index].bound_source != path
+                || self.stack_visuals[index].bound_has_icon != has_icon
+            {
+                let label = self.stack_visuals[index].label.clone();
+                let surface = self
+                    .icon_surfaces
+                    .get(&path)
+                    .and_then(Clone::clone)
+                    .or_else(|| self.folder_fallback_surf.clone())
+                    .or_else(|| self.fallback_surface_for(&label));
+                let visual = &mut self.stack_visuals[index];
+                visual.icon.set_content(surface.as_ref());
+                visual.bound_source = path;
+                visual.bound_has_icon = has_icon;
+            }
+            let (left, _, right, _) = rects[index];
+            let pressed = self.pressed_stack == Some(index);
+            let hovered = self.hovered_stack == Some(index);
+            let visual = &self.stack_visuals[index];
+            let box_x_px = (left * dpi).round();
+            let box_y_px = (shell_top * dpi).round();
+            if pressed {
+                visual.bg.set_content(Some(&self.shell_bg_press));
+                visual.bg.set_transform(1.0, 1.0, box_x_px, box_y_px);
+            } else if hovered {
+                visual.bg.set_content(Some(&self.shell_bg_hover));
+                visual.bg.set_transform(1.0, 1.0, box_x_px, box_y_px);
+            } else {
+                visual.bg.hide();
+            }
+            let press = if pressed { 0.88 } else { 1.0 };
+            let dim = icon_size * visual.scale.max(1.0) * press;
+            let center = (left + right) * 0.5;
+            visual.icon.set_transform(
+                dim * dpi / icon_px,
+                dim * dpi / icon_px,
+                (center - dim * 0.5) * dpi,
+                (icon_base_bottom - dim) * dpi,
+            );
+        }
+        for visual in self.stack_visuals.iter().skip(rects.len()) {
+            visual.bg.hide();
+            visual.icon.hide();
+        }
+    }
+
+    /// `"{label} ({count})"` tooltip for a folder stack; the item count is re-read
+    /// at most every `STACK_COUNT_TTL` (hidden/system/temp entries excluded).
+    fn stack_tooltip_text(&mut self, index: usize) -> Option<String> {
+        let now = Instant::now();
+        let visual = self.stack_visuals.get(index)?;
+        let count = if layout::stack_count_fresh(visual.cached_count, now) {
+            visual.cached_count.map(|(_, count)| count)
+        } else {
+            let fresh = stack_item_count(&visual.path);
+            let visual = self.stack_visuals.get_mut(index)?;
+            visual.cached_count = fresh.map(|count| (now, count));
+            fresh
+        };
+        let label = self.stack_visuals.get(index)?.label.clone();
+        Some(layout::stack_tooltip(&label, count))
     }
 
     fn update_visuals(&mut self) {
@@ -4092,6 +5223,12 @@ impl DockState {
         } else {
             (0.0, hide_shift_px)
         };
+        // OLED burn-in care: a deterministic 1-2 px cyclic nudge of the whole dock
+        // content (zero when disabled; O(1), no extra frames).
+        let (burn_dx, burn_dy) =
+            burn_in_shift_px(&self.settings, self.burn_in_epoch.elapsed().as_secs() / 60);
+        let hide_x_px = hide_x_px + (burn_dx as f32 * dpi).round();
+        let hide_y_px = hide_y_px + (burn_dy as f32 * dpi).round();
         self.dcomp.set_root_offset_x(hide_x_px);
         self.dcomp.set_root_offset_y(hide_y_px);
 
@@ -4108,7 +5245,7 @@ impl DockState {
                 pill_top_px,
                 pill_w_px,
                 pill_h_px,
-                self.settings.corner_radius_dips() * dpi,
+                self.pill_radius_dips * dpi,
                 dpi,
                 hide_x_px,
                 hide_y_px,
@@ -4157,8 +5294,12 @@ impl DockState {
 
             let scale = self.shell_scales[i] * if pressed { 0.88 } else { 1.0 };
             let drawn_px = glyph_surf_px * scale;
-            let gx_px = (box_x_px + (box_sz_px - drawn_px) * 0.5).round();
-            let gy_px = (box_y_px + (box_sz_px - drawn_px) * 0.5).round();
+            // Scale from the bottom baseline like app icons (P1-3). No per-frame
+            // `.round()` on the animated offsets: rounding a moving scale made the
+            // glyph jitter by a pixel; linear interpolation keeps it smooth.
+            let rest_bottom_px = box_y_px + (box_sz_px + glyph_surf_px) * 0.5;
+            let gx_px = box_x_px + (box_sz_px - drawn_px) * 0.5;
+            let gy_px = rest_bottom_px - drawn_px;
             self.shell_icons[i].set_transform(scale, scale, gx_px, gy_px);
         }
 
@@ -4182,11 +5323,18 @@ impl DockState {
         self.scroll_target = self.scroll_target.clamp(0.0, sm.max_scroll);
         let clip_inset_px = (1.0 * dpi).max(1.0);
         let pill_h_px = (pill_h * dpi).round();
-        let clip_left_px = pill_left_px + clip_inset_px;
+        // While a `<` / `>` chevron is shown, its edge band is excluded from the
+        // content clip so scrolled widget text ("13°C", "C: %43") can never
+        // render underneath the translucent chevron scrim.
+        let (chevron_left_dips, chevron_right_dips) =
+            scroll_chevron_insets(sm.can_scroll_left, sm.can_scroll_right);
+        let clip_left_px = pill_left_px + clip_inset_px + (chevron_left_dips * dpi).round();
         let clip_top_px = pill_top_px + clip_inset_px;
-        let clip_right_px = (pill_left_px + pill_w_px - clip_inset_px).max(clip_left_px);
+        let clip_right_px =
+            (pill_left_px + pill_w_px - clip_inset_px - (chevron_right_dips * dpi).round())
+                .max(clip_left_px);
         let clip_bottom_px = (pill_top_px + pill_h_px - clip_inset_px).max(clip_top_px);
-        let clip_radius_px = (self.settings.corner_radius_dips() * dpi - clip_inset_px)
+        let clip_radius_px = (self.pill_radius_dips * dpi - clip_inset_px)
             .clamp(0.0, (clip_bottom_px - clip_top_px) * 0.5);
         DcompEngine::update_rounded_clip_rect(
             &self.pill_scroll_clip,
@@ -4205,6 +5353,18 @@ impl DockState {
             clip_bottom_px,
             0.0,
             clip_radius_px,
+        );
+        // An inset edge sits inside the pill's straight section: give it a crisp
+        // vertical cut instead of a second rounded cap next to the chevron.
+        square_inset_clip_corners(
+            &self.pill_scroll_clip,
+            chevron_left_dips > 0.0,
+            chevron_right_dips > 0.0,
+        );
+        square_inset_clip_corners(
+            &self.scroll_clip,
+            chevron_left_dips > 0.0,
+            chevron_right_dips > 0.0,
         );
 
         // 3. Unified app slots (inside clipped scroll container).
@@ -4300,9 +5460,10 @@ impl DockState {
                 let ix = slot_center + slide_x + bounce_dx - width * 0.5;
                 let iy =
                     icon_base_bottom - lift * self.slots[idx].layout_fraction(now) + sink - height;
+                let icon_px = icon_cache::ICON_PX as f32;
                 self.slot_visuals[idx].icon.set_transform(
-                    width * dpi / 64.0,
-                    height * dpi / 64.0,
+                    width * dpi / icon_px,
+                    height * dpi / icon_px,
                     ix * dpi,
                     iy * dpi,
                 );
@@ -4330,7 +5491,9 @@ impl DockState {
                     self.slot_visuals[idx].dot.hide();
                 } else {
                     let dot_w = if desired_dot == 2 { 16.0 } else { 6.0 };
-                    let dx = cursor_x + slide_x + (slot_w - dot_w) * 0.5;
+                    // Same layout fraction as the icon center, so a closing slot's
+                    // dot stays centered under its shrinking icon.
+                    let dx = slot_center + slide_x - dot_w * 0.5;
                     self.slot_visuals[idx].dot.set_transform(
                         1.0,
                         1.0,
@@ -4450,11 +5613,24 @@ impl DockState {
                 );
                 self.update_tray_pin_visuals(tray_rect, shell_top);
                 right_cursor -= base + wg;
-                right_cursor -= tray_pin_cell(base) * self.tray_pin_visuals.len() as f32;
+                if !self.tray_pin_visuals.is_empty() {
+                    right_cursor -= tray_pin_cell(base) * self.tray_pin_visuals.len() as f32;
+                    if !self.stack_visuals.is_empty() {
+                        right_cursor -= wg;
+                    }
+                }
             } else {
                 self.tray_bg.hide();
                 self.tray_node.hide();
             }
+
+            // `[Folder1] [Folder2] ...` left of the pinned tray icons, each its own
+            // native folder icon, bottom-anchored like app icons.
+            let stack_rects = self.stack_rects_in(&sm, pill_top, pill_h);
+            if let Some(&(first_left, ..)) = stack_rects.first() {
+                right_cursor = first_left - wg;
+            }
+            self.update_stack_visuals(&stack_rects, shell_top, icon_base_bottom, icon_size);
 
             let wdiv_x = right_cursor - 5.0;
             self.widget_divider.set_transform(
@@ -4469,6 +5645,10 @@ impl DockState {
             self.tray_node.hide();
             self.bin_bg.hide();
             self.bin_node.hide();
+            for sv in &self.stack_visuals {
+                sv.bg.hide();
+                sv.icon.hide();
+            }
         }
 
         // 4b. Scroll edge scrim + chevron overlays (only visible when dock content overflows).
@@ -4524,13 +5704,18 @@ impl DockState {
             let gx = (drag.current_x - drag.grab_offset_x - ghost_dim * 0.5)
                 .clamp(4.0, (win_w - ghost_dim - 4.0).max(4.0));
             let gy = win_h - VERTICAL_EDGE_GAP - 20.0 - ghost_dim;
-            let s = (ghost_dim * dpi) / 64.0;
+            let s = (ghost_dim * dpi) / icon_cache::ICON_PX as f32;
             self.drag_ghost.set_transform(s, s, gx * dpi, gy * dpi);
         } else {
             self.drag_ghost.hide();
         }
 
         // 6. Auto-height tooltip rendered last (suppressed when live thumbnail preview is shown).
+        // The stack tooltip may refresh its cached item count (`&mut self`), so it
+        // is resolved before any borrowed tooltip text below.
+        let stack_tip = self
+            .hovered_stack
+            .and_then(|index| self.stack_tooltip_text(index));
         let preview_showing_for = self
             .preview
             .as_deref()
@@ -4539,81 +5724,94 @@ impl DockState {
         // Borrow text from existing state; allocate only when the surface actually changes.
         // Cow keeps borrowed label strings allocation-free; only localized strings whose source
         // is produced by `loc::t` need an owned buffer.
-        let tooltip_info: Option<(Cow<'_, str>, f32, f32)> = if active_drag.is_some() {
-            None
-        } else if let Some(is_next) = self.hovered_scroll {
-            let cx = if is_next {
-                sm.vp_right - SCROLL_EDGE_W_DIPS * 0.5
+        let tooltip_info: Option<(Cow<'_, str>, f32, f32)> =
+            if active_drag.is_some() || self.hover_flyout_open {
+                None
+            } else if let Some(is_next) = self.hovered_scroll {
+                let cx = if is_next {
+                    sm.vp_right - SCROLL_EDGE_W_DIPS * 0.5
+                } else {
+                    sm.vp_left + SCROLL_EDGE_W_DIPS * 0.5
+                };
+                Some((Cow::Owned(loc::t("ScrollDockHelp")), cx, pill_top - 8.0))
+            } else if self.hovered_bin {
+                let (_, bin_rc, _) = self.right_widget_rects_dips();
+                let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
+                Some((Cow::Owned(loc::t("RecycleBin")), cx, pill_top - 8.0))
+            } else if self.hovered_tray {
+                let (tray_rc, _, _) = self.right_widget_rects_dips();
+                let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
+                Some((Cow::Owned(loc::t("TrayApps")), cx, pill_top - 8.0))
+            } else if let Some(index) = self.hovered_tray_pin
+                && self
+                    .settings
+                    .user_pinned_background_apps
+                    .get(index)
+                    .is_some()
+                && let (Some(tray), _, _) = self.right_widget_rects_dips()
+            {
+                let (left, _, right, _) = tray_pin_rect(
+                    tray,
+                    tray_pin_cell(base),
+                    widget_gap(&self.settings),
+                    self.tray_pin_visuals.len(),
+                    index,
+                );
+                let label = self
+                    .tray_pin_visuals
+                    .get(index)
+                    .map_or("", |pin| pin.label.as_str());
+                let stack_count = self
+                    .settings
+                    .user_pinned_background_apps
+                    .get(index)
+                    .and_then(|path| folder_stack_preview_count(path));
+                let tooltip = stack_count.map_or_else(
+                    || Cow::Borrowed(label),
+                    |count| Cow::Owned(format!("{label} ({count})")),
+                );
+                Some((tooltip, (left + right) * 0.5, pill_top - 8.0))
+            } else if let Some(index) = self.hovered_stack
+                && let Some(text) = stack_tip
+            {
+                let rects = self.stack_rects_in(&sm, pill_top, pill_h);
+                let cx = rects
+                    .get(index)
+                    .map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
+                let lift = self
+                    .stack_visuals
+                    .get(index)
+                    .map_or(0.0, |sv| icon_size * (sv.scale - 1.0).max(0.0));
+                Some((Cow::Owned(text), cx, (pill_top - lift).min(pill_top) - 8.0))
+            } else if let Some(wid) = self.hovered_widget {
+                let (_, _, wrects) = self.right_widget_rects_dips();
+                let cx = wrects
+                    .iter()
+                    .find(|(id, _)| *id == wid)
+                    .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
+                let settings = &self.settings;
+                let label =
+                    self.widget_runtime
+                        .hover_tooltip(wid, self.hovered_widget_sub, settings);
+                Some((Cow::Borrowed(label), cx, pill_top - 8.0))
+            } else if let Some(shell) = self.hovered_shell {
+                Some((
+                    Cow::Owned(shell.label()),
+                    self.live_shell_center_x(shell),
+                    pill_top - 8.0,
+                ))
+            } else if let Some(idx) = self.hovered_idx
+                && let Some(slot) = self.slots.get(idx)
+                && preview_showing_for != Some(slot.key.as_str())
+            {
+                let lift = self.slot_lift(slot);
+                let icon_top = icon_base_bottom - lift - icon_size * slot.scale;
+                let top_edge = icon_top.min(pill_top);
+                let center_x = self.live_slot_center_x(idx);
+                Some((Cow::Borrowed(slot.label.as_str()), center_x, top_edge - 8.0))
             } else {
-                sm.vp_left + SCROLL_EDGE_W_DIPS * 0.5
+                None
             };
-            Some((Cow::Owned(loc::t("ScrollDockHelp")), cx, pill_top - 8.0))
-        } else if self.hovered_bin {
-            let (_, bin_rc, _) = self.right_widget_rects_dips();
-            let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some((Cow::Owned(loc::t("RecycleBin")), cx, pill_top - 8.0))
-        } else if self.hovered_tray {
-            let (tray_rc, _, _) = self.right_widget_rects_dips();
-            let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some((Cow::Owned(loc::t("TrayApps")), cx, pill_top - 8.0))
-        } else if let Some(index) = self.hovered_tray_pin
-            && self
-                .settings
-                .user_pinned_background_apps
-                .get(index)
-                .is_some()
-            && let (Some(tray), _, _) = self.right_widget_rects_dips()
-        {
-            let (left, _, right, _) = tray_pin_rect(
-                tray,
-                tray_pin_cell(base),
-                widget_gap(&self.settings),
-                self.tray_pin_visuals.len(),
-                index,
-            );
-            let label = self
-                .tray_pin_visuals
-                .get(index)
-                .map_or("", |pin| pin.label.as_str());
-            let stack_count = self
-                .settings
-                .user_pinned_background_apps
-                .get(index)
-                .and_then(|path| folder_stack_preview_count(path));
-            let tooltip = stack_count.map_or_else(
-                || Cow::Borrowed(label),
-                |count| Cow::Owned(format!("{label} ({count})")),
-            );
-            Some((tooltip, (left + right) * 0.5, pill_top - 8.0))
-        } else if let Some(wid) = self.hovered_widget {
-            let (_, _, wrects) = self.right_widget_rects_dips();
-            let cx = wrects
-                .iter()
-                .find(|(id, _)| *id == wid)
-                .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
-            let settings = &self.settings;
-            let label = self
-                .widget_runtime
-                .hover_tooltip(wid, self.hovered_widget_sub, settings);
-            Some((Cow::Borrowed(label), cx, pill_top - 8.0))
-        } else if let Some(shell) = self.hovered_shell {
-            Some((
-                Cow::Owned(shell.label()),
-                self.live_shell_center_x(shell),
-                pill_top - 8.0,
-            ))
-        } else if let Some(idx) = self.hovered_idx
-            && let Some(slot) = self.slots.get(idx)
-            && preview_showing_for != Some(slot.key.as_str())
-        {
-            let lift = self.slot_lift(slot);
-            let icon_top = icon_base_bottom - lift - icon_size * slot.scale;
-            let top_edge = icon_top.min(pill_top);
-            let center_x = self.live_slot_center_x(idx);
-            Some((Cow::Borrowed(slot.label.as_str()), center_x, top_edge - 8.0))
-        } else {
-            None
-        };
 
         if let Some((text, center_x, bottom_y)) = tooltip_info {
             let needs_redraw = self
@@ -4788,7 +5986,9 @@ impl DockState {
         // possible magnified icon, including the 1 DIP lift.
         let clearance = compute_preview_clearance(profile.icon, effective_max);
         let top_edge = (pill_top - clearance).min(pill_top);
-        let anchor_x = win_x + (self.live_slot_center_x(idx) * self.dpi).round() as i32;
+        // Resting center: with fixed-point anchoring the hovered icon stays at its
+        // rest position, so the preview arrow stays centered while the arch decays.
+        let anchor_x = win_x + (self.rest_slot_center_x(idx) * self.dpi).round() as i32;
         let anchor_bottom_y = win_y + ((top_edge - 10.0) * self.dpi).round() as i32;
 
         if let Some(ref mut preview) = self.preview {
@@ -4907,11 +6107,12 @@ impl DockState {
             return false;
         }
         let (commands, items) = remap_native_app_menu_entries(entries);
-        let chosen = menu::show_popup_menu_with_border(
+        let chosen = menu::show_popup_menu_with_anchor(
             self.hwnd,
             self.is_dark,
-            items,
+            &items,
             BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+            self.dock_menu_anchor(),
         )
         .unwrap_or(0);
         if let Some((_, original)) = commands.into_iter().find(|(id, _)| *id == chosen) {
@@ -4920,9 +6121,18 @@ impl DockState {
         true
     }
 
+    fn hide_tooltip_for_flyout(&mut self) {
+        self.tooltip_node.hide();
+        self.tooltip_cache = None;
+        self.dcomp.commit();
+    }
+
     /// WS-10: a group flyout row with several live windows opens the picker
     /// keyed by the dock's own monitor; a single window launches directly.
     fn open_group_flyout(&mut self, group_index: usize, slot_path: &str) {
+        if self.hover_flyout_open {
+            return;
+        }
         let Some(group) = self.settings.app_groups.get(group_index).cloned() else {
             return;
         };
@@ -4967,15 +6177,22 @@ impl DockState {
             width_dips: 316.0,
             blocks,
         };
-        let (left, _top, right, bottom) = self.dock_screen_rect();
-        let action = crate::ui::flyout::show_flyout_with_border(
-            self.hwnd,
-            self.is_dark,
-            (left + right) / 2,
-            bottom,
-            spec,
-            BorderStyle::from_menu_settings(self.is_dark, &self.settings),
-        );
+        let (anchor_x, anchor_y) = self.flyout_anchor_center_px();
+        self.hide_tooltip_for_flyout();
+        self.hover_flyout_open = true;
+        let action = {
+            let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+            crate::ui::flyout::show_primary_with_options(
+                self.hwnd,
+                self.is_dark,
+                anchor_x,
+                anchor_y,
+                spec,
+                BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+                FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
+            )
+        };
+        self.hover_flyout_open = false;
         match action {
             Some(1) => {
                 if let Some(member) = self.settings.app_groups.get_mut(group_index) {
@@ -5019,6 +6236,204 @@ impl DockState {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Opens a widget flyout anchored on the dock item `rc`, opening away from
+    /// the dock edge. The Keyboard flyout targets the last external foreground
+    /// window, never the dock or one of our popups.
+    fn open_widget_flyout_at(&mut self, id: &str, rc: DipRect) -> bool {
+        if self.hover_flyout_open || dynamic_island::is_modal_flyout_active() {
+            return false;
+        }
+        self.hide_tooltip_for_flyout();
+        self.note_external_foreground();
+        if self.keyboard_target_hwnd != 0 {
+            self.widget_runtime
+                .set_keyboard_target_hwnd(self.keyboard_target_hwnd);
+        }
+        let (ax, ay) = self.flyout_anchor_px(rc);
+        let edge = self.dock_flyout_edge();
+        self.hover_flyout_open = true;
+        let changed = {
+            let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+            self.widget_runtime.open_widget_flyout_on_edge(
+                id,
+                self.hwnd,
+                self.is_dark,
+                ax,
+                ay,
+                edge,
+                &mut self.settings,
+            )
+        };
+        self.hover_flyout_open = false;
+        changed
+    }
+
+    /// Remembers the last foreground window that is not OpenTaskbar's own dock,
+    /// island, menu or flyout (the Keyboard Layout widget switches *that* app).
+    fn note_external_foreground(&mut self) {
+        let foreground = unsafe { GetForegroundWindow() } as usize;
+        if foreground == 0 || foreground == self.hwnd {
+            return;
+        }
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(foreground as HWND, &mut pid);
+        }
+        if pid == 0 || pid == std::process::id() {
+            return;
+        }
+        self.keyboard_target_hwnd = foreground;
+        if !dynamic_island::is_modal_flyout_active() {
+            self.widget_runtime.set_keyboard_target_hwnd(foreground);
+        }
+    }
+
+    /// Left-click on a folder stack: a dedicated flyout listing the folder's
+    /// visible subfolders (alphabetical) then recent files, capped at
+    /// `STACK_FLYOUT_MAX_ITEMS`, with an "Open in File Explorer" footer.
+    fn open_stack_flyout(&mut self, index: usize) {
+        if self.hover_flyout_open {
+            return;
+        }
+        let Some(visual) = self.stack_visuals.get(index) else {
+            return;
+        };
+        let path = visual.path.clone();
+        let label = visual.label.clone();
+        let entries = read_stack_entries(&path).unwrap_or_default();
+        if let Some(visual) = self.stack_visuals.get_mut(index) {
+            visual.cached_count = Some((Instant::now(), entries.len()));
+        }
+        let shown = layout::order_stack_entries(entries, layout::STACK_FLYOUT_MAX_ITEMS);
+        let row_paths: Vec<String> = shown.iter().map(|entry| entry.path.clone()).collect();
+        let icons = if row_paths.is_empty() {
+            HashMap::new()
+        } else {
+            icon_cache::resolve_batch_raw(&row_paths)
+        };
+        let mut blocks = Vec::with_capacity(shown.len() + 3);
+        if shown.is_empty() {
+            blocks.push(FlyoutBlock::Note(loc::t("StackEmpty")));
+        }
+        for (offset, entry) in shown.iter().enumerate() {
+            let icon = icons
+                .get(&entry.path)
+                .and_then(Option::as_ref)
+                .map(|raw| FlyoutIcon {
+                    width: raw.width,
+                    height: raw.height,
+                    bgra: raw.pixels.to_vec(),
+                });
+            blocks.push(FlyoutBlock::ActionRow {
+                id: STACK_FLYOUT_ROW_ID_BASE + offset as u32,
+                // `T3 Code (Beta).lnk` reads as `T3 Code (Beta)`; launching
+                // still uses `entry.path` (the full shortcut path).
+                title: stack_entry_display_name(&entry.name),
+                subtitle: entry.is_dir.then(|| loc::t("FolderLabel")),
+                badge: None,
+                icon,
+                destructive: false,
+            });
+        }
+        blocks.push(FlyoutBlock::Separator);
+        blocks.push(FlyoutBlock::ButtonBar(vec![(
+            STACK_FLYOUT_OPEN_FOLDER_ID,
+            loc::t("OpenFolderInExplorer"),
+            false,
+        )]));
+        let spec = FlyoutSpec {
+            title: label,
+            subtitle: Some(path.clone()),
+            width_dips: 320.0,
+            blocks,
+        };
+        let (anchor_x, anchor_y) = self.stack_rects_dips().get(index).copied().map_or_else(
+            || self.flyout_anchor_center_px(),
+            |rc| self.flyout_anchor_px(rc),
+        );
+        self.hide_tooltip_for_flyout();
+        self.hover_flyout_open = true;
+        let action = {
+            let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+            crate::ui::flyout::show_primary_with_options(
+                self.hwnd,
+                self.is_dark,
+                anchor_x,
+                anchor_y,
+                spec,
+                BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+                FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
+            )
+        };
+        self.hover_flyout_open = false;
+        match action {
+            Some(STACK_FLYOUT_OPEN_FOLDER_ID) => open_folder_in_explorer(&path),
+            Some(id) if id >= STACK_FLYOUT_ROW_ID_BASE => {
+                if let Some(entry) = shown.get((id - STACK_FLYOUT_ROW_ID_BASE) as usize) {
+                    pins::launch(entry.path.clone());
+                }
+            }
+            _ => {}
+        }
+        self.reconcile_pointer_after_interaction();
+        self.update_visuals();
+    }
+
+    /// Right-click on a folder stack icon.
+    fn show_stack_context_menu(&mut self, index: usize) {
+        let Some(visual) = self.stack_visuals.get(index) else {
+            return;
+        };
+        let path = visual.path.clone();
+        let label = visual.label.clone();
+        self.hover_flyout_open = true;
+        let action = win32::show_folder_stack_context_menu(
+            self.hwnd,
+            self.is_dark,
+            &label,
+            &self.settings,
+            self.dock_menu_anchor(),
+        );
+        self.hover_flyout_open = false;
+        match action {
+            win32::FolderStackAction::OpenInExplorer => open_folder_in_explorer(&path),
+            win32::FolderStackAction::AddFolder => self.add_custom_folder_stack(),
+            win32::FolderStackAction::ManageInSettings => settings_ui::spawn_settings_window(),
+            win32::FolderStackAction::RemoveFromDock => {
+                let before = self.settings.stack_folders.len();
+                self.settings
+                    .stack_folders
+                    .retain(|folder| !folder.trim().eq_ignore_ascii_case(&path));
+                if self.settings.stack_folders.len() != before {
+                    self.save_and_reload_settings();
+                }
+            }
+            win32::FolderStackAction::None => {}
+        }
+    }
+
+    /// Native folder picker; appends a unique folder to `stack_folders`.
+    fn add_custom_folder_stack(&mut self) {
+        let Some(folder) = crate::ui::prompt::open_folder(&loc::t("AddStack")) else {
+            return;
+        };
+        let folder = folder.to_string_lossy().into_owned();
+        if layout::add_stack_folder(&mut self.settings.stack_folders, &folder) {
+            self.save_and_reload_settings();
+        }
+    }
+
+    fn save_and_reload_settings(&mut self) {
+        if let Err(error) = settings::save_to(&settings::settings_path(), &self.settings) {
+            opentaskbar_core::log::error(format!("Could not save dock settings: {error}"));
+            return;
+        }
+        self.reload_settings_live();
+        if self.reload_msg != 0 {
+            unsafe { PostMessageW(HWND_BROADCAST, self.reload_msg, self.hwnd, 0) };
         }
     }
 
@@ -5191,22 +6606,12 @@ impl DockState {
         let Some((_, rc)) = rects.into_iter().find(|(wid, _)| wid == &id) else {
             return;
         };
-        let (ax, ay) = self.flyout_anchor_px(rc);
         let anchor_rect = self
             .widget_phys_rect(&id)
             .map(|r| (r.left, r.top, r.right, r.bottom));
         crate::ui::flyout::set_next_hover_anchor(anchor_rect);
-        self.hover_flyout_open = true;
-        let changed = self.widget_runtime.open_widget_flyout(
-            &id,
-            self.hwnd,
-            self.is_dark,
-            ax,
-            ay,
-            &mut self.settings,
-        );
+        let changed = self.open_widget_flyout_at(&id, rc);
         crate::ui::flyout::set_next_hover_anchor(None);
-        self.hover_flyout_open = false;
         if changed {
             // Disk I/O + full DComp rebuild move to the idle
             // `WM_APP_SETTINGS_RELOAD` message; the mouse/timer path only posts.
@@ -5337,6 +6742,8 @@ impl DockState {
                 self.hovered_tray = false;
                 self.hovered_tray_pin = None;
                 self.hovered_bin = false;
+                self.hovered_stack = None;
+                self.stack_hover_x = None;
                 self.hovered_widget = None;
                 self.hover_mouse_x = None;
                 self.hovered_idx = None;
@@ -5359,6 +6766,8 @@ impl DockState {
                 self.hovered_tray = false;
                 self.hovered_tray_pin = None;
                 self.hovered_bin = false;
+                self.hovered_stack = None;
+                self.stack_hover_x = None;
                 self.hovered_widget = None;
                 self.hovered_widget_sub = None;
                 self.hover_mouse_x = None;
@@ -5379,14 +6788,28 @@ impl DockState {
         // `End` / `InWidgets` place the Start button inside the trailing group,
         // so shell hit testing must precede the widget/tray boxes to win ties.
         if let Some(shell) = self.hit_shell_button(mx, my) {
+            // Only the lead shell group shares the app fisheye. A Start button
+            // placed `AfterApps` / `InWidgets` is a non-magnified zone: hovering
+            // it must not start (or drag) an app arch (P1-6).
+            let magnifies = shell != ShellButton::Start
+                || layout::start_strip_group(&self.settings) == layout::StartStripGroup::Head;
+            let pointer = magnifies.then_some(mx);
             let changed = self.hovered_shell != Some(shell)
-                || self
-                    .hover_mouse_x
-                    .is_none_or(|prev| (prev - mx).abs() >= 0.75);
+                || match (self.hover_mouse_x, pointer) {
+                    (Some(prev), Some(next)) => (prev - next).abs() >= 0.75,
+                    (None, None) => false,
+                    _ => true,
+                };
             self.hovered_shell = Some(shell);
+            self.hovered_stack = None;
+            self.stack_hover_x = None;
+            if magnifies {
+                self.begin_hover_session();
+                self.fisheye_anchor_x = Some(mx);
+            }
             // Shell hover feeds the same fisheye pointer as app icons: the shell
             // glyphs then magnify around the pointer instead of staying at 1.0.
-            self.hover_mouse_x = Some(mx);
+            self.hover_mouse_x = pointer;
             self.hovered_idx = None;
             self.sync_preview_hover();
             if changed {
@@ -5401,6 +6824,47 @@ impl DockState {
         let over_tray = Self::hit_rect_in_vp(&sm, tray_rc, mx, my);
         let over_tray_pin = self.hit_tray_pin(tray_rc, mx, my);
         let over_bin = Self::hit_rect_in_vp(&sm, bin_rc, mx, my);
+        let over_stack = self.hit_stack(mx, my);
+        if over_stack != self.hovered_stack
+            || (over_stack.is_some()
+                && self
+                    .stack_hover_x
+                    .is_none_or(|prev| (prev - mx).abs() >= 0.75))
+        {
+            let entered = over_stack != self.hovered_stack;
+            self.hovered_stack = over_stack;
+            self.stack_hover_x = over_stack.map(|_| mx);
+            if over_stack.is_some() {
+                self.hovered_shell = None;
+                self.hover_mouse_x = None;
+                self.hovered_idx = None;
+                self.sync_preview_hover();
+            }
+            self.ensure_animation();
+            if entered {
+                self.update_visuals();
+            }
+        }
+        if over_stack.is_some() {
+            self.cancel_widget_hover();
+            if self.hovered_tray
+                || self.hovered_tray_pin.is_some()
+                || self.hovered_bin
+                || self.hovered_widget.is_some()
+            {
+                let had_widget = self.hovered_widget.is_some();
+                self.hovered_tray = false;
+                self.hovered_tray_pin = None;
+                self.hovered_bin = false;
+                self.hovered_widget = None;
+                self.hovered_widget_sub = None;
+                if had_widget {
+                    self.refresh_widgets_throttled();
+                }
+                self.update_visuals();
+            }
+            return;
+        }
         let over_widget_hit = wrects
             .iter()
             .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
@@ -5424,7 +6888,8 @@ impl DockState {
                         Some(3)
                     }
                 }
-                "quicksettings" => Some(((rel_x / (w / 3.0)).floor() as u8).min(2)),
+                // Three toggles plus the Control Center chevron (`3`).
+                "quicksettings" => Some(layout::quick_settings_zone(rel_x, w)),
                 "focus" | "stopwatch" | "countdown" => Some(if rel_x >= w - 36.0 { 1 } else { 0 }),
                 _ => None,
             }
@@ -5475,7 +6940,10 @@ impl DockState {
                 return;
             }
             let prev_idx = self.hovered_idx;
+            // Freeze the resting layout for this hover session (P0-3/P1-5).
+            self.begin_hover_session();
             self.hover_mouse_x = Some(mx);
+            self.fisheye_anchor_x = Some(mx);
             self.update_hovered_index_from_mouse();
             if self.hovered_idx != prev_idx {
                 self.sync_preview_hover();
@@ -5515,9 +6983,31 @@ impl DockState {
             || self.hovered_tray
             || self.hovered_tray_pin.is_some()
             || self.hovered_bin
+            || self.hovered_stack.is_some()
             || self.hovered_widget.is_some()
             || self.hovered_scroll.is_some()
             || self.hovered_resize.is_some()
+    }
+
+    /// True when another top-level window (a context menu, a flyout, an app
+    /// window) is the one under the cursor, even though the cursor is inside
+    /// the dock's rect. Our own preview popup does not count as covering.
+    fn is_cursor_covered_by_other_window(&self) -> bool {
+        let Some(pt) = self.screen_cursor() else {
+            return false;
+        };
+        let top = unsafe { WindowFromPoint(pt) } as usize;
+        if top == 0 || top == self.hwnd {
+            return false;
+        }
+        let over_preview = self
+            .preview
+            .as_deref()
+            .and_then(|p| p.window_rect())
+            .is_some_and(|rc| {
+                pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom
+            });
+        !over_preview
     }
 
     /// Reconciles pointer hover and animation state after drags, modal flyouts, or context menus,
@@ -5528,10 +7018,18 @@ impl DockState {
         if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
             return;
         }
-        if self.has_active_hover() && !self.is_cursor_over_dock_hit_area() {
+        // A menu/popup/window covering the dock means the pointer is no longer
+        // on the dock even if it is inside its rect: decay the magnification.
+        if self.has_active_hover()
+            && (self.is_cursor_covered_by_other_window() || !self.is_cursor_over_dock_hit_area())
+        {
             self.handle_mouse_leave();
         } else if (self.slots.iter().any(|s| (s.scale - 1.0).abs() > 0.004)
-            || self.shell_scales.iter().any(|s| (s - 1.0).abs() > 0.004))
+            || self.shell_scales.iter().any(|s| (s - 1.0).abs() > 0.004)
+            || self
+                .stack_visuals
+                .iter()
+                .any(|s| (s.scale - 1.0).abs() > 0.004))
             && self.hover_mouse_x.is_none()
         {
             self.ensure_animation();
@@ -5554,6 +7052,11 @@ impl DockState {
         self.hovered_tray = false;
         self.hovered_tray_pin = None;
         self.hovered_bin = false;
+        self.hovered_stack = None;
+        self.pressed_stack = None;
+        self.stack_hover_x = None;
+        // The hover session ends: the next one re-freezes the resting layout.
+        self.hover_rest_sm = None;
         self.hovered_widget = None;
         self.hovered_widget_sub = None;
         self.hovered_scroll = None;
@@ -5617,6 +7120,7 @@ impl DockState {
         let foreground = unsafe { GetForegroundWindow() } as usize;
         self.flyout_focus_return =
             restore_target_for_press(foreground, 0, self.hwnd).max(self.start_restore_hwnd);
+        self.note_external_foreground();
         unsafe {
             SetCapture(self.hwnd as HWND);
         }
@@ -5647,6 +7151,11 @@ impl DockState {
         }
         let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
+        if let Some(index) = self.hit_stack(mx, my) {
+            self.pressed_stack = Some(index);
+            self.update_visuals();
+            return;
+        }
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             self.pressed_tray_pin = self
                 .settings
@@ -5765,6 +7274,9 @@ impl DockState {
         if let Some(shell) = self.pressed_shell.take() {
             self.update_visuals();
             if self.hit_shell_button(mx, my) == Some(shell) {
+                // Re-publish the resting-layout anchors so the Start/Search flyout
+                // lands on the button even if the strip was magnified (P1-7).
+                self.refresh_shell_button_anchors();
                 match shell {
                     ShellButton::Start => self.toggle_start_menu(),
                     ShellButton::Search => {
@@ -5778,6 +7290,13 @@ impl DockState {
         }
         let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
+        if let Some(index) = self.pressed_stack.take() {
+            self.update_visuals();
+            if self.hit_stack(mx, my) == Some(index) {
+                self.open_stack_flyout(index);
+            }
+            return;
+        }
         if let Some(path) = self.pressed_tray_pin.take() {
             self.update_visuals();
             if self.hit_tray_pin(tray_rc, mx, my).is_some_and(|index| {
@@ -5790,20 +7309,32 @@ impl DockState {
         if self.pressed_tray {
             self.pressed_tray = false;
             self.update_visuals();
-            if let Some(rc) = tray_rc
+            if !self.hover_flyout_open
+                && let Some(rc) = tray_rc
                 && Self::hit_rect_in_vp(&sm, Some(rc), mx, my)
             {
                 let (ax, ay) = self.flyout_anchor_px(rc);
-                if let Some((path, pinned)) = tray::open_background_apps_flyout(
-                    self.hwnd,
-                    self.is_dark,
-                    &self.settings,
-                    ax,
-                    ay,
-                    &self.settings.user_pinned_background_apps,
-                ) {
+                let edge = self.dock_flyout_edge();
+                self.hide_tooltip_for_flyout();
+                self.hover_flyout_open = true;
+                let result = {
+                    let _modal_guard = dynamic_island::ModalFlyoutGuard::enter();
+                    tray::open_background_apps_flyout(
+                        self.hwnd,
+                        self.is_dark,
+                        &self.settings,
+                        ax,
+                        ay,
+                        edge,
+                        &self.settings.user_pinned_background_apps,
+                    )
+                };
+                self.hover_flyout_open = false;
+                if let Some((path, pinned)) = result {
                     self.set_background_pin(&path, pinned);
                 }
+                self.reconcile_pointer_after_interaction();
+                self.update_visuals();
             }
             return;
         }
@@ -5848,18 +7379,8 @@ impl DockState {
                         self.update_visuals();
                     }
                     widgets::DirectClickOutcome::OpenFlyout => {
-                        let (ax, ay) = self.flyout_anchor_px(*rc);
                         crate::ui::flyout::set_next_hover_anchor(None);
-                        self.hover_flyout_open = true;
-                        let changed = self.widget_runtime.open_widget_flyout(
-                            wid,
-                            self.hwnd,
-                            self.is_dark,
-                            ax,
-                            ay,
-                            &mut self.settings,
-                        );
-                        self.hover_flyout_open = false;
+                        let changed = self.open_widget_flyout_at(wid, *rc);
                         if changed {
                             let _ = opentaskbar_core::settings::save_to(
                                 &opentaskbar_core::settings::settings_path(),
@@ -5943,6 +7464,15 @@ impl DockState {
         {
             return;
         }
+        // Widget chips own their middle click (mute, play/pause, lap, refresh, ...).
+        if let Some(wid) = self.hovered_widget {
+            if self.widget_runtime.handle_middle_click(wid, &self.settings) {
+                let _ = self.refresh_widgets();
+                self.tooltip_cache = None;
+                self.update_visuals();
+            }
+            return;
+        }
         if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get_mut(idx)
         {
@@ -5966,19 +7496,60 @@ impl DockState {
         }
     }
 
-    fn handle_mouse_wheel(&mut self, delta: i16, horizontal: bool) {
-        if !horizontal && self.hovered_widget == Some("audio") && self.settings.wheel_volume_enabled
-        {
-            widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
-            self.refresh_widgets_throttled();
-            self.update_visuals();
+    /// Widget chip under `(mx, my)` for wheel routing. Uses the full pill height
+    /// (no 6 DIP top/bottom dead band like the hover/click rects).
+    fn wheel_widget_at(&self, mx: f32, my: f32) -> Option<&'static str> {
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        if my < pill_top || my > pill_top + pill_h {
+            return None;
+        }
+        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
+        if mx < sm.vp_left || mx > sm.vp_right {
+            return None;
+        }
+        let (_, _, rects) = self.right_widget_rects_dips();
+        rects
+            .into_iter()
+            .find(|(_, (l, _, r, _))| mx >= *l && mx <= *r)
+            .map(|(id, _)| id)
+    }
+
+    /// Applies one volume wheel step and repaints `%`, speaker glyph and tooltip
+    /// on the same frame (unthrottled).
+    fn apply_volume_wheel(&mut self, delta: i16) {
+        self.widget_runtime.adjust_volume_wheel(i32::from(delta));
+        let _ = self.refresh_widgets();
+        self.tooltip_cache = None;
+        self.update_visuals();
+    }
+
+    fn handle_mouse_wheel(&mut self, mx: f32, my: f32, delta: i16, horizontal: bool) {
+        if delta == 0 {
             return;
         }
-        if !horizontal && self.hovered_widget == Some("keyboard") && delta != 0 {
-            self.widget_runtime.cycle_keyboard_layout(delta < 0);
-            self.refresh_widgets_throttled();
-            self.update_visuals();
-            return;
+        let hit_widget = self.wheel_widget_at(mx, my);
+        if !horizontal {
+            match hit_widget.map(registry::canonical_widget_id) {
+                // The Audio/Media chips always own the wheel: `wheel_volume_enabled`
+                // only governs dock-wide background scrolling.
+                Some("audio" | "media") => {
+                    self.apply_volume_wheel(delta);
+                    return;
+                }
+                Some("keyboard") => {
+                    self.note_external_foreground();
+                    if self.keyboard_target_hwnd != 0 {
+                        self.widget_runtime
+                            .set_keyboard_target_hwnd(self.keyboard_target_hwnd);
+                    }
+                    self.widget_runtime.cycle_keyboard_layout(delta < 0);
+                    let _ = self.refresh_widgets();
+                    self.tooltip_cache = None;
+                    self.update_visuals();
+                    return;
+                }
+                _ => {}
+            }
         }
         let sm = self.live_scroll_metrics();
         if sm.max_scroll > 0.5 && delta != 0 {
@@ -6000,13 +7571,21 @@ impl DockState {
             self.update_visuals();
             return;
         }
+        let over_slot = self.hovered_idx.or_else(|| self.slot_index_at(mx));
         if !horizontal
-            && let Some(idx) = self.hovered_idx
+            && let Some(idx) = over_slot
             && let Some(slot) = self.slots.get(idx)
-            && !slot.windows.is_empty()
         {
-            let hwnds = slot.hwnds();
-            tracker::cycle_windows(&hwnds, delta < 0);
+            if !slot.windows.is_empty() {
+                let hwnds = slot.hwnds();
+                tracker::cycle_windows(&hwnds, delta < 0);
+            }
+            return;
+        }
+        // Dock-wide background wheel (outside widgets and app icons) adjusts the
+        // volume only when the user enabled it.
+        if !horizontal && hit_widget.is_none() && self.settings.wheel_volume_enabled {
+            self.apply_volume_wheel(delta);
         }
     }
 
@@ -6160,6 +7739,53 @@ impl DockState {
             return;
         }
 
+        // Dropping files onto a folder stack moves them into that folder
+        // (Ctrl = copy) through a real shell operation with undo support.
+        if let Some(index) = self.hit_stack(mx, my)
+            && let Some(folder) = self.stack_visuals.get(index).map(|sv| sv.path.clone())
+        {
+            let sources: Vec<String> = files
+                .iter()
+                .filter(|file| {
+                    !file.eq_ignore_ascii_case(&folder)
+                        && Path::new(file.as_str()).parent().is_none_or(|parent| {
+                            !parent
+                                .to_string_lossy()
+                                .trim_end_matches(['\\', '/'])
+                                .eq_ignore_ascii_case(folder.trim_end_matches(['\\', '/']))
+                        })
+                })
+                .cloned()
+                .collect();
+            if !sources.is_empty() {
+                let destination = [folder];
+                let outcome = if win32::is_ctrl_down() {
+                    shell_files::copy_files(
+                        &sources,
+                        &destination,
+                        shell_files::UIOption::AllDialogs,
+                    )
+                } else {
+                    shell_files::move_files(
+                        &sources,
+                        &destination,
+                        shell_files::UIOption::AllDialogs,
+                    )
+                };
+                if let shell_files::FileOperationOutcome::Failed(code) = outcome {
+                    opentaskbar_core::log::warn(format!(
+                        "Folder stack drop failed (0x{code:08X})."
+                    ));
+                }
+            }
+            if let Some(visual) = self.stack_visuals.get_mut(index) {
+                visual.cached_count = None;
+            }
+            self.tooltip_cache = None;
+            self.update_visuals();
+            return;
+        }
+
         // If dropped directly onto an app icon, open the dropped files with that app.
         if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
@@ -6170,9 +7796,15 @@ impl DockState {
             return;
         }
 
-        // Otherwise pin dropped executables and shortcuts to the dock.
+        // Otherwise pin dropped executables and shortcuts to the dock, and pin
+        // dropped folders as individual folder stacks.
         let mut added = false;
+        let mut stacks_added = false;
         for path in files {
+            if Path::new(&path).is_dir() {
+                stacks_added |= layout::add_stack_folder(&mut self.settings.stack_folders, &path);
+                continue;
+            }
             let lower = path.to_lowercase();
             if (lower.ends_with(".exe") || lower.ends_with(".lnk") || lower.ends_with(".url"))
                 && !self
@@ -6185,7 +7817,11 @@ impl DockState {
                 added = true;
             }
         }
-        if added {
+        if stacks_added {
+            // New stack icons need a visual-tree rebuild; the full reload also
+            // picks up any app pins added in the same drop.
+            self.save_and_reload_settings();
+        } else if added {
             let _ = opentaskbar_core::settings::save_to(
                 &opentaskbar_core::settings::settings_path(),
                 &self.settings,
@@ -6208,10 +7844,20 @@ impl DockState {
 
         let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
+        if let Some(index) = self.hit_stack(mx, my) {
+            self.show_stack_context_menu(index);
+            return;
+        }
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             let path = self.settings.user_pinned_background_apps[index].clone();
             self.hover_flyout_open = true;
-            let unpin = tray::show_pinned_app_menu(self.hwnd, self.is_dark, &self.settings, &path);
+            let unpin = tray::show_pinned_app_menu(
+                self.hwnd,
+                self.is_dark,
+                &self.settings,
+                &path,
+                self.dock_menu_anchor(),
+            );
             self.hover_flyout_open = false;
             if unpin {
                 self.set_background_pin(&path, false);
@@ -6220,8 +7866,12 @@ impl DockState {
         }
         if Self::hit_rect_in_vp(&sm, bin_rc, mx, my) {
             self.hover_flyout_open = true;
-            let action =
-                win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark, &self.settings);
+            let action = win32::show_recycle_bin_context_menu(
+                self.hwnd,
+                self.is_dark,
+                &self.settings,
+                self.dock_menu_anchor(),
+            );
             self.hover_flyout_open = false;
             match action {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
@@ -6248,6 +7898,10 @@ impl DockState {
                 "quicksettings" => Some(focus_label.as_str()),
                 _ => None,
             };
+            let visible: Vec<&'static str> = self.widget_visuals.iter().map(|wv| wv.id).collect();
+            let position = visible.iter().position(|id| id == wid);
+            let can_move_earlier = position.is_some_and(|pos| pos > 0);
+            let can_move_later = position.is_some_and(|pos| pos + 1 < visible.len());
             self.hover_flyout_open = true;
             let action = win32::show_widget_context_menu(
                 self.hwnd,
@@ -6256,9 +7910,10 @@ impl DockState {
                 secondary_label,
                 &self.all_monitors,
                 false,
-                false,
-                false,
+                can_move_earlier,
+                can_move_later,
                 &self.settings,
+                self.dock_menu_anchor(),
             );
             self.hover_flyout_open = false;
             self.disarm_hover_intent();
@@ -6266,8 +7921,12 @@ impl DockState {
             self.widget_runtime.hover.suppress(wid, Instant::now());
             match action {
                 WidgetContextAction::PlaceAllDisplays => {
+                    // One canonical key per widget: drop legacy spellings first.
+                    self.settings
+                        .dynamic_island_placements
+                        .retain(|k, _| !opentaskbar_core::dynamic_island::same_widget_id(k, wid));
                     self.settings.dynamic_island_placements.insert(
-                        (*wid).to_owned(),
+                        settings::canonical_widget_setting_id(wid),
                         opentaskbar_core::settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned(),
                     );
                     if let Err(error) = opentaskbar_core::settings::save_to(
@@ -6293,9 +7952,13 @@ impl DockState {
                 }
                 WidgetContextAction::PlaceOnDisplay(idx) => {
                     if let Some(mon) = self.all_monitors.get(idx) {
+                        let device = mon.device_name.clone();
+                        self.settings.dynamic_island_placements.retain(|k, _| {
+                            !opentaskbar_core::dynamic_island::same_widget_id(k, wid)
+                        });
                         self.settings
                             .dynamic_island_placements
-                            .insert((*wid).to_owned(), mon.device_name.clone());
+                            .insert(settings::canonical_widget_setting_id(wid), device);
                         if let Err(error) = opentaskbar_core::settings::save_to(
                             &opentaskbar_core::settings::settings_path(),
                             &self.settings,
@@ -6321,14 +7984,29 @@ impl DockState {
                 WidgetContextAction::MoveToTaskbar => {
                     self.settings
                         .dynamic_island_placements
-                        .retain(|k, _| !k.eq_ignore_ascii_case(wid));
+                        .retain(|k, _| !opentaskbar_core::dynamic_island::same_widget_id(k, wid));
                     let _ = opentaskbar_core::settings::save_to(
                         &opentaskbar_core::settings::settings_path(),
                         &self.settings,
                     );
                     self.reload_settings_live();
                 }
-                WidgetContextAction::MoveEarlier | WidgetContextAction::MoveLater => {}
+                WidgetContextAction::MoveEarlier | WidgetContextAction::MoveLater => {
+                    let offset = if action == WidgetContextAction::MoveEarlier {
+                        -1
+                    } else {
+                        1
+                    };
+                    if let Some(order) = layout::move_widget_in_order(
+                        &visible,
+                        &self.settings.widget_order,
+                        wid,
+                        offset,
+                    ) {
+                        self.settings.widget_order = order;
+                        self.save_and_reload_settings();
+                    }
+                }
                 WidgetContextAction::Remove => {
                     self.settings.set_widget_enabled(wid, false);
                     if let Err(error) = opentaskbar_core::settings::save_to(
@@ -6370,13 +8048,23 @@ impl DockState {
         }
 
         if self.hit_shell_button(mx, my) == Some(ShellButton::Start) {
-            let act = win32::show_start_context_menu(self.hwnd, self.is_dark, &self.settings);
+            let act = win32::show_start_context_menu(
+                self.hwnd,
+                self.is_dark,
+                &self.settings,
+                self.dock_menu_anchor(),
+            );
             self.execute_context_action(act);
             return;
         }
 
         if self.hit_shell_button(mx, my) == Some(ShellButton::TaskView) {
-            match win32::show_taskview_context_menu(self.hwnd, self.is_dark, &self.settings) {
+            match win32::show_taskview_context_menu(
+                self.hwnd,
+                self.is_dark,
+                &self.settings,
+                self.dock_menu_anchor(),
+            ) {
                 TaskViewAction::PreviousDesktop => opentaskbar_shell::taskbar::previous_desktop(),
                 TaskViewAction::NextDesktop => opentaskbar_shell::taskbar::next_desktop(),
                 TaskViewAction::NewDesktop => opentaskbar_shell::taskbar::new_desktop(),
@@ -6407,6 +8095,7 @@ impl DockState {
                 slot.pinned,
                 running,
                 &self.settings,
+                self.dock_menu_anchor(),
             ) {
                 AppContextAction::Open => {
                     let identities: Vec<(usize, u32)> =
@@ -6508,7 +8197,13 @@ impl DockState {
             return;
         }
 
-        let act = win32::show_dock_context_menu(self.hwnd, self.is_dark, &self.settings);
+        let (_, act) = win32::show_dock_context_menu_with_entries(
+            self.hwnd,
+            self.is_dark,
+            &self.settings,
+            Vec::new(),
+            self.dock_menu_anchor(),
+        );
         self.execute_context_action(act);
     }
 
@@ -6524,10 +8219,12 @@ impl DockState {
                     self.settings.size = prof.size;
                     self.settings.auto_hide = prof.auto_hide;
                     self.settings.enabled_widgets = prof.enabled_widgets.clone();
-                    self.settings.show_clock_widget =
-                        prof.enabled_widgets.iter().any(|w| w == "clock");
-                    self.settings.show_system_stats_widget =
-                        prof.enabled_widgets.iter().any(|w| w == "stats");
+                    // Canonical, case-insensitive match: profiles written by the
+                    // reference app use `Clock` / `SystemStats`, older port builds
+                    // `clock` / `stats`.
+                    let (show_clock, show_stats) = profile_widget_flags(&prof.enabled_widgets);
+                    self.settings.show_clock_widget = show_clock;
+                    self.settings.show_system_stats_widget = show_stats;
                     self.settings.active_profile = Some(prof.name);
                     let _ = settings::save_to(&settings::settings_path(), &self.settings);
                     self.reload_settings_live();
@@ -6574,6 +8271,7 @@ impl DockState {
                     }
                 }
             }
+            ContextAction::AddCustomFolderStack => self.add_custom_folder_stack(),
             ContextAction::RemoveStack(idx) => {
                 if idx < self.settings.stack_folders.len() {
                     self.settings.stack_folders.remove(idx);
@@ -6647,7 +8345,12 @@ impl DockState {
         }
         let idx = self.keyboard_idx.map_or(0, |i| (i + 1) % self.slots.len());
         self.keyboard_idx = Some(idx);
-        self.hover_mouse_x = Some(self.live_slot_center_x(idx));
+        // Resting center (P1-4): a shifted live center could land between two
+        // rest cells and make keyboard focus skip an icon.
+        self.begin_hover_session();
+        let center = self.rest_slot_center_x(idx);
+        self.hover_mouse_x = Some(center);
+        self.fisheye_anchor_x = Some(center);
         self.update_hovered_index_from_mouse();
         self.sync_preview_hover();
         self.arm_win_key_reveal();
@@ -6728,8 +8431,10 @@ impl DockState {
                 let next = keyboard_next_index(self.keyboard_idx, len, reverse);
                 self.keyboard_idx = next;
                 if let Some(idx) = next {
-                    let mx = self.live_slot_center_x(idx);
+                    self.begin_hover_session();
+                    let mx = self.rest_slot_center_x(idx);
                     self.hover_mouse_x = Some(mx);
+                    self.fisheye_anchor_x = Some(mx);
                     self.update_hovered_index_from_mouse();
                     self.sync_preview_hover();
                     self.ensure_animation();
@@ -6776,6 +8481,11 @@ impl DockState {
         self.hovered_tray = false;
         self.hovered_tray_pin = None;
         self.hovered_bin = false;
+        self.hovered_stack = None;
+        self.pressed_stack = None;
+        self.stack_hover_x = None;
+        self.hover_rest_sm = None;
+        self.fisheye_anchor_x = None;
         self.hovered_widget = None;
         self.hovered_widget_sub = None;
         self.disarm_hover_intent();
@@ -6933,6 +8643,26 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     /// Active dock window handles on this UI thread for `WH_MOUSE_LL` wheel routing.
     static DOCK_HWNDS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Dynamic Island windows that also receive the hook's wheel route. Kept apart
+    /// from `DOCK_HWNDS` so islands never get the dock's private `WM_APP` messages.
+    static ISLAND_WHEEL_HWNDS: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Registers a Dynamic Island window (created on this dock UI thread) for
+/// `WH_MOUSE_LL` wheel routing, so wheel input reaches the `WS_EX_NOACTIVATE`
+/// island even when Windows "scroll inactive windows" is off.
+pub(super) fn register_island_wheel_hwnd(hwnd: usize) {
+    ISLAND_WHEEL_HWNDS.with(|list| {
+        let mut list = list.borrow_mut();
+        if hwnd != 0 && !list.contains(&hwnd) {
+            list.push(hwnd);
+        }
+    });
+}
+
+pub(super) fn unregister_island_wheel_hwnd(hwnd: usize) {
+    ISLAND_WHEEL_HWNDS.with(|list| list.borrow_mut().retain(|&h| h != hwnd));
 }
 
 const EVENT_SYSTEM_ALERT: u32 = 0x0010;
@@ -7052,6 +8782,18 @@ unsafe extern "system" fn mouse_wheel_hook(code: i32, wparam: WPARAM, lparam: LP
                 unsafe {
                     let _ =
                         PostMessageW(*hwnd as HWND, WM_APP_WHEEL_ROUTE, payload, point as LPARAM);
+                }
+            }
+        });
+        ISLAND_WHEEL_HWNDS.with(|list| {
+            for hwnd in list.borrow().iter() {
+                unsafe {
+                    let _ = PostMessageW(
+                        *hwnd as HWND,
+                        dynamic_island::WM_APP_ISLAND_WHEEL_ROUTE,
+                        payload,
+                        point as LPARAM,
+                    );
                 }
             }
         });
@@ -7244,6 +8986,7 @@ unsafe extern "system" fn wnd_proc(
                 || state.hovered_tray
                 || state.hovered_tray_pin.is_some()
                 || state.hovered_bin
+                || state.hovered_stack.is_some()
                 || state.hovered_widget.is_some()
                 || state.hovered_scroll.is_some()
             {
@@ -7281,6 +9024,10 @@ unsafe extern "system" fn wnd_proc(
             // 1000 Hz mice repeat the same point many times; hit testing and
             // animation wake-ups must run only for a genuinely new coordinate.
             if layout::mouse_move_coalesce(&mut state.last_mouse_move, mx, my) {
+                // Ambient mode: pointer activity over the dock restores it immediately.
+                if state.ambient_opacity < 1.0 {
+                    state.set_ambient_dim(false);
+                }
                 // Re-entry cancels the pending 400 ms delayed hide.
                 unsafe { KillTimer(hwnd, TIMER_HIDE_DELAY) };
                 state.handle_mouse_move(mx, my);
@@ -7326,14 +9073,29 @@ unsafe extern "system" fn wnd_proc(
             state.handle_mbutton_up();
             0
         }
-        WM_MOUSEWHEEL => {
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            let horizontal = msg == WM_MOUSEHWHEEL;
             let delta = ((wparam >> 16) & 0xffff) as i16;
-            state.handle_mouse_wheel(delta, false);
-            0
-        }
-        WM_MOUSEHWHEEL => {
-            let delta = ((wparam >> 16) & 0xffff) as i16;
-            state.handle_mouse_wheel(delta, true);
+            // Wheel messages carry *screen* coordinates in lParam.
+            let mut pt = POINT {
+                x: loword_i16(lparam) as i32,
+                y: hiword_i16(lparam) as i32,
+            };
+            unsafe {
+                ScreenToClient(hwnd, &mut pt);
+            }
+            let mx = pt.x as f32 / state.dpi;
+            let my = pt.y as f32 / state.dpi;
+            // The `WH_MOUSE_LL` route usually delivers the same notch first:
+            // one physical notch must fire exactly once.
+            if state.wheel_dedup.accept(
+                layout::WheelSource::Window,
+                delta,
+                horizontal,
+                Instant::now(),
+            ) {
+                state.handle_mouse_wheel(mx, my, delta, horizontal);
+            }
             0
         }
         WM_RBUTTONDOWN => {
@@ -7407,8 +9169,15 @@ unsafe extern "system" fn wnd_proc(
             }
             let mx = pt.x as f32 / state.dpi;
             let my = pt.y as f32 / state.dpi;
-            if state.hit_test_dips(mx, my) {
-                state.handle_mouse_wheel(delta, horizontal);
+            if state.hit_test_dips(mx, my)
+                && state.wheel_dedup.accept(
+                    layout::WheelSource::Hook,
+                    delta,
+                    horizontal,
+                    Instant::now(),
+                )
+            {
+                state.handle_mouse_wheel(mx, my, delta, horizontal);
             }
             0
         }
@@ -7543,9 +9312,13 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_WIDGETS => {
+            if dynamic_island::is_modal_flyout_active() {
+                return 0;
+            }
             if state.refresh_widgets() {
                 state.update_visuals();
             }
+            state.display_care_tick();
             if effective_animations_enabled(
                 state.settings.animations_enabled,
                 state.settings.focus_mode,
@@ -7563,6 +9336,9 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_WIDGET_ANIM => {
+            if dynamic_island::is_modal_flyout_active() {
+                return 0;
+            }
             if effective_animations_enabled(
                 state.settings.animations_enabled,
                 state.settings.focus_mode,
@@ -7582,6 +9358,8 @@ unsafe extern "system" fn wnd_proc(
             if state.monitor.is_primary {
                 let _ = opentaskbar_shell::taskbar::ensure_hidden();
             }
+            // Track the user's real target app for the Keyboard Layout widget.
+            state.note_external_foreground();
             state.reconcile_pointer_after_interaction();
             let slots_changed = state.sync_slots(true);
             state.evaluate_auto_hide();
@@ -8324,16 +10102,21 @@ mod tests {
         let shell_w = shell_lead_width(&settings);
         let apps_w = section_width(base, slot_gap(&settings), 4);
         let trail_w = base_trail_width(&settings);
-        let content_w = content_strip_width(shell_w, apps_w, trail_w, 0.0).max(160.0);
+        let pill_w = pill_width_for_content(content_strip_width(shell_w, apps_w, trail_w, 0.0));
         let pill_left = 12.0; // (window width - pill width) / 2 at rest
+        let (vp_left, vp_right) = pill_viewport(pill_left, pill_w);
         let sm = compute_scroll_metrics(
-            pill_left + 1.0,
-            pill_left + content_w - 1.0,
+            vp_left,
+            vp_right,
             apps_w,
             trail_w,
             shell_w,
             0.0,
             settings.content_alignment,
+        );
+        assert!(
+            !sm.can_scroll_right && sm.max_scroll == 0.0,
+            "a resting dock must never report overflow"
         );
         let start_center = sm.shell_start_x + base * 0.5;
         let anchor = centered_shell_rect(start_center, base, 960.0, 1004.0);
@@ -8576,7 +10359,8 @@ mod tests {
         assert!(src.contains("self.open_group_flyout(gidx, &slot.launch_path)"));
         assert!(src.contains("window_picker::show("));
         assert!(src.contains("self.picker_monitor_index(),"));
-        assert!(src.contains("show_flyout_with_border("));
+        // Group flyouts open away from the dock edge like every other dock flyout.
+        assert!(src.contains("FlyoutOptions::stack().with_edge(self.dock_flyout_edge())"));
     }
 
     #[test]
@@ -8692,5 +10476,471 @@ mod tests {
                 "center icon target scale must reach {max_scale}, got {center_target}"
             );
         }
+    }
+
+    /// P0-4: the resting pill built by the live geometry helpers must hold its
+    /// whole content strip, so no bogus 2 DIP overflow / right chevron appears.
+    #[test]
+    fn resting_pill_never_overflows_its_own_viewport() {
+        for (slots, widgets) in [(0usize, false), (1, false), (6, true), (14, true)] {
+            let mut settings = DockSettings::default();
+            if widgets {
+                settings.set_widget_enabled("clock", true);
+                settings.set_widget_enabled("audio", true);
+            }
+            settings.show_tray_button = true;
+            settings.show_recycle_bin = true;
+            let base = layout::size_profile(&settings).cell;
+            let shell_w = shell_lead_width(&settings);
+            let apps_w = section_width(base, slot_gap(&settings), slots);
+            let widgets_w = widgets_strip_width(&settings, slots > 0);
+            let trail_w = base_trail_width(&settings);
+            // Same composition as `rest_content_width_at` / `pill_geometry_impl`.
+            let pill_w = pill_width_for_content(content_strip_width(
+                shell_w,
+                apps_w,
+                widgets_w + trail_w,
+                0.0,
+            ));
+            let (win_w, _) =
+                compute_window_dips_with(&settings, slots, 1920.0, &EffectiveMetrics::default());
+            let pill_left = (win_w - pill_w) * 0.5;
+            let (vp_left, vp_right) = pill_viewport(pill_left, pill_w);
+            // Same split as `scroll_metrics_impl`.
+            let sm = compute_scroll_metrics(
+                vp_left,
+                vp_right,
+                apps_w + widgets_w,
+                trail_w,
+                shell_w,
+                0.0,
+                settings.content_alignment,
+            );
+            assert_eq!(sm.max_scroll, 0.0, "{slots} slots: bogus overflow at rest");
+            assert!(!sm.can_scroll_right && !sm.can_scroll_left);
+            assert!(
+                win_w >= pill_w,
+                "window ({win_w}) must hold the pill ({pill_w})"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_width_magnification_reserves_no_width_and_expanding_reserves_an_arch() {
+        let slots = 8;
+        let eff = EffectiveMetrics::default();
+        let fixed = DockSettings {
+            magnification_enabled: true,
+            magnification_expands_dock: false,
+            ..DockSettings::default()
+        };
+        let expanding = DockSettings {
+            magnification_expands_dock: true,
+            ..fixed.clone()
+        };
+        let rest = resting_pill_width(&fixed, slots, 1920.0);
+        let (fixed_w, _) = compute_window_dips_with(&fixed, slots, 1920.0, &eff);
+        assert_eq!(
+            fixed_w,
+            (rest + 24.0).ceil(),
+            "fixed-width: in-place magnification"
+        );
+
+        let (expanding_w, _) = compute_window_dips_with(&expanding, slots, 1920.0, &eff);
+        let stride = layout::size_profile(&expanding).cell + slot_gap(&expanding);
+        let arch = layout::fisheye_expansion_reserve_dips(stride, profile_peak(&expanding));
+        assert!(
+            expanding_w >= resting_pill_width(&expanding, slots, 1920.0) + 24.0 + arch,
+            "expanding: window ({expanding_w}) must reserve a full arch ({arch})"
+        );
+
+        // Focus Mode disables the fisheye: no reserve even when expanding.
+        let focus = DockSettings {
+            focus_mode: true,
+            ..expanding.clone()
+        };
+        let (focus_w, _) = compute_window_dips_with(&focus, slots, 1920.0, &eff);
+        assert!(focus_w < expanding_w);
+
+        // Fixed-width growth budget is always zero, so the peak scale is clamped to
+        // the no-overlap scale.
+        assert_eq!(
+            layout::fisheye_growth_budget(false, true, 2000.0, 500.0),
+            0.0
+        );
+        let profile = layout::size_profile(&fixed);
+        let budget = capture_expansion_budget(stride, profile.icon, 1.5, 0.0, 0.0, 0.0, 1.5);
+        assert!(budget.effective_max_scale <= 1.5);
+        assert!(
+            (budget.effective_max_scale
+                - layout::compute_no_overlap_max_scale(stride, profile.icon, 1.5))
+            .abs()
+                < 1e-4
+        );
+    }
+
+    #[test]
+    fn live_widget_widths_widen_the_window() {
+        let settings = DockSettings::default();
+        let mut eff = EffectiveMetrics::default();
+        let (static_w, _) = compute_window_dips_with(&settings, 4, 1920.0, &eff);
+        eff.live_rest_content_dips = Some(static_w + 100.0);
+        let (live_w, _) = compute_window_dips_with(&settings, 4, 1920.0, &eff);
+        assert!(live_w >= static_w + 100.0);
+        // Never past the monitor.
+        eff.live_rest_content_dips = Some(10_000.0);
+        let (capped, _) = compute_window_dips_with(&settings, 4, 1920.0, &eff);
+        assert!(capped <= 1920.0);
+    }
+
+    #[test]
+    fn folder_stacks_are_counted_in_the_trailing_group() {
+        let mut settings = DockSettings {
+            show_tray_button: true,
+            show_recycle_bin: true,
+            ..DockSettings::default()
+        };
+        let base = layout::size_profile(&settings).cell;
+        let without = base_trail_width(&settings);
+        settings.stack_folders = vec![
+            r"C:\Users\Public\Downloads".to_owned(),
+            "   ".to_owned(),
+            r"C:\Projects".to_owned(),
+        ];
+        assert_eq!(
+            stack_folder_count(&settings),
+            2,
+            "blank entries are skipped"
+        );
+        let with = base_trail_width(&settings);
+        assert!((with - without - 2.0 * (base + widget_gap(&settings))).abs() < 1e-4);
+        // Stacks alone still form a trailing group (with its divider room).
+        let stacks_only = DockSettings {
+            show_tray_button: false,
+            show_recycle_bin: false,
+            stack_folders: vec![r"C:\Projects".to_owned()],
+            ..DockSettings::default()
+        };
+        assert!(base_trail_width(&stacks_only) > base);
+        assert_eq!(base_trail_width_for(&stacks_only, 0), 0.0);
+    }
+
+    #[test]
+    fn folder_stack_enumeration_hides_temp_and_system_items() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let dir =
+            std::env::temp_dir().join(format!("otb-stack-test-{}-{stamp}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Sub")).expect("create test stack");
+        for name in ["a.txt", "desktop.ini", "draft.tmp", "movie.part", ".hidden"] {
+            std::fs::write(dir.join(name), b"x").expect("write test file");
+        }
+        let path = dir.to_string_lossy().into_owned();
+        let entries = read_stack_entries(&path).expect("readable stack");
+        let ordered = layout::order_stack_entries(entries, layout::STACK_FLYOUT_MAX_ITEMS);
+        let names: Vec<&str> = ordered.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Sub", "a.txt"]);
+        assert!(ordered[0].is_dir);
+        assert_eq!(stack_item_count(&path), Some(2));
+        assert_eq!(read_stack_entries(&format!("{path}-missing")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_widget_ids_match_canonically() {
+        let (clock, stats) = profile_widget_flags(&["Clock".to_owned(), "stats".to_owned()]);
+        assert!(clock && stats);
+        let (clock, stats) = profile_widget_flags(&["CLOCK".to_owned()]);
+        assert!(clock && !stats);
+        let (clock, stats) = profile_widget_flags(&["SystemStats".to_owned()]);
+        assert!(!clock && stats);
+        assert_eq!(profile_widget_flags(&[]), (false, false));
+    }
+
+    #[test]
+    fn audio_wheel_is_never_gated_and_menus_use_the_dock_anchor() {
+        let src = include_str!("mod.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let wheel = code.find("fn handle_mouse_wheel(").expect("wheel handler");
+        let body = &code[wheel..];
+        let audio = body.find("Some(\"audio\" | \"media\")").expect("audio arm");
+        let gate = body
+            .find("self.settings.wheel_volume_enabled")
+            .expect("background gate");
+        assert!(
+            audio < gate,
+            "chip volume must not depend on wheel_volume_enabled"
+        );
+        assert!(code.contains("adjust_volume_wheel(i32::from(delta))"));
+        // Both wheel paths are de-duplicated.
+        assert!(code.contains("layout::WheelSource::Window"));
+        assert!(code.contains("layout::WheelSource::Hook"));
+        // Every dock context menu wrapper receives the visible-pill anchor.
+        assert_eq!(
+            code.matches("self.dock_menu_anchor(),").count(),
+            9,
+            "pinned tray, bin, widget, start, taskview, app, dock, native, stack"
+        );
+        assert!(!code.contains(&["show_dock_context", "_menu(self.hwnd"].concat()));
+        assert!(code.contains("open_widget_flyout_on_edge("));
+        assert!(code.contains("handle_middle_click(wid, &self.settings)"));
+        assert!(!code.contains("settings.show_media"));
+    }
+
+    /// QA `01_dock_rest`: a pill wider than its content must not open a gap
+    /// between the last widget and the trail divider (and a second one right
+    /// of the Recycle Bin). The whole strip moves as one contiguous run.
+    #[test]
+    fn wide_pill_keeps_widgets_flush_against_the_trail_group() {
+        let (shell_w, apps_w, widgets_w, trail_w) = (120.0, 300.0, 420.0, 160.0);
+        let content = content_strip_width(shell_w, apps_w + widgets_w, trail_w, 0.0);
+        let slack = 300.0;
+        let (vp_left, vp_right) = (100.0, 100.0 + content + slack);
+        for alignment in [
+            DockContentAlignment::Left,
+            DockContentAlignment::Center,
+            DockContentAlignment::Right,
+        ] {
+            let sm = compute_scroll_metrics(
+                vp_left,
+                vp_right,
+                apps_w + widgets_w,
+                trail_w,
+                shell_w,
+                0.0,
+                alignment,
+            );
+            assert_eq!(sm.max_scroll, 0.0);
+            let widgets_end = sm.apps_start_x + apps_w + widgets_w;
+            let trail_start = sm.right_anchor_x - trail_w;
+            assert!(
+                (trail_start - widgets_end).abs() < 0.01,
+                "{alignment:?}: bogus gap {} between widgets and trail",
+                trail_start - widgets_end
+            );
+            let left_gap = sm.shell_start_x - vp_left;
+            let right_gap = vp_right - sm.right_anchor_x;
+            assert!((left_gap + right_gap - (slack + 2.0 * CONTENT_EDGE_PAD_DIPS)).abs() < 0.01);
+            match alignment {
+                DockContentAlignment::Left => {
+                    assert!((left_gap - CONTENT_EDGE_PAD_DIPS).abs() < 0.01);
+                }
+                DockContentAlignment::Center => assert!((left_gap - right_gap).abs() < 1.0),
+                DockContentAlignment::Right => {
+                    assert!((right_gap - CONTENT_EDGE_PAD_DIPS).abs() < 0.01);
+                }
+            }
+        }
+        // A content-fitted pill has no slack: Start stays at the inner edge.
+        let fitted = compute_scroll_metrics(
+            vp_left,
+            vp_left + content,
+            apps_w + widgets_w,
+            trail_w,
+            shell_w,
+            0.0,
+            DockContentAlignment::Center,
+        );
+        assert_eq!(fitted.shell_start_x, vp_left + CONTENT_EDGE_PAD_DIPS);
+        assert_eq!(
+            fitted.right_anchor_x,
+            vp_left + content - CONTENT_EDGE_PAD_DIPS
+        );
+    }
+
+    /// QA `09_widgets_batch_a_and_folders`: an Auto dock grows to hold a large
+    /// live strip (many widgets + folder stacks) up to the monitor, instead of
+    /// staying at the width measured for the previous widget set.
+    #[test]
+    fn auto_width_grows_with_live_widgets_up_to_the_monitor() {
+        let mut settings = DockSettings::default();
+        for id in ["clock", "audio", "weather", "stats", "storage"] {
+            settings.set_widget_enabled(id, true);
+        }
+        settings.stack_folders = vec![r"C:\Users\Public\Downloads".to_owned()];
+        let mut eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        assert!(eff.width_dips.is_none());
+        let live_content = 1500.0;
+        eff.live_rest_content_dips = Some(live_content);
+        let (win_w, _) = compute_window_dips_with(&settings, 6, 1920.0, &eff);
+        assert!(
+            win_w >= live_content + 24.0,
+            "window ({win_w}) must hold the live strip ({live_content}) without scrolling"
+        );
+        eff.live_rest_content_dips = Some(5000.0);
+        let (capped, _) = compute_window_dips_with(&settings, 6, 1920.0, &eff);
+        assert!((1920.0 - 16.0..=1920.0).contains(&capped));
+    }
+
+    /// Settings reload must size the window from the *new* widget/stack set,
+    /// and a widget-set change at runtime must re-size it too.
+    #[test]
+    fn settings_reload_syncs_widget_and_stack_visuals_before_sizing() {
+        let src = include_str!("mod.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let reload = code
+            .find("fn reload_settings_live(")
+            .expect("reload handler");
+        let body = &code[reload..];
+        let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+        let widgets = body
+            .find("self.sync_widget_visuals()")
+            .expect("widget sync");
+        let stacks = body.find("self.stack_visuals_stale()").expect("stack sync");
+        let bounds = body.find("self.sync_window_bounds()").expect("bounds");
+        assert!(widgets < bounds && stacks < bounds);
+        for reset in [
+            "self.scroll_offset = 0.0",
+            "self.scroll_target = 0.0",
+            "self.hovered_widget = None",
+            "self.hovered_stack = None",
+            "self.hovered_idx = None",
+            "self.tooltip_cache = None",
+            "self.tooltip_node.hide()",
+        ] {
+            assert!(body.contains(reset), "reload must reset `{reset}`");
+        }
+        let refresh = code.find("fn refresh_widgets(").expect("refresh");
+        let refresh_body = &code[refresh..];
+        let refresh_body =
+            &refresh_body[..refresh_body.find("\n    fn ").unwrap_or(refresh_body.len())];
+        assert!(refresh_body.contains("let structure_changed = self.sync_widget_visuals()"));
+        assert!(refresh_body.contains("if width_changed || structure_changed"));
+    }
+
+    #[test]
+    fn scroll_chevrons_inset_the_content_clip_only_while_shown() {
+        assert_eq!(scroll_chevron_insets(false, false), (0.0, 0.0));
+        assert_eq!(
+            scroll_chevron_insets(true, false),
+            (SCROLL_EDGE_W_DIPS, 0.0)
+        );
+        assert_eq!(
+            scroll_chevron_insets(false, true),
+            (0.0, SCROLL_EDGE_W_DIPS)
+        );
+        assert_eq!(
+            scroll_chevron_insets(true, true),
+            (SCROLL_EDGE_W_DIPS, SCROLL_EDGE_W_DIPS)
+        );
+    }
+
+    #[test]
+    fn stack_flyout_titles_drop_shortcut_extensions() {
+        assert_eq!(
+            stack_entry_display_name("T3 Code (Beta).lnk"),
+            "T3 Code (Beta)"
+        );
+        assert_eq!(
+            stack_entry_display_name("GitHub Copilot.LNK"),
+            "GitHub Copilot"
+        );
+        assert_eq!(stack_entry_display_name("Speedtest.lnk"), "Speedtest");
+        assert_eq!(stack_entry_display_name("Docs.Url"), "Docs");
+        assert_eq!(
+            stack_entry_display_name("Türkçe Kısayol.lnk"),
+            "Türkçe Kısayol"
+        );
+        // Other files and degenerate names are untouched.
+        assert_eq!(stack_entry_display_name("report.pdf"), "report.pdf");
+        assert_eq!(stack_entry_display_name("notes.lnk.txt"), "notes.lnk.txt");
+        assert_eq!(stack_entry_display_name(".lnk"), ".lnk");
+        assert_eq!(stack_entry_display_name("Sub"), "Sub");
+    }
+
+    #[test]
+    fn oled_auto_triggers_switch_the_dock_to_true_black() {
+        let mut settings = DockSettings {
+            dock_background: SurfaceBackground::Glass,
+            ..DockSettings::default()
+        };
+        // Triggers off: inputs are ignored.
+        assert_eq!(
+            effective_dock_background(&settings, true, true),
+            SurfaceBackground::Glass
+        );
+        settings.oled_auto_trigger_enabled = true;
+        assert_eq!(
+            effective_dock_background(&settings, true, false),
+            SurfaceBackground::TrueBlack
+        );
+        assert_eq!(
+            effective_dock_background(&settings, false, true),
+            SurfaceBackground::Glass
+        );
+        settings.oled_auto_trigger_enabled = false;
+        settings.oled_auto_on_night_light = true;
+        assert_eq!(
+            effective_dock_background(&settings, false, true),
+            SurfaceBackground::TrueBlack
+        );
+        assert_eq!(
+            effective_dock_background(&settings, false, false),
+            SurfaceBackground::Glass
+        );
+    }
+
+    #[test]
+    fn compute_target_fps_respects_animation_fps_cap() {
+        let mut settings = DockSettings {
+            animations_enabled: true,
+            focus_mode: false,
+            animation_fps: None,
+            animation_fps_cap: 0,
+            ..DockSettings::default()
+        };
+        // Unlimited: follow the native refresh (DwmFlush pacing).
+        assert_eq!(target_fps_for_hz(&settings, 144), 0);
+        settings.animation_fps_cap = 60;
+        assert_eq!(target_fps_for_hz(&settings, 144), 60);
+        settings.animation_fps_cap = 120;
+        assert_eq!(target_fps_for_hz(&settings, 60), 0, "cap above refresh");
+        settings.animation_fps_cap = 30;
+        settings.animation_fps = Some(90);
+        assert_eq!(target_fps_for_hz(&settings, 144), 30, "lower limit wins");
+        // The real entry point (an unknown device reports 60 Hz) honours the cap too.
+        assert_eq!(DockState::compute_target_fps(&settings, ""), 30);
+        settings.animations_enabled = false;
+        assert_eq!(DockState::compute_target_fps(&settings, ""), 0);
+        assert_eq!(apply_fps_cap(240, &DockSettings::default()), 240);
+    }
+
+    #[test]
+    fn burn_in_shift_cycles_one_pixel_steps_only_when_enabled() {
+        let mut settings = DockSettings::default();
+        assert_eq!(burn_in_shift_px(&settings, 999), (0, 0));
+        settings.burn_in_shift_enabled = true;
+        settings.burn_in_shift_minutes = 30;
+        assert_eq!(burn_in_shift_px(&settings, 0), (0, 0));
+        assert_eq!(burn_in_shift_px(&settings, 30), (1, 0));
+        assert_eq!(burn_in_shift_px(&settings, 65), (1, 1));
+        assert_eq!(burn_in_shift_px(&settings, 30 * 8), (0, 0), "cycle wraps");
+        for minutes in 0..600 {
+            let (dx, dy) = burn_in_shift_px(&settings, minutes);
+            assert!(dx.abs() <= 1 && dy.abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn shrink_priority_compacts_lowest_priority_widgets_first() {
+        let widths = [("clock", 120.0), ("media", 314.0), ("weather", 168.0)];
+        assert!(widget_shrink_factors(&widths, 0.0, 0).is_empty());
+        assert!(widget_shrink_factors(&widths, f32::NAN, 0).is_empty());
+        // A small overflow compacts only Media (priority 10) at the 0.84 scale.
+        let small = widget_shrink_factors(&widths, 20.0, 0);
+        assert_eq!(small.len(), 1);
+        assert!((small["media"] - 0.84).abs() < 0.001);
+        // A larger overflow continues with Weather (15) before Clock (80).
+        let large = widget_shrink_factors(&widths, 70.0, 0);
+        assert!(large.contains_key("media") && large.contains_key("weather"));
+        assert!(!large.contains_key("clock"));
+        // Positive bias compacts harder; negative bias is gentler and protects Clock.
+        let hard = widget_shrink_factors(&widths, 20.0, 5);
+        assert!(hard["media"] < 0.84);
+        let gentle = widget_shrink_factors(&widths, 10_000.0, -3);
+        assert!(gentle.values().all(|scale| *scale > 0.84));
+        assert!(!gentle.contains_key("clock"), "priority 80 > ceiling 76");
     }
 }

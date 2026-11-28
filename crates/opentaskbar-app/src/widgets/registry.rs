@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
-use super::catalog_ops::{compact_id, setting_value};
+use super::catalog_ops::setting_value;
 
 /// `DockWidget.ShrinkPriority` — lower values shrink first when the dock overflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -229,7 +229,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Weather",
         "WidgetWeather",
         "Time & Weather",
-        240.0,
+        196.0,
         true,
         true,
         HardwareNeed::None,
@@ -240,7 +240,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Day Progress",
         "WidgetDayProgress",
         "Time & Weather",
-        96.0,
+        102.0,
         true,
         false,
         HardwareNeed::None,
@@ -251,7 +251,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Stopwatch",
         "WidgetStopwatch",
         "Time & Weather",
-        124.0,
+        132.0,
         true,
         false,
         HardwareNeed::None,
@@ -330,7 +330,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Claude",
         "WidgetAiUsageClaude",
         "AI Quotas",
-        184.0,
+        168.0,
         true,
         true,
         HardwareNeed::None,
@@ -341,7 +341,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Codex",
         "WidgetAiUsageCodex",
         "AI Quotas",
-        184.0,
+        168.0,
         true,
         true,
         HardwareNeed::None,
@@ -352,7 +352,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "OpenCode",
         "WidgetAiUsageOpenCode",
         "AI Quotas",
-        296.0,
+        216.0,
         true,
         true,
         HardwareNeed::None,
@@ -363,7 +363,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Copilot",
         "WidgetAiUsageCopilot",
         "AI Quotas",
-        192.0,
+        136.0,
         true,
         true,
         HardwareNeed::None,
@@ -374,7 +374,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "DeepSeek",
         "WidgetAiUsageDeepSeek",
         "AI Quotas",
-        139.0,
+        128.0,
         true,
         true,
         HardwareNeed::None,
@@ -385,7 +385,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "OpenRouter",
         "WidgetAiUsageOpenRouter",
         "AI Quotas",
-        139.0,
+        128.0,
         true,
         true,
         HardwareNeed::None,
@@ -396,7 +396,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Cursor",
         "WidgetAiUsageCursor",
         "AI Quotas",
-        164.0,
+        124.0,
         true,
         true,
         HardwareNeed::None,
@@ -408,7 +408,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Media",
         "WidgetMedia",
         "Media & Controls",
-        256.0,
+        244.0,
         true,
         false,
         HardwareNeed::Audio,
@@ -419,7 +419,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Audio",
         "WidgetAudio",
         "Media & Controls",
-        78.0,
+        84.0,
         true,
         false,
         HardwareNeed::Audio,
@@ -430,7 +430,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Quick Settings",
         "WidgetQuickSettings",
         "Media & Controls",
-        112.0,
+        138.0,
         true,
         true,
         HardwareNeed::Audio,
@@ -441,7 +441,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Keyboard Layout",
         "WidgetKeyboardLayout",
         "Media & Controls",
-        58.0,
+        60.0,
         true,
         true,
         HardwareNeed::None,
@@ -453,7 +453,7 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         "Focus",
         "WidgetFocus",
         "Productivity",
-        124.0,
+        128.0,
         true,
         true,
         HardwareNeed::None,
@@ -524,22 +524,43 @@ pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
         })
 }
 
-/// Resolves a user-facing / legacy widget ID to its canonical catalog ID.
+/// Zero-allocation comparison ignoring `_`/`-` and ASCII/Unicode case, matching `compact_id`.
+fn eq_compact_id(a: &str, b: &str) -> bool {
+    let mut ai = a
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase);
+    let mut bi = b
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase);
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(ac), Some(bc)) if ac == bc => continue,
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Resolves a user-facing / legacy widget ID to its canonical catalog ID without heap allocation.
 pub fn canonical_widget_id(id: &str) -> &str {
-    let lower = id.to_ascii_lowercase();
+    // Fast path: exact case-insensitive match against built-in IDs (covers 99% of hot-path calls).
+    if let Some(w) = BUILTINS.iter().find(|w| w.id.eq_ignore_ascii_case(id)) {
+        return w.id;
+    }
     if let Some((_, canonical)) = WIDGET_ALIASES
         .iter()
-        .find(|(alias, _)| alias.eq_ignore_ascii_case(&lower))
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(id))
     {
         return canonical;
     }
     // Reference writes `AiUsageClaude` / `KeyboardLayout` while the catalog uses
     // `aiusage_claude` / `keyboard`; ignore word separators so both spellings
     // resolve to the same card. Only catalog IDs participate, exactly as before.
-    let compact = compact_id(&lower);
     BUILTINS
         .iter()
-        .find(|w| compact_id(w.id) == compact)
+        .find(|w| eq_compact_id(w.id, id))
         .map_or(id, |w| w.id)
 }
 
@@ -603,21 +624,87 @@ pub fn widget_has_flyout(id: &str) -> bool {
 /// Widgets currently rendered on the dock. Reads the effective enabled state
 /// from `DockSettings::is_widget_enabled`; Focus Mode hides widgets here just
 /// as `WidgetCoordinator.Apply` does.
+///
+/// Folder stacks are rendered as individual dock folder icons rather than a
+/// single `"stacks"` chip, so `"stacks"` is no longer pushed here (its metadata
+/// descriptor remains in [`BUILTINS`] for legacy lookups).
 pub fn active_widgets(settings: &DockSettings) -> Vec<&'static WidgetDescriptor> {
     let mut out: Vec<&'static WidgetDescriptor> = catalog_widgets()
         .filter(|w| settings.is_widget_enabled(w.id))
         .collect();
-    if !settings.stack_folders.is_empty()
-        && let Some(stacks) = widget_descriptor("stacks")
-    {
-        out.push(stacks);
-    }
     if !settings.app_groups.is_empty()
         && let Some(groups) = widget_descriptor("groups")
     {
         out.push(groups);
     }
     out
+}
+
+/// Dynamic Clock chip width accounting for seconds, 12-hour AM/PM suffix, date style,
+/// and beside-vs-below layout.
+pub fn clock_width_dips(settings: &DockSettings) -> f32 {
+    use opentaskbar_core::settings::{ClockDateLayout, ClockDateStyle};
+    let time_w: f32 = match (settings.clock_24_hour, settings.clock_show_seconds) {
+        (true, false) => 50.0,
+        (true, true) => 70.0,
+        (false, false) => 68.0,
+        (false, true) => 88.0,
+    };
+    if settings.date_style == ClockDateStyle::Hidden {
+        return (34.0 + time_w + 10.0).max(88.0);
+    }
+    let date_w: f32 = match settings.date_style {
+        ClockDateStyle::Hidden => 0.0,
+        ClockDateStyle::ShortDateOnly => 54.0,
+        ClockDateStyle::DayAndShortDate => 66.0,
+        ClockDateStyle::NumericDate => 74.0,
+    };
+    match settings.clock_date_layout {
+        ClockDateLayout::Below => (32.0 + time_w.max(date_w) + 12.0).clamp(92.0, 122.0),
+        ClockDateLayout::Beside => (32.0 + time_w + 12.0 + date_w + 8.0).clamp(138.0, 212.0),
+    }
+}
+
+/// Dynamic Weather chip width (`196` full with Hi/Lo range, `152` compact).
+pub fn weather_width_dips(compact: bool) -> f32 {
+    if compact { 152.0 } else { 196.0 }
+}
+
+/// Dynamic Storage chip width from fixed drives only + compact mode.
+pub fn storage_width_dips(fixed_drive_count: usize, compact: bool) -> f32 {
+    if fixed_drive_count == 0 {
+        return 76.0;
+    }
+    let shown = if compact {
+        1
+    } else {
+        fixed_drive_count.clamp(1, 3)
+    };
+    if compact {
+        104.0
+    } else {
+        (shown as f32 * 108.0 + 16.0).max(118.0)
+    }
+}
+
+/// Dynamic BluetoothBattery chip width excluding ignored devices (`68` DIP tiles).
+pub fn bluetooth_width_dips(visible_device_count: usize) -> f32 {
+    let n = visible_device_count.min(3);
+    if n == 0 {
+        72.0
+    } else {
+        (n as f32 * 68.0 + 14.0).max(82.0)
+    }
+}
+
+/// Dynamic SystemStats chip width matching visible stat columns (`1..=4`).
+pub fn stats_width_dips(col_count: u8) -> f32 {
+    match col_count {
+        1 => 64.0,
+        2 => 114.0,
+        3 => 168.0,
+        _ => 226.0,
+    }
 }
 
 /// `DockWidgetOption` metadata consumed by the settings catalog and dock layout.
@@ -800,5 +887,36 @@ mod tests {
         let stats = widget_layout("stats", &s, true);
         assert_eq!(stats.density, WidgetDensity::Comfortable);
         assert!(stats.width_dips > 114.0);
+    }
+
+    #[test]
+    fn active_widgets_retires_stacks_and_keeps_metadata() {
+        let mut s = DockSettings::default();
+        s.stack_folders.push(r"C:\Users\Public".to_owned());
+        assert!(
+            !active_widgets(&s).iter().any(|w| w.id == "stacks"),
+            "stacks chip is retired from active_widgets in favor of dock folder icons"
+        );
+        assert!(
+            widget_descriptor("stacks").is_some(),
+            "stacks metadata stays in BUILTINS"
+        );
+    }
+
+    #[test]
+    fn dynamic_width_helpers_adapt_to_settings_and_counts() {
+        use opentaskbar_core::settings::{ClockDateLayout, ClockDateStyle};
+        let mut s = DockSettings::default();
+        let base = clock_width_dips(&s);
+        s.clock_show_seconds = true;
+        assert!(clock_width_dips(&s) > base);
+        s.clock_date_layout = ClockDateLayout::Below;
+        assert!(clock_width_dips(&s) < base);
+        s.date_style = ClockDateStyle::Hidden;
+        assert!(clock_width_dips(&s) <= 122.0);
+        assert_eq!(weather_width_dips(false), 196.0);
+        assert_eq!(weather_width_dips(true), 152.0);
+        assert!(storage_width_dips(2, false) > storage_width_dips(1, true));
+        assert!(bluetooth_width_dips(2) > bluetooth_width_dips(0));
     }
 }

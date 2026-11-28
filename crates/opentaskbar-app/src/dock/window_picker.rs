@@ -267,25 +267,51 @@ fn work_area_for(index: usize, anchor: (i32, i32, i32, i32)) -> (MonitorInfo, RE
         .get(index)
         .cloned()
         .unwrap_or_else(|| win32::monitor_for_point_px(center_x, center_y));
+    let area = monitor_work_rect(monitor.handle).unwrap_or(RECT {
+        left: monitor.left,
+        top: monitor.top,
+        right: monitor.right,
+        bottom: monitor.bottom,
+    });
+    (monitor, area)
+}
+
+/// Current physical work area (`rcWork`) of `HMONITOR` `handle`, if it is still valid.
+fn monitor_work_rect(handle: usize) -> Option<RECT> {
     let mut info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
     info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
     let ok = unsafe {
         GetMonitorInfoW(
-            monitor.handle as HMONITOR,
+            handle as HMONITOR,
             (&mut info as *mut MONITORINFOEXW).cast(),
         )
     };
-    let area = if ok != 0 {
-        info.monitorInfo.rcWork
+    (ok != 0).then_some(info.monitorInfo.rcWork)
+}
+
+/// Grid geometry plus physical frame size for `count` windows in the physical work
+/// area `area` at scale `dpi`. `geometry_for_area` works in DIPs, so the physical
+/// work area is converted first (otherwise a 150% display gets a grid sized for a
+/// screen 1.5x larger and the frame overflows); the physical frame is then clamped
+/// inside the work area so it can never spill past a screen edge or the taskbar.
+fn frame_for_area(area: &RECT, dpi: f32, count: usize) -> (PickerGeometry, i32, i32) {
+    let dpi = if dpi.is_finite() && dpi > 0.0 {
+        dpi
     } else {
-        RECT {
-            left: monitor.left,
-            top: monitor.top,
-            right: monitor.right,
-            bottom: monitor.bottom,
-        }
+        1.0
     };
-    (monitor, area)
+    let work_w = (area.right - area.left).max(1);
+    let work_h = (area.bottom - area.top).max(1);
+    let geometry = geometry_for_area(
+        ((work_w as f32 / dpi).floor() as i32).max(1),
+        ((work_h as f32 / dpi).floor() as i32).max(1),
+        count,
+    );
+    let paging = count > geometry.page_size;
+    let (w_dips, h_dips) = geometry.frame_size(geometry.page_size.min(count), paging);
+    let width = ((w_dips as f32 * dpi).round() as i32).clamp(1, work_w);
+    let height = ((h_dips as f32 * dpi).round() as i32).clamp(1, work_h);
+    (geometry, width, height)
 }
 
 fn release_thumbs(state: &mut PickerState) {
@@ -437,7 +463,7 @@ fn paint(state: &PickerState) {
         return;
     }
     let dip = state.dpi;
-    let pal = design::palette(state.is_dark);
+    let pal = design::active_palette(state.is_dark);
 
     let mut client = RECT {
         left: 0,
@@ -873,22 +899,17 @@ fn apply_action(state: &mut PickerState, action: PickerAction) {
 }
 
 fn refresh_geometry(state: &mut PickerState) {
+    // The work area can change while the picker is open (DPI or taskbar change).
+    if let Some(area) = monitor_work_rect(state.target_handle) {
+        state.monitor_area = area;
+    }
     state.dpi = win32::dpi_scale(state.hwnd as usize);
-    state.geometry = geometry_for_area(
-        state.monitor_area.right - state.monitor_area.left,
-        state.monitor_area.bottom - state.monitor_area.top,
-        state.ordered.len(),
-    );
+    let (geometry, w, h) = frame_for_area(&state.monitor_area, state.dpi, state.ordered.len());
+    state.geometry = geometry;
     state.pages = page_count(state.ordered.len(), state.geometry.page_size);
     state.paging = state.ordered.len() > state.geometry.page_size;
     state.page = state.page.min(state.pages.saturating_sub(1));
 
-    let (w_dips, h_dips) = state.geometry.frame_size(
-        state.geometry.page_size.min(state.ordered.len()),
-        state.paging,
-    );
-    let w = ((w_dips as f32) * state.dpi).round() as i32;
-    let h = ((h_dips as f32) * state.dpi).round() as i32;
     let (x, y) = center_in_area(
         (
             state.monitor_area.left,
@@ -1148,19 +1169,14 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         .map(|window| window.exe_path.to_ascii_lowercase())
         .collect();
     let (target, area) = work_area_for(monitor, anchor);
-    let work_w = (area.right - area.left).max(1);
-    let work_h = (area.bottom - area.top).max(1);
-    let geometry = geometry_for_area(work_w, work_h, windows.len());
-    let pages = page_count(windows.len(), geometry.page_size);
-    let paging = windows.len() > geometry.page_size;
-    let (w_dips, h_dips) = geometry.frame_size(geometry.page_size.min(windows.len()), paging);
     let dpi = if target.dpi_scale > 0.0 {
         target.dpi_scale
     } else {
         1.0
     };
-    let width = ((w_dips as f32) * dpi).round() as i32;
-    let height = ((h_dips as f32) * dpi).round() as i32;
+    let (geometry, width, height) = frame_for_area(&area, dpi, windows.len());
+    let pages = page_count(windows.len(), geometry.page_size);
+    let paging = windows.len() > geometry.page_size;
     let (x, y) = center_in_area(
         (area.left, area.top, area.right, area.bottom),
         width,
@@ -1222,7 +1238,7 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
             (&dark as *const u32).cast(),
             size_of::<u32>() as u32,
         );
-        let border = gdi_rgb(design::palette(is_dark).border_rgb);
+        let border = gdi_rgb(design::active_palette(is_dark).border_rgb);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,
@@ -1403,6 +1419,31 @@ mod tests {
         assert_eq!(HEADER_DIPS, 58.0);
         assert_eq!(PAGING_DIPS, 43.0);
         assert_eq!(CORNER_DIPS, 10.0);
+    }
+
+    #[test]
+    fn frame_uses_dip_work_area_and_stays_inside_it() {
+        // 1920x1032 physical work area at 150%: the grid must be computed for the
+        // 1280x688 DIP area, exactly as at 100% on a 1280x688 work area.
+        let area = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1032,
+        };
+        let (geometry, w, h) = frame_for_area(&area, 1.5, 9);
+        assert_eq!(geometry, geometry_for_area(1280, 688, 9));
+        assert!(w <= 1920 && h <= 1032, "{w}x{h}");
+
+        // A tiny work area clamps the physical frame instead of overflowing it.
+        let tiny = RECT {
+            left: 0,
+            top: 0,
+            right: 300,
+            bottom: 200,
+        };
+        let (_, w, h) = frame_for_area(&tiny, 2.0, 4);
+        assert!((1..=300).contains(&w) && (1..=200).contains(&h), "{w}x{h}");
     }
 
     fn sample_window(hwnd: usize, exe: &str) -> RunningWindow {

@@ -297,15 +297,33 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
         SettingsSearchEntry::new(
             SettingsPage::DynamicIsland,
+            "DynamicIslandStyleLabel",
+            &loc::t("DynamicIslandTitle"),
+            "dynamic island style notch floating pill",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::DynamicIsland,
+            "DynamicIslandLayoutLabel",
+            &loc::t("DynamicIslandTitle"),
+            "dynamic island layout paged strip carousel",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::DynamicIsland,
+            "DynamicIslandShowFocusWidgets",
+            &loc::t("DynamicIslandTitle"),
+            "dynamic island focus mode widgets show",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::DynamicIsland,
             "DynamicIslandVisibility",
             &loc::t("DynamicIslandTitle"),
-            "dynamic island visibility desktop always top",
+            "dynamic island visibility desktop always top above windows full screen",
         ),
         SettingsSearchEntry::new(
             SettingsPage::DynamicIsland,
             "DynamicIslandHideFullscreen",
             &loc::t("DynamicIslandTitle"),
-            "dynamic island fullscreen hide",
+            "dynamic island fullscreen hide app display",
         ),
         SettingsSearchEntry::new(
             SettingsPage::DynamicIsland,
@@ -334,11 +352,46 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "WeatherUnit",
         ),
         SettingsSearchEntry::widget_setting(
+            "weather",
+            "WeatherCompactMode",
+            &loc::t("WidgetWeather"),
+            "weather compact mode chip",
+            "WeatherCompactMode",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "storage",
+            "StorageCompactMode",
+            &loc::t("WidgetStorage"),
+            "storage compact mode drive disk",
+            "StorageCompactMode",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "media",
+            "WidgetShowInDockMedia",
+            &loc::t("WidgetMedia"),
+            "show media music player dock",
+            "ShowMedia",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "countdown",
+            "CountdownDefaultMinutes",
+            &loc::t("WidgetCountdown"),
+            "countdown timer default minutes duration",
+            "CountdownDefaultMinutes",
+        ),
+        SettingsSearchEntry::widget_setting(
             "bluetoothbattery",
             "WirelessBatteryAlertLabel",
             &loc::t("WidgetBluetoothBattery"),
             "wireless bluetooth battery low alert threshold percent",
             "WirelessBatteryLowThreshold",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "bluetoothbattery",
+            "RestoreIgnoredDevices",
+            &loc::t("WidgetBluetoothBattery"),
+            "wireless bluetooth restore ignored hidden devices",
+            "RestoreIgnoredDevices",
         ),
         SettingsSearchEntry::widget_setting(
             "focus",
@@ -361,11 +414,12 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "pomodoro sessions count rounds",
             "FocusSessions",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "aiusage_claude",
             "AiUsageRingLabel",
-            &loc::t("Widgets"),
+            &loc::t("WidgetAiUsage"),
             "ai usage ring quota highest session weekly",
+            "AiUsageRingLabel",
         ),
         SettingsSearchEntry::new(
             SettingsPage::Widgets,
@@ -373,12 +427,37 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             &loc::t("WidgetDensity"),
             "density override per widget shrink priority compact full",
         ),
+        SettingsSearchEntry::new(
+            SettingsPage::Widgets,
+            "ShrinkPriority",
+            &loc::t("WidgetDensity"),
+            "shrink priority overflow compact bias",
+        ),
         // Themes
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
+            "ThemePack",
+            &loc::t("SectionTheme"),
+            "theme pack gallery presets catppuccin gruvbox nord prism solarized tokyo night",
+        ),
+        SettingsSearchEntry::with_row_id(
+            SettingsPage::Themes,
+            "ThemeStudioTitle",
+            &loc::t("SectionTheme"),
+            "theme studio custom preset liquid glass acrylic mica oled flat minimal vibrant",
+            "ThemeStudio",
+        ),
         SettingsSearchEntry::new(
             SettingsPage::Themes,
             "Theme",
             &loc::t("SectionTheme"),
             "dark light system appearance",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
+            "ThemeApplicationIcons",
+            &loc::t("SectionTheme"),
+            "application icons theme icon pack",
         ),
         SettingsSearchEntry::new(
             SettingsPage::Themes,
@@ -398,6 +477,13 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "DockCornerRadius",
             &loc::t("SectionTheme"),
             "round corners radius visual",
+        ),
+        SettingsSearchEntry::with_row_id(
+            SettingsPage::Themes,
+            "ThemeAdvancedTokens",
+            &loc::t("SectionTheme"),
+            "theme tokens editor advanced color brush",
+            "ThemeTokens",
         ),
         SettingsSearchEntry::new(
             SettingsPage::Themes,
@@ -561,19 +647,6 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
     ];
 
-    entries.push(SettingsSearchEntry::new(
-        SettingsPage::DynamicIsland,
-        "DynamicIslandVisibility",
-        &loc::t("DynamicIslandTitle"),
-        "island visibility above windows desktop full screen",
-    ));
-    entries.push(SettingsSearchEntry::new(
-        SettingsPage::DynamicIsland,
-        "DynamicIslandHideFullscreen",
-        &loc::t("DynamicIslandTitle"),
-        "island hide fullscreen app display",
-    ));
-
     for widget in widgets::catalog_widgets() {
         entries.push(SettingsSearchEntry {
             page: SettingsPage::Widgets,
@@ -604,27 +677,50 @@ pub(crate) fn search<'a>(
         return Vec::new();
     }
 
-    entries
-        .iter()
-        .filter(|entry| {
-            let haystack = normalize(&format!(
-                "{} {} {} {}",
-                entry.title,
-                entry.section,
-                entry.page.title(),
-                entry.keywords
-            ));
-            terms.iter().all(|term| haystack.contains(term))
-        })
-        .take(80)
-        .collect()
+    let mut haystack = String::with_capacity(128);
+    let mut results = Vec::new();
+    for entry in entries {
+        haystack.clear();
+        normalize_into(&entry.title, &mut haystack);
+        haystack.push(' ');
+        normalize_into(&entry.section, &mut haystack);
+        haystack.push(' ');
+        normalize_into(&entry.page.title(), &mut haystack);
+        haystack.push(' ');
+        normalize_into(entry.keywords, &mut haystack);
+        if terms.iter().all(|term| haystack.contains(term.as_str())) {
+            results.push(entry);
+            if results.len() >= 80 {
+                break;
+            }
+        }
+    }
+    results
+}
+
+fn normalize_into(value: &str, out: &mut String) {
+    for ch in value.chars() {
+        match ch {
+            'ı' | 'İ' | 'I' => out.push('i'),
+            '\u{0307}' => {}
+            c if c.is_ascii() => out.push(c.to_ascii_lowercase()),
+            c => {
+                for lc in c.to_lowercase() {
+                    if lc == 'ı' {
+                        out.push('i');
+                    } else if lc != '\u{0307}' {
+                        out.push(lc);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn normalize(value: &str) -> String {
-    value
-        .to_lowercase()
-        .replace(['ı', 'İ'], "i")
-        .replace('\u{0307}', "")
+    let mut out = String::with_capacity(value.len());
+    normalize_into(value, &mut out);
+    out
 }
 
 #[cfg(test)]
