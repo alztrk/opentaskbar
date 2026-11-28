@@ -13,10 +13,10 @@ use std::time::Duration;
 use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
     WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE, WINHTTP_FLAG_SECURE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpAddRequestHeaders,
-    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
-    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-    WinHttpSetTimeouts,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+    WinHttpSendRequest, WinHttpSetTimeouts,
 };
 
 use super::win32_helpers::wide;
@@ -100,6 +100,32 @@ pub fn request<F: FnMut(&[u8])>(
     method: &str,
     mut sink: F,
 ) -> Option<u32> {
+    request_with_meta(cfg, host, path, method, false, |chunk| {
+        sink(chunk);
+        true
+    })
+    .map(|(status, _)| status)
+}
+
+/// Parses a textual `Retry-After` header value in seconds.
+pub fn parse_retry_after(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 10 {
+        return None;
+    }
+    value.parse::<u32>().ok().filter(|&secs| secs > 0)
+}
+
+/// Synchronous WinHTTP request with optional `Retry-After` reading and early-stop streaming
+/// (returning `false` from `sink` stops reading immediately).
+pub fn request_with_meta<F: FnMut(&[u8]) -> bool>(
+    cfg: &HttpCfg,
+    host: &str,
+    path: &str,
+    method: &str,
+    read_retry_after: bool,
+    mut sink: F,
+) -> Option<(u32, Option<u32>)> {
     let agent = wide(&cfg.agent);
     let host_w = wide(host);
     let path_w = wide(path);
@@ -183,29 +209,71 @@ pub fn request<F: FnMut(&[u8])>(
                 &mut status_size,
                 std::ptr::null_mut(),
             );
+            let retry_after = if read_retry_after {
+                let mut retry = 0u32;
+                let mut retry_sz = size_of::<u32>() as u32;
+                if WinHttpQueryHeaders(
+                    request,
+                    WINHTTP_QUERY_RETRY_AFTER | WINHTTP_QUERY_FLAG_NUMBER,
+                    std::ptr::null(),
+                    (&mut retry as *mut u32).cast(),
+                    &mut retry_sz,
+                    std::ptr::null_mut(),
+                ) != 0
+                    && retry > 0
+                {
+                    Some(retry)
+                } else {
+                    let mut text = [0u16; 32];
+                    let mut text_sz = text.len() as u32;
+                    (WinHttpQueryHeaders(
+                        request,
+                        WINHTTP_QUERY_RETRY_AFTER,
+                        std::ptr::null(),
+                        text.as_mut_ptr().cast(),
+                        &mut text_sz,
+                        std::ptr::null_mut(),
+                    ) != 0)
+                        .then(|| {
+                            let len = (text_sz as usize).min(text.len());
+                            String::from_utf16_lossy(&text[..len])
+                        })
+                        .and_then(|value| parse_retry_after(&value))
+                }
+            } else {
+                None
+            };
             let mut total = 0usize;
+            let mut buffer = Vec::new();
             'read: loop {
                 let mut available = 0u32;
                 if WinHttpQueryDataAvailable(request, &mut available) == 0 || available == 0 {
                     break;
                 }
+                let to_read = (available as usize).min(64 * 1024);
                 if let Some(limit) = cfg.max_response_bytes
-                    && total.saturating_add(available as usize) > limit
+                    && total.saturating_add(to_read) > limit
                 {
                     break 'read;
                 }
-                let mut buffer = vec![0u8; available as usize];
+                buffer.resize(to_read, 0);
                 let mut read = 0u32;
-                if WinHttpReadData(request, buffer.as_mut_ptr().cast(), available, &mut read) == 0
+                if WinHttpReadData(
+                    request,
+                    buffer.as_mut_ptr().cast(),
+                    to_read as u32,
+                    &mut read,
+                ) == 0
                     || read == 0
                 {
                     break;
                 }
-                buffer.truncate(read as usize);
-                total = total.saturating_add(buffer.len());
-                sink(&buffer);
+                total = total.saturating_add(read as usize);
+                if !sink(&buffer[..read as usize]) {
+                    break 'read;
+                }
             }
-            Some(status)
+            Some((status, retry_after))
         } else {
             None
         };

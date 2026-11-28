@@ -4,7 +4,6 @@
 //! per-stream result grid. All network work runs on detached worker threads behind an
 //! `AtomicBool` cancellation flag so the dock UI thread never blocks.
 
-use std::mem::size_of;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,13 +11,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
-use windows_sys::Win32::Networking::WinHttp::{
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-    WinHttpSetTimeouts,
-};
 
+use crate::platform::http;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
 /// `NetSpeedWidget.StreamCount`.
@@ -262,80 +256,26 @@ pub fn measure_ping(cancel: &AtomicBool) -> Option<u32> {
 }
 
 fn download_stream(index: usize, cancel: Arc<AtomicBool>, deadline: Instant) -> u64 {
-    let agent: Vec<u16> = "OpenTaskbar/1.0\0".encode_utf16().collect();
-    let host_w: Vec<u16> = TEST_HOST.encode_utf16().chain(Some(0)).collect();
-    let verb_w: Vec<u16> = "GET\0".encode_utf16().collect();
-    let path_str = format!("/__down?bytes=104857600&stream={index}");
-    let path_w: Vec<u16> = path_str.encode_utf16().chain(Some(0)).collect();
-
-    unsafe {
-        let session = WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return 0;
+    let mut cfg = http::HttpCfg::new("OpenTaskbar/1.0");
+    cfg.port = TEST_PORT;
+    let t = CONNECT_TIMEOUT_MS as u32;
+    cfg.timeouts = [t, t, t, t];
+    let path = format!("/__down?bytes=104857600&stream={index}");
+    let mut total = 0u64;
+    let started = Instant::now();
+    let ok = http::request_with_meta(&cfg, TEST_HOST, &path, "GET", false, |chunk| {
+        if Instant::now() >= deadline || cancel.load(Ordering::Acquire) {
+            return false;
         }
-        let timeout = CONNECT_TIMEOUT_MS as i32;
-        let _ = WinHttpSetTimeouts(session, timeout, timeout, timeout, timeout);
-        let connect = WinHttpConnect(session, host_w.as_ptr(), TEST_PORT, 0);
-        if connect.is_null() {
-            WinHttpCloseHandle(session);
-            return 0;
-        }
-        let req = WinHttpOpenRequest(
-            connect,
-            verb_w.as_ptr(),
-            path_w.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        );
-        if req.is_null() {
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return 0;
-        }
-        let sent = WinHttpSendRequest(req, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) != 0
-            && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
-        let mut total = 0u64;
-        let started = Instant::now();
-        if sent {
-            let mut status: u32 = 0;
-            let mut status_sz = size_of::<u32>() as u32;
-            let status_ok = WinHttpQueryHeaders(
-                req,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                std::ptr::null(),
-                (&mut status as *mut u32).cast(),
-                &mut status_sz,
-                std::ptr::null_mut(),
-            ) != 0
-                && (200..300).contains(&status);
-            if status_ok {
-                let mut buf = [0u8; 64 * 1024];
-                while Instant::now() < deadline && !cancel.load(Ordering::Acquire) {
-                    let mut read: u32 = 0;
-                    if WinHttpReadData(req, buf.as_mut_ptr().cast(), buf.len() as u32, &mut read)
-                        == 0
-                        || read == 0
-                    {
-                        break;
-                    }
-                    total = total.saturating_add(u64::from(read));
-                }
-            }
-        }
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        let secs = started.elapsed().as_secs_f64().max(0.1);
-        (total as f64 / secs) as u64
+        total = total.saturating_add(chunk.len() as u64);
+        Instant::now() < deadline && !cancel.load(Ordering::Acquire)
+    })
+    .is_some_and(|(status, _)| (200..300).contains(&status));
+    if !ok {
+        return 0;
     }
+    let secs = started.elapsed().as_secs_f64().max(0.1);
+    (total as f64 / secs) as u64
 }
 
 /// Formats throughput in reference style (`Mbit/s` above 1 Mbit, else `kbit/s`).

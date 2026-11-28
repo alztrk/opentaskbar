@@ -442,9 +442,7 @@ struct MenuSession {
     done: AtomicBool,
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom

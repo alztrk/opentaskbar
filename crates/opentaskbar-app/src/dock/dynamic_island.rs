@@ -140,9 +140,7 @@ const fn build_default_widget_order() -> [&'static str; catalog_widget_count()] 
 const DEFAULT_WIDGET_ORDER_ARRAY: [&str; catalog_widget_count()] = build_default_widget_order();
 const DEFAULT_WIDGET_ORDER: &[&str] = &DEFAULT_WIDGET_ORDER_ARRAY;
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn loword_i16(v: isize) -> f32 {
     (v as u32 & 0xffff) as i16 as f32

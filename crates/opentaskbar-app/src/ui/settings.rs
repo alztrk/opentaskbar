@@ -885,122 +885,43 @@ pub(crate) mod window_chrome {
 }
 
 // ---------------------------------------------------------------------------
-// Full backup (.otbackup) — small stored-ZIP writer/reader, no extra crate.
+// Full backup (.otbackup) stored-ZIP writer/reader via the workspace `zip` crate.
 // `FullBackupArchive.cs` packs manifest + settings + pins + active theme folder.
 // ---------------------------------------------------------------------------
 
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
-fn put_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
 /// Creates a ZIP archive with stored (uncompressed) entries.
 fn zip_store(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut offsets = Vec::with_capacity(entries.len());
-    for (name, data) in entries {
-        let name = name.as_bytes();
-        let crc = crc32(data);
-        offsets.push((out.len() as u32, name.len() as u16, crc));
-        put_u32(&mut out, 0x0403_4b50);
-        put_u16(&mut out, 20);
-        put_u16(&mut out, 0x0800); // UTF-8 names
-        put_u16(&mut out, 0); // stored
-        put_u16(&mut out, 0);
-        put_u16(&mut out, 0x0021); // 1980-01-01
-        put_u32(&mut out, crc);
-        put_u32(&mut out, data.len() as u32);
-        put_u32(&mut out, data.len() as u32);
-        put_u16(&mut out, name.len() as u16);
-        put_u16(&mut out, 0);
-        out.extend_from_slice(name);
-        out.extend_from_slice(data);
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            if writer.start_file(name, opts).is_ok() {
+                let _ = writer.write_all(data);
+            }
+        }
+        let _ = writer.finish();
     }
-    let cd_start = out.len() as u32;
-    for ((name, data), (offset, name_len, crc)) in entries.iter().zip(&offsets) {
-        let name = name.as_bytes();
-        put_u32(&mut out, 0x0201_4b50);
-        put_u16(&mut out, 20);
-        put_u16(&mut out, 20);
-        put_u16(&mut out, 0x0800);
-        put_u16(&mut out, 0);
-        put_u16(&mut out, 0);
-        put_u16(&mut out, 0x0021);
-        put_u32(&mut out, *crc);
-        put_u32(&mut out, data.len() as u32);
-        put_u32(&mut out, data.len() as u32);
-        put_u16(&mut out, *name_len);
-        put_u16(&mut out, 0);
-        put_u16(&mut out, 0);
-        put_u16(&mut out, 0);
-        put_u16(&mut out, 0);
-        put_u32(&mut out, 0);
-        put_u32(&mut out, *offset);
-        out.extend_from_slice(name);
-    }
-    let cd_size = out.len() as u32 - cd_start;
-    put_u32(&mut out, 0x0605_4b50);
-    put_u16(&mut out, 0);
-    put_u16(&mut out, 0);
-    put_u16(&mut out, entries.len() as u16);
-    put_u16(&mut out, entries.len() as u16);
-    put_u32(&mut out, cd_size);
-    put_u32(&mut out, cd_start);
-    put_u16(&mut out, 0);
-    out
-}
-
-fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
-}
-
-fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    cursor.into_inner()
 }
 
 /// Reads stored ZIP entries (rejects compressed entries with a clear error).
 fn zip_unstore(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    use std::io::Read as _;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut out = BTreeMap::new();
-    let mut at = 0usize;
-    while at + 30 <= bytes.len() {
-        if read_u32(bytes, at) != Some(0x0403_4b50) {
-            break;
-        }
-        let method = read_u16(bytes, at + 8).ok_or("truncated local header")?;
-        if method != 0 {
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+        if file.compression() != zip::CompressionMethod::Stored {
             return Err("compressed entries are not supported".to_owned());
         }
-        let size = read_u32(bytes, at + 22).ok_or("truncated size")? as usize;
-        let name_len = read_u16(bytes, at + 26).ok_or("truncated name")? as usize;
-        let extra_len = read_u16(bytes, at + 28).ok_or("truncated extra")? as usize;
-        let name_start = at + 30;
-        let data_start = name_start + name_len + extra_len;
-        let data_end = data_start + size;
-        if data_end > bytes.len() {
-            return Err("archive entry exceeds file".to_owned());
-        }
-        let name = std::str::from_utf8(&bytes[name_start..data_start - extra_len])
-            .map_err(|_| "invalid entry name".to_owned())?;
-        out.insert(name.to_owned(), bytes[data_start..data_end].to_vec());
-        at = data_end;
+        let name = file.name().map_err(|e| e.to_string())?.into_owned();
+        let mut data = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut data).map_err(|e| e.to_string())?;
+        out.insert(name, data);
     }
     Ok(out)
 }
@@ -1089,19 +1010,7 @@ fn chrono_stamp() -> String {
     )
 }
 
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    // Howard Hinnant's days-from-civil inverse (Unix epoch = 1970-01-01).
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    (y + i64::from(m <= 2), m, d)
-}
+use opentaskbar_core::civil_from_days;
 
 #[derive(Clone, Debug, Default)]
 struct BackupPreview {

@@ -265,9 +265,7 @@ fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
     design::d2d::d2d_color(c, a)
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom

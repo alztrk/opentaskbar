@@ -48,9 +48,7 @@ const ID_OK: usize = 102;
 const ID_CANCEL: usize = 103;
 const EM_SETSEL: u32 = 0x00B1;
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn colorref(c: Rgb) -> COLORREF {
     u32::from(c.0) | (u32::from(c.1) << 8) | (u32::from(c.2) << 16)

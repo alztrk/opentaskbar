@@ -15,9 +15,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const TRAY_WINDOW_CLASS: &str = "Shell_TrayWnd";
 const SECONDARY_TRAY_WINDOW_CLASS: &str = "Shell_SecondaryTrayWnd";
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn process_id(hwnd: HWND) -> u32 {
     let mut pid = 0u32;

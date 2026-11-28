@@ -782,9 +782,7 @@ struct FlyoutState<'a> {
     done: AtomicBool,
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 /// Direct2D + DirectWrite anti-aliased renderer cached per UI thread.
 ///

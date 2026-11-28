@@ -231,9 +231,7 @@ impl PickerD2d {
     }
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
     design::d2d::d2d_color(c, a)

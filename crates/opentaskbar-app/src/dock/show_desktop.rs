@@ -157,9 +157,7 @@ pub struct ShowDesktopCorner {
     state: *mut CornerState,
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 impl ShowDesktopCorner {
     /// Edge-aware strip: bottom-right hairline on the bottom dock, a horizontal

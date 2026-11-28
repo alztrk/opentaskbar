@@ -44,9 +44,7 @@ pub fn broadcast_wparam(source: &str) -> usize {
     }
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn find_primary_tray() -> HWND {
     // Never act on a fake Shell_TrayWnd owned by OpenTaskbar itself.

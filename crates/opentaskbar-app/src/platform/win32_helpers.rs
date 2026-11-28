@@ -40,9 +40,7 @@ pub fn os_build_number() -> u32 {
 }
 
 /// Null-terminated UTF-16 buffer for Win32/WinHTTP APIs.
-pub fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+pub use opentaskbar_core::wide;
 
 /// 32-bit-safe `SetWindowLongPtrW`.
 ///

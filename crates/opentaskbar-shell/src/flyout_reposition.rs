@@ -684,9 +684,7 @@ pub fn is_enabled() -> bool {
 
 // ---- Win32 helpers -------------------------------------------------------------
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn process_exe(pid: u32) -> Option<String> {
     if pid == 0 {

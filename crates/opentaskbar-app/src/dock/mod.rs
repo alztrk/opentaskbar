@@ -612,9 +612,7 @@ fn start_toggle_allowed(last_toggle: Option<Instant>, now: Instant) -> bool {
     last_toggle.is_none_or(|last| now.saturating_duration_since(last) >= START_TOGGLE_DEBOUNCE)
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use opentaskbar_core::wide;
 
 fn loword_i16(v: isize) -> f32 {
     (v as u32 & 0xffff) as i16 as f32
