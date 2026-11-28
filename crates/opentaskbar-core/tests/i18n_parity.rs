@@ -264,7 +264,7 @@ const ENGLISH_IDENTICAL_BUDGET: &[(&str, usize)] = &[
     ("nl-NL", 260),
     ("pl-PL", 232),
     ("pt-BR", 241),
-    ("ru-RU", 211),
+    ("ru-RU", 23),
     ("tr-TR", 21),
     ("uk-UA", 210),
     ("zh-CN", 218),
