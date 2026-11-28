@@ -366,6 +366,24 @@ pub enum DynamicIslandLayout {
     Strip,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DynamicIslandIdleMode {
+    #[default]
+    Full,
+    Minimal,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DynamicIslandClosedDisplay {
+    #[default]
+    MinimalLine,
+    Clock,
+    Music,
+    AiUsage,
+    Hidden,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockWidthMode {
     #[default]
@@ -621,7 +639,7 @@ fn is_retired_ai_provider_widget(id: &str) -> bool {
 }
 
 /// All `DockWidgetService` IDs, including the hidden legacy aliases `Date` and `ShowDesktop`.
-pub const SUPPORTED_WIDGET_IDS: [&str; 24] = [
+pub const SUPPORTED_WIDGET_IDS: [&str; 28] = [
     "Clock",
     "Weather",
     "DayProgress",
@@ -644,6 +662,10 @@ pub const SUPPORTED_WIDGET_IDS: [&str; 24] = [
     "QuickSettings",
     "KeyboardLayout",
     "Focus",
+    "Clipboard",
+    "FileShelf",
+    "Todo",
+    "AiAgents",
     "Date",
     "ShowDesktop",
 ];
@@ -748,6 +770,15 @@ fn canonical_builtin_widget_id(id: &str) -> Option<&'static str> {
     }
     if eq_compact_ascii(id, "keyboard") {
         return Some("KeyboardLayout");
+    }
+    if eq_compact_ascii(id, "shelf") {
+        return Some("FileShelf");
+    }
+    if eq_compact_ascii(id, "tasks") {
+        return Some("Todo");
+    }
+    if eq_compact_ascii(id, "agents") {
+        return Some("AiAgents");
     }
     None
 }
@@ -1505,6 +1536,570 @@ impl DockSettings {
         );
     }
 
+    fn extra_bool(&self, key: &str, default: bool) -> bool {
+        self.extra
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    }
+
+    fn set_extra_bool(&mut self, key: &str, value: bool) {
+        self.extra.insert(key.to_owned(), Value::Bool(value));
+    }
+
+    fn extra_u32_clamped(&self, key: &str, default: u32, min: u32, max: u32) -> u32 {
+        self.extra
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .map(|v| v.clamp(min as u64, max as u64) as u32)
+                    .or_else(|| {
+                        value
+                            .as_i64()
+                            .map(|v| v.clamp(min as i64, max as i64) as u32)
+                    })
+            })
+            .unwrap_or(default)
+    }
+
+    fn set_extra_u32_clamped(&mut self, key: &str, value: u32, min: u32, max: u32) {
+        self.extra
+            .insert(key.to_owned(), Value::from(value.clamp(min, max)));
+    }
+
+    fn extra_usize_clamped(&self, key: &str, default: usize, min: usize, max: usize) -> usize {
+        self.extra
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .map(|v| v.clamp(min as u64, max as u64) as usize)
+                    .or_else(|| {
+                        value
+                            .as_i64()
+                            .map(|v| v.clamp(min as i64, max as i64) as usize)
+                    })
+            })
+            .unwrap_or(default)
+    }
+
+    fn set_extra_usize_clamped(&mut self, key: &str, value: usize, min: usize, max: usize) {
+        self.extra
+            .insert(key.to_owned(), Value::from(value.clamp(min, max) as u64));
+    }
+
+    fn extra_string(&self, key: &str) -> String {
+        self.extra
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default()
+    }
+
+    fn set_extra_string(&mut self, key: &str, value: String) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            self.extra.remove(key);
+        } else {
+            self.extra
+                .insert(key.to_owned(), Value::String(trimmed.to_owned()));
+        }
+    }
+
+    fn extra_string_list(&self, key: &str) -> Vec<String> {
+        let Some(items) = self.extra.get(key).and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(text) = item.as_str() else {
+                continue;
+            };
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && seen.insert(ordinal_ignore_case_key(trimmed)) {
+                out.push(trimmed.to_owned());
+            }
+        }
+        out
+    }
+
+    fn set_extra_string_list(&mut self, key: &str, values: Vec<String>) {
+        let mut seen = BTreeSet::new();
+        let mut cleaned = Vec::with_capacity(values.len());
+        for item in values {
+            let trimmed = item.trim();
+            if !trimmed.is_empty() && seen.insert(ordinal_ignore_case_key(trimmed)) {
+                cleaned.push(Value::String(trimmed.to_owned()));
+            }
+        }
+        if cleaned.is_empty() {
+            self.extra.remove(key);
+        } else {
+            self.extra.insert(key.to_owned(), Value::Array(cleaned));
+        }
+    }
+
+    // ---- N4 Dynamic Island Smart Behavior ----
+
+    pub fn dynamic_island_idle_mode(&self) -> DynamicIslandIdleMode {
+        match self
+            .extra
+            .get("DynamicIslandIdleMode")
+            .and_then(Value::as_str)
+            .map(str::trim)
+        {
+            Some(value) if value.eq_ignore_ascii_case("Minimal") => DynamicIslandIdleMode::Minimal,
+            Some(value) if value.eq_ignore_ascii_case("Closed") => DynamicIslandIdleMode::Closed,
+            _ => DynamicIslandIdleMode::Full,
+        }
+    }
+
+    pub fn set_dynamic_island_idle_mode(&mut self, v: DynamicIslandIdleMode) {
+        let value = match v {
+            DynamicIslandIdleMode::Full => "Full",
+            DynamicIslandIdleMode::Minimal => "Minimal",
+            DynamicIslandIdleMode::Closed => "Closed",
+        };
+        self.extra.insert(
+            "DynamicIslandIdleMode".to_owned(),
+            Value::String(value.to_owned()),
+        );
+    }
+
+    pub fn dynamic_island_closed_display(&self) -> DynamicIslandClosedDisplay {
+        match self
+            .extra
+            .get("DynamicIslandClosedDisplay")
+            .and_then(Value::as_str)
+            .map(str::trim)
+        {
+            Some(value) if value.eq_ignore_ascii_case("Clock") => DynamicIslandClosedDisplay::Clock,
+            Some(value) if value.eq_ignore_ascii_case("Music") => DynamicIslandClosedDisplay::Music,
+            Some(value) if value.eq_ignore_ascii_case("AiUsage") => {
+                DynamicIslandClosedDisplay::AiUsage
+            }
+            Some(value) if value.eq_ignore_ascii_case("Hidden") => {
+                DynamicIslandClosedDisplay::Hidden
+            }
+            _ => DynamicIslandClosedDisplay::MinimalLine,
+        }
+    }
+
+    pub fn set_dynamic_island_closed_display(&mut self, v: DynamicIslandClosedDisplay) {
+        let value = match v {
+            DynamicIslandClosedDisplay::MinimalLine => "MinimalLine",
+            DynamicIslandClosedDisplay::Clock => "Clock",
+            DynamicIslandClosedDisplay::Music => "Music",
+            DynamicIslandClosedDisplay::AiUsage => "AiUsage",
+            DynamicIslandClosedDisplay::Hidden => "Hidden",
+        };
+        self.extra.insert(
+            "DynamicIslandClosedDisplay".to_owned(),
+            Value::String(value.to_owned()),
+        );
+    }
+
+    pub fn dynamic_island_hover_expand(&self) -> bool {
+        self.extra_bool("DynamicIslandHoverExpand", false)
+    }
+
+    pub fn set_dynamic_island_hover_expand(&mut self, enabled: bool) {
+        self.set_extra_bool("DynamicIslandHoverExpand", enabled);
+    }
+
+    pub fn dynamic_island_hover_delay_ms(&self) -> u32 {
+        self.extra_u32_clamped("DynamicIslandHoverDelayMs", 220, 80, 1000)
+    }
+
+    pub fn set_dynamic_island_hover_delay_ms(&mut self, ms: u32) {
+        self.set_extra_u32_clamped("DynamicIslandHoverDelayMs", ms, 80, 1000);
+    }
+
+    pub fn dynamic_island_auto_close_secs(&self) -> u32 {
+        self.extra_u32_clamped("DynamicIslandAutoCloseSecs", 12, 0, 120)
+    }
+
+    pub fn set_dynamic_island_auto_close_secs(&mut self, secs: u32) {
+        self.set_extra_u32_clamped("DynamicIslandAutoCloseSecs", secs, 0, 120);
+    }
+
+    pub fn dynamic_island_follow_mouse(&self) -> bool {
+        self.extra_bool("DynamicIslandFollowMouse", false)
+    }
+
+    pub fn set_dynamic_island_follow_mouse(&mut self, enabled: bool) {
+        self.set_extra_bool("DynamicIslandFollowMouse", enabled);
+    }
+
+    pub fn dynamic_island_scale(&self) -> f32 {
+        self.extra
+            .get("DynamicIslandScale")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .map_or(1.0, |value| (value as f32).clamp(0.8, 1.35))
+    }
+
+    pub fn set_dynamic_island_scale(&mut self, scale: f32) {
+        let clamped = if scale.is_finite() {
+            scale.clamp(0.8, 1.35)
+        } else {
+            1.0
+        };
+        self.extra.insert(
+            "DynamicIslandScale".to_owned(),
+            Value::from(f64::from(clamped)),
+        );
+    }
+
+    // ---- N1 System HUDs ----
+
+    pub fn hud_volume_enabled(&self) -> bool {
+        self.extra_bool("HudVolumeEnabled", true)
+    }
+
+    pub fn set_hud_volume_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudVolumeEnabled", enabled);
+    }
+
+    pub fn hud_brightness_enabled(&self) -> bool {
+        self.extra_bool("HudBrightnessEnabled", true)
+    }
+
+    pub fn set_hud_brightness_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudBrightnessEnabled", enabled);
+    }
+
+    pub fn hud_capslock_enabled(&self) -> bool {
+        self.extra_bool("HudCapsLockEnabled", true)
+    }
+
+    pub fn set_hud_capslock_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudCapsLockEnabled", enabled);
+    }
+
+    pub fn hud_keyboard_lang_enabled(&self) -> bool {
+        self.extra_bool("HudKeyboardLangEnabled", true)
+    }
+
+    pub fn set_hud_keyboard_lang_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudKeyboardLangEnabled", enabled);
+    }
+
+    pub fn hud_power_enabled(&self) -> bool {
+        self.extra_bool("HudPowerEnabled", true)
+    }
+
+    pub fn set_hud_power_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudPowerEnabled", enabled);
+    }
+
+    pub fn hud_network_enabled(&self) -> bool {
+        self.extra_bool("HudNetworkEnabled", true)
+    }
+
+    pub fn set_hud_network_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudNetworkEnabled", enabled);
+    }
+
+    pub fn hud_bluetooth_enabled(&self) -> bool {
+        self.extra_bool("HudBluetoothEnabled", true)
+    }
+
+    pub fn set_hud_bluetooth_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("HudBluetoothEnabled", enabled);
+    }
+
+    pub fn hud_duration_ms(&self) -> u32 {
+        self.extra_u32_clamped("HudDurationMs", 1600, 600, 6000)
+    }
+
+    pub fn set_hud_duration_ms(&mut self, ms: u32) {
+        self.set_extra_u32_clamped("HudDurationMs", ms, 600, 6000);
+    }
+
+    pub fn any_hud_enabled(&self) -> bool {
+        self.hud_volume_enabled()
+            || self.hud_brightness_enabled()
+            || self.hud_capslock_enabled()
+            || self.hud_keyboard_lang_enabled()
+            || self.hud_power_enabled()
+            || self.hud_network_enabled()
+            || self.hud_bluetooth_enabled()
+    }
+
+    // ---- O5 Windows Notification Mirroring ----
+
+    pub fn island_notifications_enabled(&self) -> bool {
+        self.extra_bool("IslandNotificationsEnabled", true)
+    }
+
+    pub fn set_island_notifications_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("IslandNotificationsEnabled", enabled);
+    }
+
+    pub fn island_notifications_duration_ms(&self) -> u32 {
+        self.extra_u32_clamped("IslandNotificationsDurationMs", 4500, 1500, 12000)
+    }
+
+    pub fn set_island_notifications_duration_ms(&mut self, ms: u32) {
+        self.set_extra_u32_clamped("IslandNotificationsDurationMs", ms, 1500, 12000);
+    }
+
+    pub fn island_notifications_respect_focus(&self) -> bool {
+        self.extra_bool("IslandNotificationsRespectFocus", true)
+    }
+
+    pub fn set_island_notifications_respect_focus(&mut self, enabled: bool) {
+        self.set_extra_bool("IslandNotificationsRespectFocus", enabled);
+    }
+
+    pub fn island_notifications_muted_apps(&self) -> Vec<String> {
+        self.extra_string_list("IslandNotificationsMutedApps")
+    }
+
+    pub fn set_island_notifications_muted_apps(&mut self, apps: Vec<String>) {
+        self.set_extra_string_list("IslandNotificationsMutedApps", apps);
+    }
+
+    // ---- N2 File Shelf ----
+
+    pub fn shelf_enabled(&self) -> bool {
+        self.extra_bool("ShelfEnabled", true)
+    }
+
+    pub fn set_shelf_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("ShelfEnabled", enabled);
+    }
+
+    pub fn shelf_max_items(&self) -> usize {
+        self.extra_usize_clamped("ShelfMaxItems", 16, 4, 32)
+    }
+
+    pub fn set_shelf_max_items(&mut self, max_items: usize) {
+        self.set_extra_usize_clamped("ShelfMaxItems", max_items, 4, 32);
+    }
+
+    // ---- N3 Clipboard History ----
+
+    pub fn clipboard_history_enabled(&self) -> bool {
+        self.extra_bool("ClipboardHistoryEnabled", false)
+    }
+
+    pub fn set_clipboard_history_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("ClipboardHistoryEnabled", enabled);
+    }
+
+    pub fn clipboard_max_items(&self) -> usize {
+        self.extra_usize_clamped("ClipboardMaxItems", 15, 5, 50)
+    }
+
+    pub fn set_clipboard_max_items(&mut self, max_items: usize) {
+        self.set_extra_usize_clamped("ClipboardMaxItems", max_items, 5, 50);
+    }
+
+    pub fn clipboard_ignore_sensitive(&self) -> bool {
+        self.extra_bool("ClipboardIgnoreSensitive", true)
+    }
+
+    pub fn set_clipboard_ignore_sensitive(&mut self, enabled: bool) {
+        self.set_extra_bool("ClipboardIgnoreSensitive", enabled);
+    }
+
+    // ---- N5 Smart OCR & Screenshot ----
+
+    pub fn smart_ocr_enabled(&self) -> bool {
+        self.extra_bool("SmartOcrEnabled", true)
+    }
+
+    pub fn set_smart_ocr_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("SmartOcrEnabled", enabled);
+    }
+
+    pub fn quick_screenshot_enabled(&self) -> bool {
+        self.extra_bool("QuickScreenshotEnabled", true)
+    }
+
+    pub fn set_quick_screenshot_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("QuickScreenshotEnabled", enabled);
+    }
+
+    // ---- N6 Media Waveform & Lyrics ----
+
+    pub fn media_waveform_enabled(&self) -> bool {
+        self.extra_bool("MediaWaveformEnabled", true)
+    }
+
+    pub fn set_media_waveform_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("MediaWaveformEnabled", enabled);
+    }
+
+    pub fn media_lyrics_enabled(&self) -> bool {
+        self.extra_bool("MediaLyricsEnabled", false)
+    }
+
+    pub fn set_media_lyrics_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("MediaLyricsEnabled", enabled);
+    }
+
+    pub fn media_lyrics_pill_enabled(&self) -> bool {
+        self.extra_bool("MediaLyricsPillEnabled", true)
+    }
+
+    pub fn set_media_lyrics_pill_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("MediaLyricsPillEnabled", enabled);
+    }
+
+    // ---- N7 AI Coding Agent Monitor ----
+
+    pub fn agent_monitor_enabled(&self) -> bool {
+        self.extra_bool("AgentMonitorEnabled", false)
+    }
+
+    pub fn set_agent_monitor_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("AgentMonitorEnabled", enabled);
+    }
+
+    pub fn agent_approval_banners(&self) -> bool {
+        self.extra_bool("AgentApprovalBanners", true)
+    }
+
+    pub fn set_agent_approval_banners(&mut self, enabled: bool) {
+        self.set_extra_bool("AgentApprovalBanners", enabled);
+    }
+
+    // ---- N8 To-Do & iCal Calendar ----
+
+    pub fn todo_reminders_enabled(&self) -> bool {
+        self.extra_bool("TodoRemindersEnabled", true)
+    }
+
+    pub fn set_todo_reminders_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("TodoRemindersEnabled", enabled);
+    }
+
+    pub fn ical_feed_url(&self) -> String {
+        self.extra_string("TodoIcalUrl")
+    }
+
+    pub fn set_ical_feed_url(&mut self, url: String) {
+        self.set_extra_string("TodoIcalUrl", url);
+    }
+
+    pub fn ical_poll_minutes(&self) -> u32 {
+        self.extra_u32_clamped("TodoIcalPollMinutes", 15, 5, 120)
+    }
+
+    pub fn set_ical_poll_minutes(&mut self, minutes: u32) {
+        self.set_extra_u32_clamped("TodoIcalPollMinutes", minutes, 5, 120);
+    }
+
+    // ---- N9 Privacy Dots, Quick Power & Multi-Hotkey Conflict Detection ----
+
+    pub fn privacy_indicators_enabled(&self) -> bool {
+        self.extra_bool("PrivacyIndicatorsEnabled", true)
+    }
+
+    pub fn set_privacy_indicators_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("PrivacyIndicatorsEnabled", enabled);
+    }
+
+    pub fn quick_power_actions_enabled(&self) -> bool {
+        self.extra_bool("QuickPowerActionsEnabled", true)
+    }
+
+    pub fn set_quick_power_actions_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("QuickPowerActionsEnabled", enabled);
+    }
+
+    pub fn island_toggle_hotkey(&self) -> String {
+        self.extra_string("IslandToggleHotkey")
+    }
+
+    pub fn set_island_toggle_hotkey(&mut self, hotkey: String) {
+        self.set_extra_string("IslandToggleHotkey", hotkey);
+    }
+
+    pub fn ocr_hotkey(&self) -> String {
+        self.extra_string("OcrHotkey")
+    }
+
+    pub fn set_ocr_hotkey(&mut self, hotkey: String) {
+        self.set_extra_string("OcrHotkey", hotkey);
+    }
+
+    pub fn screenshot_hotkey(&self) -> String {
+        self.extra_string("ScreenshotHotkey")
+    }
+
+    pub fn set_screenshot_hotkey(&mut self, hotkey: String) {
+        self.set_extra_string("ScreenshotHotkey", hotkey);
+    }
+
+    pub fn clipboard_hotkey(&self) -> String {
+        self.extra_string("ClipboardHotkey")
+    }
+
+    pub fn set_clipboard_hotkey(&mut self, hotkey: String) {
+        self.set_extra_string("ClipboardHotkey", hotkey);
+    }
+
+    pub fn extra_hotkey_binding(&self, key: &str) -> Option<crate::hotkey::HotkeyBinding> {
+        let raw = self.extra.get(key).and_then(Value::as_str)?.trim();
+        if is_disabled_hotkey(raw) {
+            return None;
+        }
+        HotkeyBinding::try_parse(raw)
+    }
+
+    pub fn detect_hotkey_conflicts(&self) -> Vec<(String, String)> {
+        let slots: [(&str, Option<HotkeyBinding>); 6] = [
+            ("LauncherHotkey", self.launcher_binding()),
+            ("DockHotkey", self.dock_binding()),
+            (
+                "IslandToggleHotkey",
+                self.extra_hotkey_binding("IslandToggleHotkey"),
+            ),
+            ("OcrHotkey", self.extra_hotkey_binding("OcrHotkey")),
+            (
+                "ScreenshotHotkey",
+                self.extra_hotkey_binding("ScreenshotHotkey"),
+            ),
+            (
+                "ClipboardHotkey",
+                self.extra_hotkey_binding("ClipboardHotkey"),
+            ),
+        ];
+        let mut conflicts = Vec::new();
+        for i in 0..slots.len() {
+            for j in (i + 1)..slots.len() {
+                if HotkeyBinding::equals_binding(slots[i].1.as_ref(), slots[j].1.as_ref()) {
+                    conflicts.push((slots[i].0.to_owned(), slots[j].0.to_owned()));
+                }
+            }
+        }
+        conflicts
+    }
+
+    // ---- Expanded Wireless Battery Controls ----
+
+    pub fn wireless_multi_brand_enabled(&self) -> bool {
+        self.extra_bool("WirelessMultiBrandEnabled", true)
+    }
+
+    pub fn set_wireless_multi_brand_enabled(&mut self, enabled: bool) {
+        self.set_extra_bool("WirelessMultiBrandEnabled", enabled);
+    }
+
+    pub fn wireless_disabled_vendors(&self) -> Vec<String> {
+        self.extra_string_list("WirelessDisabledVendors")
+    }
+
+    pub fn set_wireless_disabled_vendors(&mut self, v: Vec<String>) {
+        self.set_extra_string_list("WirelessDisabledVendors", v);
+    }
+
     pub fn is_widget_enabled(&self, id: &str) -> bool {
         let id = canonical_widget_setting_id(id);
         // `WidgetCoordinator.Apply` deactivates every widget while Focus Mode is on. Clock and
@@ -1731,6 +2326,10 @@ pub fn widget_shrink_priority(id: &str) -> u8 {
             "BluetoothBattery" => 32,
             "Storage" => 35,
             "Battery" => 36,
+            "FileShelf" => 38,
+            "Clipboard" => 42,
+            "AiAgents" => 44,
+            "Todo" => 46,
             "Focus" => 50,
             "DayProgress" => 60,
             "KeyboardLayout" => 75,
@@ -2734,6 +3333,19 @@ impl DockSettings {
         let dock = HotkeyBinding::resolve(self.dock_hotkey, self.custom_dock_hotkey.as_deref());
         if HotkeyBinding::equals_binding(launcher.as_ref(), dock.as_ref()) {
             errors.push("HotkeysConflict");
+        }
+        for (key, error_code) in [
+            ("IslandToggleHotkey", "IslandToggleHotkeyInvalid"),
+            ("OcrHotkey", "OcrHotkeyInvalid"),
+            ("ScreenshotHotkey", "ScreenshotHotkeyInvalid"),
+            ("ClipboardHotkey", "ClipboardHotkeyInvalid"),
+        ] {
+            if let Some(value) = self.extra_str(key)
+                && !value.trim().is_empty()
+                && !HotkeyBinding::is_valid_custom_string(Some(value))
+            {
+                errors.push(error_code);
+            }
         }
 
         // Profiles: unique names (CurrentCultureIgnoreCase), valid widgets/ranges/hotkeys.
@@ -4683,5 +5295,336 @@ mod tests {
                 .map(String::as_str),
             Some("*")
         );
+    }
+
+    #[test]
+    fn new_catalog_widgets_are_supported_canonicalized_and_default_disabled() {
+        assert_eq!(SUPPORTED_WIDGET_IDS.len(), 28);
+        assert_eq!(CATALOG_WIDGET_COUNT, 26);
+
+        let mut settings = DockSettings::default();
+        for (alias, canonical, expected_priority) in [
+            ("clipboard", "Clipboard", 42),
+            ("Clipboard", "Clipboard", 42),
+            ("shelf", "FileShelf", 38),
+            ("fileshelf", "FileShelf", 38),
+            ("FileShelf", "FileShelf", 38),
+            ("todo", "Todo", 46),
+            ("Todo", "Todo", 46),
+            ("tasks", "Todo", 46),
+            ("agents", "AiAgents", 44),
+            ("aiagents", "AiAgents", 44),
+            ("AiAgents", "AiAgents", 44),
+        ] {
+            assert!(is_supported_widget_id(canonical), "{canonical}");
+            assert_eq!(canonical_widget_setting_id(alias), canonical, "{alias}");
+            assert_eq!(widget_shrink_priority(alias), expected_priority, "{alias}");
+            assert!(!settings.is_widget_enabled(alias), "{alias}");
+        }
+
+        settings.set_widget_enabled("clipboard", true);
+        settings.set_widget_enabled("shelf", true);
+        settings.set_widget_enabled("tasks", true);
+        settings.set_widget_enabled("agents", true);
+        assert_eq!(
+            settings.enabled_widgets,
+            vec!["Clipboard", "FileShelf", "Todo", "AiAgents"]
+        );
+        assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+    }
+
+    #[test]
+    fn extra_backed_feature_settings_defaults_clamping_and_round_trip() {
+        let dir = temp_dir("cfg-feature-extras");
+        let path = dir.join("settings.json");
+
+        let mut s = DockSettings::default();
+
+        // Verify defaults.
+        assert_eq!(s.dynamic_island_idle_mode(), DynamicIslandIdleMode::Full);
+        assert_eq!(
+            s.dynamic_island_closed_display(),
+            DynamicIslandClosedDisplay::MinimalLine
+        );
+        assert!(!s.dynamic_island_hover_expand());
+        assert_eq!(s.dynamic_island_hover_delay_ms(), 220);
+        assert_eq!(s.dynamic_island_auto_close_secs(), 12);
+        assert!(!s.dynamic_island_follow_mouse());
+        assert!((s.dynamic_island_scale() - 1.0).abs() < f32::EPSILON);
+
+        assert!(s.hud_volume_enabled());
+        assert!(s.hud_brightness_enabled());
+        assert!(s.hud_capslock_enabled());
+        assert!(s.hud_keyboard_lang_enabled());
+        assert!(s.hud_power_enabled());
+        assert!(s.hud_network_enabled());
+        assert!(s.hud_bluetooth_enabled());
+        assert_eq!(s.hud_duration_ms(), 1600);
+        assert!(s.any_hud_enabled());
+
+        assert!(s.island_notifications_enabled());
+        assert_eq!(s.island_notifications_duration_ms(), 4500);
+        assert!(s.island_notifications_respect_focus());
+        assert!(s.island_notifications_muted_apps().is_empty());
+
+        assert!(s.shelf_enabled());
+        assert_eq!(s.shelf_max_items(), 16);
+
+        assert!(!s.clipboard_history_enabled());
+        assert_eq!(s.clipboard_max_items(), 15);
+        assert!(s.clipboard_ignore_sensitive());
+
+        assert!(s.smart_ocr_enabled());
+        assert!(s.quick_screenshot_enabled());
+
+        assert!(s.media_waveform_enabled());
+        assert!(!s.media_lyrics_enabled());
+        assert!(s.media_lyrics_pill_enabled());
+
+        assert!(!s.agent_monitor_enabled());
+        assert!(s.agent_approval_banners());
+
+        assert!(s.todo_reminders_enabled());
+        assert_eq!(s.ical_feed_url(), "");
+        assert_eq!(s.ical_poll_minutes(), 15);
+
+        assert!(s.privacy_indicators_enabled());
+        assert!(s.quick_power_actions_enabled());
+        assert_eq!(s.island_toggle_hotkey(), "");
+        assert_eq!(s.ocr_hotkey(), "");
+        assert_eq!(s.screenshot_hotkey(), "");
+        assert_eq!(s.clipboard_hotkey(), "");
+
+        assert!(s.wireless_multi_brand_enabled());
+        assert!(s.wireless_disabled_vendors().is_empty());
+
+        // Verify clamping bounds.
+        s.set_dynamic_island_hover_delay_ms(10);
+        assert_eq!(s.dynamic_island_hover_delay_ms(), 80);
+        s.set_dynamic_island_hover_delay_ms(5000);
+        assert_eq!(s.dynamic_island_hover_delay_ms(), 1000);
+
+        s.set_dynamic_island_auto_close_secs(999);
+        assert_eq!(s.dynamic_island_auto_close_secs(), 120);
+
+        s.set_dynamic_island_scale(0.1);
+        assert!((s.dynamic_island_scale() - 0.8).abs() < f32::EPSILON);
+        s.set_dynamic_island_scale(3.0);
+        assert!((s.dynamic_island_scale() - 1.35).abs() < f32::EPSILON);
+        s.set_dynamic_island_scale(f32::NAN);
+        assert!((s.dynamic_island_scale() - 1.0).abs() < f32::EPSILON);
+
+        s.set_hud_duration_ms(100);
+        assert_eq!(s.hud_duration_ms(), 600);
+        s.set_hud_duration_ms(99999);
+        assert_eq!(s.hud_duration_ms(), 6000);
+
+        s.set_island_notifications_duration_ms(100);
+        assert_eq!(s.island_notifications_duration_ms(), 1500);
+        s.set_island_notifications_duration_ms(99999);
+        assert_eq!(s.island_notifications_duration_ms(), 12000);
+
+        s.set_shelf_max_items(1);
+        assert_eq!(s.shelf_max_items(), 4);
+        s.set_shelf_max_items(99);
+        assert_eq!(s.shelf_max_items(), 32);
+
+        s.set_clipboard_max_items(1);
+        assert_eq!(s.clipboard_max_items(), 5);
+        s.set_clipboard_max_items(99);
+        assert_eq!(s.clipboard_max_items(), 50);
+
+        s.set_ical_poll_minutes(1);
+        assert_eq!(s.ical_poll_minutes(), 5);
+        s.set_ical_poll_minutes(999);
+        assert_eq!(s.ical_poll_minutes(), 120);
+
+        // Verify `any_hud_enabled()` toggles off only when all 7 HUD flags are disabled.
+        s.set_hud_volume_enabled(false);
+        s.set_hud_brightness_enabled(false);
+        s.set_hud_capslock_enabled(false);
+        s.set_hud_keyboard_lang_enabled(false);
+        s.set_hud_power_enabled(false);
+        s.set_hud_network_enabled(false);
+        s.set_hud_bluetooth_enabled(false);
+        assert!(!s.any_hud_enabled());
+        s.set_hud_bluetooth_enabled(true);
+        assert!(s.any_hud_enabled());
+
+        // Set non-default values across every getter/setter and round-trip through disk.
+        s.set_dynamic_island_idle_mode(DynamicIslandIdleMode::Closed);
+        s.set_dynamic_island_closed_display(DynamicIslandClosedDisplay::AiUsage);
+        s.set_dynamic_island_hover_expand(true);
+        s.set_dynamic_island_hover_delay_ms(350);
+        s.set_dynamic_island_auto_close_secs(0);
+        s.set_dynamic_island_follow_mouse(true);
+        s.set_dynamic_island_scale(1.15);
+
+        s.set_hud_duration_ms(2400);
+        s.set_island_notifications_enabled(false);
+        s.set_island_notifications_duration_ms(6000);
+        s.set_island_notifications_respect_focus(false);
+        s.set_island_notifications_muted_apps(vec![
+            "Discord".to_owned(),
+            "discord".to_owned(),
+            "  Slack  ".to_owned(),
+            "".to_owned(),
+        ]);
+
+        s.set_shelf_enabled(false);
+        s.set_shelf_max_items(24);
+
+        s.set_clipboard_history_enabled(true);
+        s.set_clipboard_max_items(30);
+        s.set_clipboard_ignore_sensitive(false);
+
+        s.set_smart_ocr_enabled(false);
+        s.set_quick_screenshot_enabled(false);
+
+        s.set_media_waveform_enabled(false);
+        s.set_media_lyrics_enabled(true);
+        s.set_media_lyrics_pill_enabled(false);
+
+        s.set_agent_monitor_enabled(true);
+        s.set_agent_approval_banners(false);
+
+        s.set_todo_reminders_enabled(false);
+        s.set_ical_feed_url("  https://example.com/cal.ics  ".to_owned());
+        s.set_ical_poll_minutes(45);
+
+        s.set_privacy_indicators_enabled(false);
+        s.set_quick_power_actions_enabled(false);
+        s.set_island_toggle_hotkey("Ctrl+Alt+I".to_owned());
+        s.set_ocr_hotkey("Ctrl+Shift+O".to_owned());
+        s.set_screenshot_hotkey("Ctrl+Shift+S".to_owned());
+        s.set_clipboard_hotkey("Ctrl+Shift+V".to_owned());
+
+        s.set_wireless_multi_brand_enabled(false);
+        s.set_wireless_disabled_vendors(vec![
+            "Logitech".to_owned(),
+            "logitech".to_owned(),
+            "Razer".to_owned(),
+        ]);
+
+        assert!(s.validate().is_empty(), "{:?}", s.validate());
+        save_to(&path, &s).unwrap();
+
+        let reloaded = try_load_from(&path).unwrap();
+        assert_eq!(
+            reloaded.dynamic_island_idle_mode(),
+            DynamicIslandIdleMode::Closed
+        );
+        assert_eq!(
+            reloaded.dynamic_island_closed_display(),
+            DynamicIslandClosedDisplay::AiUsage
+        );
+        assert!(reloaded.dynamic_island_hover_expand());
+        assert_eq!(reloaded.dynamic_island_hover_delay_ms(), 350);
+        assert_eq!(reloaded.dynamic_island_auto_close_secs(), 0);
+        assert!(reloaded.dynamic_island_follow_mouse());
+        assert!((reloaded.dynamic_island_scale() - 1.15).abs() < 1e-6);
+
+        assert!(!reloaded.hud_volume_enabled());
+        assert!(!reloaded.hud_brightness_enabled());
+        assert!(!reloaded.hud_capslock_enabled());
+        assert!(!reloaded.hud_keyboard_lang_enabled());
+        assert!(!reloaded.hud_power_enabled());
+        assert!(!reloaded.hud_network_enabled());
+        assert!(reloaded.hud_bluetooth_enabled());
+        assert_eq!(reloaded.hud_duration_ms(), 2400);
+        assert!(reloaded.any_hud_enabled());
+
+        assert!(!reloaded.island_notifications_enabled());
+        assert_eq!(reloaded.island_notifications_duration_ms(), 6000);
+        assert!(!reloaded.island_notifications_respect_focus());
+        assert_eq!(
+            reloaded.island_notifications_muted_apps(),
+            vec!["Discord", "Slack"]
+        );
+
+        assert!(!reloaded.shelf_enabled());
+        assert_eq!(reloaded.shelf_max_items(), 24);
+
+        assert!(reloaded.clipboard_history_enabled());
+        assert_eq!(reloaded.clipboard_max_items(), 30);
+        assert!(!reloaded.clipboard_ignore_sensitive());
+
+        assert!(!reloaded.smart_ocr_enabled());
+        assert!(!reloaded.quick_screenshot_enabled());
+
+        assert!(!reloaded.media_waveform_enabled());
+        assert!(reloaded.media_lyrics_enabled());
+        assert!(!reloaded.media_lyrics_pill_enabled());
+
+        assert!(reloaded.agent_monitor_enabled());
+        assert!(!reloaded.agent_approval_banners());
+
+        assert!(!reloaded.todo_reminders_enabled());
+        assert_eq!(reloaded.ical_feed_url(), "https://example.com/cal.ics");
+        assert_eq!(reloaded.ical_poll_minutes(), 45);
+
+        assert!(!reloaded.privacy_indicators_enabled());
+        assert!(!reloaded.quick_power_actions_enabled());
+        assert_eq!(reloaded.island_toggle_hotkey(), "Ctrl+Alt+I");
+        assert_eq!(reloaded.ocr_hotkey(), "Ctrl+Shift+O");
+        assert_eq!(reloaded.screenshot_hotkey(), "Ctrl+Shift+S");
+        assert_eq!(reloaded.clipboard_hotkey(), "Ctrl+Shift+V");
+
+        assert!(!reloaded.wireless_multi_brand_enabled());
+        assert_eq!(
+            reloaded.wireless_disabled_vendors(),
+            vec!["Logitech", "Razer"]
+        );
+        assert!(reloaded.detect_hotkey_conflicts().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_hotkey_conflicts_catches_collisions_across_all_six_slots() {
+        let mut settings = DockSettings::default();
+        assert!(settings.detect_hotkey_conflicts().is_empty());
+
+        // Collide IslandToggleHotkey with LauncherHotkey (Alt+Space).
+        settings.set_island_toggle_hotkey("alt + space".to_owned());
+        // Collide OcrHotkey with DockHotkey (Ctrl+Alt+D).
+        settings.set_ocr_hotkey("Ctrl+Alt+D".to_owned());
+        // Collide ScreenshotHotkey with ClipboardHotkey (Ctrl+Shift+C).
+        settings.set_screenshot_hotkey("Ctrl+Shift+C".to_owned());
+        settings.set_clipboard_hotkey("shift+ctrl+c".to_owned());
+
+        let conflicts = settings.detect_hotkey_conflicts();
+        assert_eq!(
+            conflicts,
+            vec![
+                ("LauncherHotkey".to_owned(), "IslandToggleHotkey".to_owned()),
+                ("DockHotkey".to_owned(), "OcrHotkey".to_owned()),
+                ("ScreenshotHotkey".to_owned(), "ClipboardHotkey".to_owned()),
+            ]
+        );
+        assert!(
+            settings.extra_hotkey_binding("OcrHotkey").is_some(),
+            "valid extra hotkey must resolve"
+        );
+
+        // Disabled / empty extra hotkeys never conflict or fail validation.
+        settings.set_island_toggle_hotkey("Disabled".to_owned());
+        settings.set_ocr_hotkey(String::new());
+        settings.set_screenshot_hotkey("Esc".to_owned());
+        settings.set_clipboard_hotkey("Backspace".to_owned());
+        assert!(settings.detect_hotkey_conflicts().is_empty());
+        assert!(
+            settings
+                .extra_hotkey_binding("IslandToggleHotkey")
+                .is_none()
+        );
+        assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+
+        // Invalid non-empty extra hotkeys are rejected by validate().
+        settings.set_ocr_hotkey("Win+O".to_owned());
+        settings.set_clipboard_hotkey("not a hotkey".to_owned());
+        let errors = settings.validate();
+        assert!(errors.contains(&"OcrHotkeyInvalid"), "{errors:?}");
+        assert!(errors.contains(&"ClipboardHotkeyInvalid"), "{errors:?}");
     }
 }

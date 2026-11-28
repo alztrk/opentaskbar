@@ -451,4 +451,71 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn canonical_widget_matching_covers_new_catalog_widgets() {
+        let pairs = [
+            ("clipboard", "Clipboard"),
+            ("shelf", "FileShelf"),
+            ("fileshelf", "FileShelf"),
+            ("file_shelf", "FileShelf"),
+            ("todo", "Todo"),
+            ("tasks", "Todo"),
+            ("agents", "AiAgents"),
+            ("aiagents", "AiAgents"),
+            ("ai_agents", "AiAgents"),
+        ];
+
+        let mut placements = HashMap::new();
+        for (alias, canonical) in pairs {
+            assert!(
+                same_widget_id(alias, canonical),
+                "{alias} must match {canonical}"
+            );
+            assert!(
+                same_widget_id(canonical, alias),
+                "{canonical} must match {alias}"
+            );
+            placements.insert(canonical.to_owned(), DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned());
+        }
+        assert!(!same_widget_id("clipboard", "shelf"));
+        assert!(!same_widget_id("todo", "agents"));
+        assert!(!same_widget_id("shelf", "todo"));
+
+        for (alias, canonical) in pairs {
+            assert!(
+                is_assigned_to_display(&placements, alias, "DISPLAY1"),
+                "{alias} must match placement for {canonical}"
+            );
+            assert!(
+                is_assigned_to_any_display(&placements, alias, &["DISPLAY1"]),
+                "{alias} must match connected display placement for {canonical}"
+            );
+        }
+
+        let available = vec![
+            "clipboard".to_owned(),
+            "shelf".to_owned(),
+            "todo".to_owned(),
+            "agents".to_owned(),
+        ];
+        let matched = widgets_for_display(&available, &placements, "DISPLAY1");
+        assert_eq!(matched.len(), 4);
+
+        let ordered = order_widgets(
+            &available,
+            Some(&["AiAgents".to_owned(), "FileShelf".to_owned()]),
+            Some(&["Todo".to_owned(), "Clipboard".to_owned()]),
+            &[],
+        );
+        assert_eq!(ordered, vec!["agents", "shelf", "todo", "clipboard"]);
+
+        let moved = move_widget(&available, "FileShelf", -1);
+        assert_eq!(moved, vec!["FileShelf", "Clipboard", "Todo", "AiAgents"]);
+        let moved_again = move_widget(&moved, "tasks", 1);
+        assert_eq!(
+            moved_again,
+            vec!["FileShelf", "Clipboard", "AiAgents", "Todo"]
+        );
+    }
 }
