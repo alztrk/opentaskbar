@@ -26,6 +26,10 @@ gated against it by `scripts/check-release-version.ps1`.
 - Added transition/error states for Wi-Fi and Bluetooth radio toggles and placed Night Light and Windows quick-settings shortcuts together in Quick Settings.
 - Simplified the system metrics widget and its flyouts; removed the duplicate Show Desktop widget in favor of the permanent taskbar edge strip.
 
+### Localization
+
+- Translated the 188 remaining English fallbacks in the `ru-RU` catalog (Dynamic Island, dock spacing, theme editor fields, borders, date formats, speed test, focus break, seek and Start menu labels). 211 values matched `en-US` before; the 23 that remain are units, placeholder-only templates, format examples and product names (`Wi-Fi`, `Bluetooth`, `VPN`, `Dynamic Island`, `Windows`). The regression budget drops from 211 to 23 in both `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs`.
+
 ### Documentation
 
 - Refreshed `README.md`, `PRIVACY.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `docs/**` and `.github/*.md` against the current Rust implementation: CLI modes, 22 catalog widgets, 14 languages / 1375 keys, theme packs, and journal/watchdog recovery.
