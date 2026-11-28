@@ -34,8 +34,9 @@ use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, HWND_BROADCAST, IsWindowVisible, PostMessageW,
-    RegisterWindowMessageW, SendNotifyMessageW, WM_CLOSE,
+    EnumWindows, FindWindowW, GetWindowThreadProcessId, HWND_BROADCAST, IsIconic, IsWindowVisible,
+    PostMessageW, RegisterWindowMessageW, SW_RESTORE, SendNotifyMessageW, SetForegroundWindow,
+    ShowWindow, WM_CLOSE,
 };
 
 use crate::design::brush::{BrushSpec, GradientSpec, Hsv, MAX_GRADIENT_STOPS};
@@ -108,7 +109,16 @@ fn parse_hex_color(value: &str) -> Option<u32> {
 /// closes. Keep the children so dock shutdown can close them too (`CloseForShutdown` parity).
 static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
 
+/// Named mutex that lets only one `--settings` process show a window per user session.
+pub const MUTEX_NAME: &str = r"Local\OpenTaskBar.Settings";
+
 pub fn spawn_settings_window() {
+    if focus_existing_settings_window() {
+        return;
+    }
+    if has_live_settings_child() {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         opentaskbar_core::log::error("Cannot open Settings: current_exe failed.");
         return;
@@ -123,6 +133,39 @@ pub fn spawn_settings_window() {
         }
         Err(error) => opentaskbar_core::log::error(format!("Cannot open Settings: {error}")),
     }
+}
+
+fn has_live_settings_child() -> bool {
+    let Ok(mut children) = SETTINGS_CHILDREN.lock() else {
+        return false;
+    };
+    children.retain_mut(|existing| matches!(existing.try_wait(), Ok(None)));
+    !children.is_empty()
+}
+
+/// Brings an already open Settings window to the front instead of opening a second one.
+///
+/// The dialog title is the only stable identity: GPUI uses the shared `Zed::Window` class, so
+/// the class name cannot tell a Settings window apart from another GPUI application.
+pub fn focus_existing_settings_window() -> bool {
+    let title: Vec<u16> = loc::t("SettingsTitle")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: null class filter; the search stops at the first window with this exact title.
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if hwnd.is_null() {
+        return false;
+    }
+    // SAFETY: `hwnd` is a live top-level window; both calls only change its visibility and
+    // stacking, and the foreground request is best-effort by design.
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+    true
 }
 
 /// Posts WM_CLOSE to the Settings windows spawned by this dock. Called after the dock message

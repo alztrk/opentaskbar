@@ -158,6 +158,13 @@ fn main() {
             let settings =
                 opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
+            let Some(_settings_lock) = opentaskbar_core::single_instance::SingleInstance::acquire(
+                ui::settings::MUTEX_NAME,
+            ) else {
+                // A second `--settings` launch must raise the open dialog, never duplicate it.
+                ui::settings::focus_existing_settings_window();
+                return;
+            };
             design::fonts::apply_settings(&settings);
             apply_startup_context(&settings);
             ui::settings::run_settings_window();

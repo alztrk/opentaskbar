@@ -26,6 +26,7 @@ gated against it by `scripts/check-release-version.ps1`.
 - Read playback progress from a matching LibreWolf tab when Windows omits the media timeline; show an unavailable-duration state when no usable timeline exists.
 - Added transition/error states for Wi-Fi and Bluetooth radio toggles and placed Night Light and Windows quick-settings shortcuts together in Quick Settings.
 - Simplified the system metrics widget and its flyouts; removed the duplicate Show Desktop widget in favor of the permanent taskbar edge strip.
+- Opening Settings twice now raises the window that is already open: the dock reuses a live Settings dialog, and a second `--settings` process exits instead of adding another window.
 
 ### Documentation
 
