@@ -84,7 +84,7 @@ const FOCUS_BREAK_MINUTES_MAX: i32 = 30;
 const FOCUS_SESSIONS_MAX: i32 = 8;
 
 actions!(settings_navigation, [TabNext, TabPrevious]);
-actions!(settings_panels, [CloseWidgetPanel, ToggleFlyoutPreview]);
+actions!(settings_panels, [CloseWidgetPanel]);
 
 fn set_border_thickness(settings: &mut DockSettings, surface: usize, value: f64) {
     let value = value.clamp(0.0, 8.0);
@@ -1912,6 +1912,7 @@ struct SettingsView {
     /// timer flushes to disk + broadcasts reload.
     save_pending: bool,
     save_generation: u64,
+    saved_widget_state: (Vec<String>, Vec<String>, bool, bool, bool),
     update_status: String,
     update_release: Option<update::Release>,
     // Search (reference SettingsWindow.Search.cs parity)
@@ -2037,6 +2038,13 @@ impl SettingsView {
             String::new()
         };
         let initial_theme_name_len = initial_theme_name.encode_utf16().count();
+        let saved_widget_state = (
+            settings.enabled_widgets.clone(),
+            settings.installed_widgets.clone(),
+            settings.show_clock_widget,
+            settings.show_system_stats_widget,
+            settings.show_media,
+        );
         let mut view = Self {
             page: SettingsPage::Dock,
             focus,
@@ -2072,6 +2080,7 @@ impl SettingsView {
             weather_search_status: String::new(),
             save_pending: false,
             save_generation: 0,
+            saved_widget_state,
             update_status: String::new(),
             update_release: None,
             widget_panel: None,
@@ -3003,6 +3012,22 @@ impl SettingsView {
     }
 
     fn auto_save(&mut self, cx: &mut Context<Self>) {
+        let current_widget_state = (
+            self.settings.enabled_widgets.clone(),
+            self.settings.installed_widgets.clone(),
+            self.settings.show_clock_widget,
+            self.settings.show_system_stats_widget,
+            self.settings.show_media,
+        );
+        if current_widget_state == self.saved_widget_state
+            && let Ok(saved) = settings::try_load_from(&settings::settings_path())
+        {
+            self.settings.enabled_widgets = saved.enabled_widgets;
+            self.settings.installed_widgets = saved.installed_widgets;
+            self.settings.show_clock_widget = saved.show_clock_widget;
+            self.settings.show_system_stats_widget = saved.show_system_stats_widget;
+            self.settings.show_media = saved.show_media;
+        }
         self.widget_runtime.tick(&self.settings);
         self.save_pending = true;
         self.save_generation = self.save_generation.wrapping_add(1);
@@ -3095,7 +3120,6 @@ impl SettingsView {
     ) -> Option<AnyElement> {
         let id = self.widget_panel?;
         let accent = t.accent;
-        let hover = t.surface_hover;
         Some(
             div()
                 .id("widget-panel-host")
@@ -3147,30 +3171,6 @@ impl SettingsView {
                                 .text_size(px(fonts::scaled_size(12.0)))
                                 .text_color(rgba(t.text_secondary))
                                 .child(loc::t("WidgetPanelHint")),
-                        )
-                        .child(
-                            div()
-                                .id("panel-hover-region")
-                                .w_full()
-                                .h(px(64.0))
-                                .rounded(px(10.0))
-                                .bg(rgba(hover))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, _| {
-                                    this.preview_flyout(
-                                        this.widget_panel.unwrap_or("widget"),
-                                        Self::window_hwnd(window),
-                                    );
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(12.0)))
-                                        .text_color(rgba(t.text_primary))
-                                        .child(loc::t("WidgetPreviewFlyout")),
-                                ),
                         ),
                 )
                 .into_any_element(),
@@ -6252,10 +6252,11 @@ impl SettingsView {
             }
             WidgetChipSpec::Keyboard { code } => chip(
                 div()
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .bg(rgba(track_bg))
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .text_size(px(fonts::scaled_size(12.0)))
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgba(t.dock_preview_fg))
@@ -6539,6 +6540,13 @@ impl SettingsView {
         match settings::save_to(&settings::settings_path(), &self.settings) {
             Ok(()) => {
                 self.save_error = None;
+                self.saved_widget_state = (
+                    self.settings.enabled_widgets.clone(),
+                    self.settings.installed_widgets.clone(),
+                    self.settings.show_clock_widget,
+                    self.settings.show_system_stats_widget,
+                    self.settings.show_media,
+                );
                 notify_docks_reload();
             }
             Err(err) => {
@@ -7267,6 +7275,9 @@ impl SettingsView {
             self.settings.dock_width_mode,
             |this, value, cx| {
                 this.settings.dock_width_mode = value;
+                if value != DockWidthMode::Auto {
+                    this.settings.full_width = false;
+                }
                 this.auto_save(cx);
             },
             cx,
@@ -7577,22 +7588,6 @@ impl SettingsView {
                 ),
             )
             .into_any_element(),
-            self.target_row(
-                "LayoutFullWidth",
-                t,
-                Some("\u{E740}"),
-                loc::t("LayoutFullWidth"),
-                ios_switch(
-                    "sw-fullw",
-                    t,
-                    self.settings.full_width,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.full_width = !this.settings.full_width;
-                        this.auto_save(cx);
-                    }),
-                ),
-            )
-            .into_any_element(),
             setting_row(
                 t,
                 Some("\u{E72C}"),
@@ -7610,6 +7605,27 @@ impl SettingsView {
             )
             .into_any_element(),
         ]);
+
+        if self.settings.dock_width_mode == DockWidthMode::Auto {
+            layout_rows.push(
+                self.target_row(
+                    "LayoutFullWidth",
+                    t,
+                    Some("\u{E740}"),
+                    loc::t("LayoutFullWidth"),
+                    ios_switch(
+                        "sw-fullw",
+                        t,
+                        self.settings.full_width,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.full_width = !this.settings.full_width;
+                            this.auto_save(cx);
+                        }),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
 
         let out = vec![
             section_card(t, loc::t("SectionDockLayout"), layout_rows).into_any_element(),
@@ -9438,25 +9454,6 @@ impl SettingsView {
             .into_any_element(),
         );
 
-        if widgets::widget_has_flyout(wid) {
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E8B0}"),
-                    loc::t("WidgetPreviewFlyout"),
-                    button(
-                        SharedString::from(format!("w-preview-flyout-{wid}")),
-                        t,
-                        loc::t("WidgetPreviewFlyout"),
-                        ButtonVariant::Secondary,
-                        cx.listener(move |this, _, window, _| {
-                            this.preview_widget_flyout(wid, Self::window_hwnd(window));
-                        }),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
         rows
     }
 
@@ -12563,10 +12560,6 @@ impl Render for SettingsView {
                     }
                 }),
             )
-            .on_action(cx.listener(|this, _: &ToggleFlyoutPreview, _, cx| {
-                this.flyout_preview = !this.flyout_preview;
-                cx.notify();
-            }))
             .relative()
             .w_full()
             .h_full()
@@ -13441,7 +13434,6 @@ pub fn run_settings_window() {
                 KeyBinding::new("tab", TabNext, None),
                 KeyBinding::new("shift-tab", TabPrevious, None),
                 KeyBinding::new("escape", CloseWidgetPanel, None),
-                KeyBinding::new("f9", ToggleFlyoutPreview, None),
             ]);
             // Fit the fixed dialog into the primary work area (high DPI on small screens) and
             // center it there instead of on the full display (which ignores the taskbar).

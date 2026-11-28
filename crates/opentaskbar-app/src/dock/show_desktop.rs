@@ -91,16 +91,12 @@ impl CornerState {
                     .clamp(16.0 * self.dpi, 34.0 * self.dpi) as usize;
                 let (x0, x1, y0, y1) = if self.vertical_edge {
                     let x0 = w.saturating_sub(long) / 2;
-                    (
-                        x0,
-                        (x0 + long).min(w),
-                        h.saturating_sub(thin + (3.0 * self.dpi).round() as usize),
-                        h.saturating_sub((3.0 * self.dpi).round() as usize),
-                    )
+                    let y0 = h.saturating_sub(thin) / 2;
+                    (x0, (x0 + long).min(w), y0, (y0 + thin).min(h))
                 } else {
-                    let x0 = w.saturating_sub(thin + (3.0 * self.dpi).round() as usize);
-                    let y0 = h.saturating_sub(long);
-                    (x0, (x0 + thin).min(w), y0, h)
+                    let x0 = w.saturating_sub(thin) / 2;
+                    let y0 = h.saturating_sub(long) / 2;
+                    (x0, (x0 + thin).min(w), y0, (y0 + long).min(h))
                 };
                 let (r, g, b, a): (u8, u8, u8, u8) = if self.is_dark {
                     (226, 232, 240, 200)

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use opentaskbar_core::dynamic_island::geometry as island_geo;
 use opentaskbar_core::i18n as loc;
@@ -114,6 +114,7 @@ struct ThemedChipCard {
 struct ChipCardStyle {
     chrome: ChipChrome,
     themed: Option<ThemedChipCard>,
+    surface: design::theme::SurfaceStyle,
 }
 
 impl ChipCardStyle {
@@ -135,7 +136,11 @@ impl ChipCardStyle {
         } else {
             None
         };
-        Self { chrome, themed }
+        Self {
+            chrome,
+            themed,
+            surface: design::theme::ThemeManager::get_surface(design::theme::SurfaceKind::Widget),
+        }
     }
 }
 
@@ -339,11 +344,14 @@ impl WidgetChipSpec {
                 let hint = crate::widgets::chip_media_hint();
                 let _ = write!(
                     out,
-                    "|m={}:{}:{}:{}",
+                    "|m={}:{}:{}:{}:{}",
                     hint.playing,
                     (hint.progress * 100.0).round() as u32,
                     hint.has_media,
-                    hint.cover_path.as_deref().unwrap_or("")
+                    hint.cover_path.as_deref().unwrap_or(""),
+                    hint.cover_pixels
+                        .as_ref()
+                        .map_or(0, |pixels| Arc::as_ptr(pixels) as usize)
                 );
             }
             Self::Storage { drives } => {
@@ -3502,11 +3510,13 @@ impl DcompEngine {
                         radiusX: 7.0,
                         radiusY: 7.0,
                     };
-                    let mut drew_cover = false;
-                    if let Some(ref path) = hint.cover_path
-                        && let Some(decoded) =
+                    let decoded_cover = hint.cover_pixels.clone().or_else(|| {
+                        hint.cover_path.as_ref().and_then(|path| {
                             crate::widgets::widget_icons::load_bgra(std::path::Path::new(path))
-                    {
+                        })
+                    });
+                    let mut drew_cover = false;
+                    if let Some(decoded) = decoded_cover {
                         let (bw, bh, pixels) = &*decoded;
                         let props = D2D1_BITMAP_PROPERTIES1 {
                             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -3605,15 +3615,6 @@ impl DcompEngine {
                             &sc,
                         )?;
                         dc.FillRoundedRectangle(&art_rr, &grad);
-                        draw_fluent_str_d2d(
-                            &self.dwrite_factory,
-                            dc,
-                            "\u{E8D6}",
-                            art_rect,
-                            13.5,
-                            (0xff, 0xff, 0xff),
-                            0.94,
-                        )?;
                     }
 
                     let info_l = 7.0 + art_sz + 8.0;
@@ -4082,39 +4083,13 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    // Tactile centered rounded keycap badge `[TR]` for both Normal and Compact widths.
-                    let cap_w = (width_dips - 16.0).clamp(28.0, 42.0);
-                    let cap_h = (height_dips - 14.0).clamp(20.0, 26.0);
-                    let cap_rect = D2D_RECT_F {
-                        left: (width_dips - cap_w) * 0.5,
-                        top: cy - cap_h * 0.5,
-                        right: (width_dips + cap_w) * 0.5,
-                        bottom: cy + cap_h * 0.5,
+                    let code_rect = D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: width_dips,
+                        bottom: height_dips,
                     };
-                    let cap_rr = D2D1_ROUNDED_RECT {
-                        rect: cap_rect,
-                        radiusX: 6.0,
-                        radiusY: 6.0,
-                    };
-                    let cap_fill = dc.CreateSolidColorBrush(
-                        &if is_dark {
-                            color_rgba(0xff, 0xff, 0xff, 0.09)
-                        } else {
-                            color_rgba(0xff, 0xff, 0xff, 0.65)
-                        },
-                        None,
-                    )?;
-                    let cap_bd = dc.CreateSolidColorBrush(
-                        &if is_dark {
-                            color_rgba(0xff, 0xff, 0xff, 0.20)
-                        } else {
-                            color_rgba(0x18, 0x18, 0x1b, 0.16)
-                        },
-                        None,
-                    )?;
-                    dc.FillRoundedRectangle(&cap_rr, &cap_fill);
-                    dc.DrawRoundedRectangle(&cap_rr, &cap_bd, 1.0, None);
-                    draw_text(code, &fmt_11_b_c, cap_rect, &p_brush);
+                    draw_text(code, &fmt_11_b_c, code_rect, &p_brush);
                 }
                 WidgetChipSpec::AiDual {
                     provider_id,
@@ -5391,6 +5366,51 @@ unsafe fn draw_chip_card(
         return Ok(());
     }
 
+    if style.surface.background == opentaskbar_core::settings::SurfaceBackground::None
+        && matches!(interaction, WidgetInteraction::Idle)
+        && border_rgb.is_none()
+    {
+        return Ok(());
+    }
+
+    if matches!(
+        style.surface.background,
+        opentaskbar_core::settings::SurfaceBackground::Solid
+            | opentaskbar_core::settings::SurfaceBackground::TrueBlack
+    ) {
+        let true_black =
+            style.surface.background == opentaskbar_core::settings::SurfaceBackground::TrueBlack;
+        let alpha = if true_black {
+            1.0
+        } else {
+            style.surface.opacity as f32
+        };
+        let (r, g, b) = if true_black {
+            (0, 0, 0)
+        } else if is_dark {
+            (24, 24, 27)
+        } else {
+            (255, 255, 255)
+        };
+        unsafe {
+            let brush = dc.CreateSolidColorBrush(&color_rgba(r, g, b, alpha), None)?;
+            dc.FillRoundedRectangle(&rounded(island_geo::CHIP_RADIUS_DIPS, 0.0), &brush);
+            if let Some(rgb) = border_rgb
+                && border_width_dips > 0.0
+            {
+                let border =
+                    dc.CreateSolidColorBrush(&color_rgba(rgb.0, rgb.1, rgb.2, 0.85), None)?;
+                dc.DrawRoundedRectangle(
+                    &rounded(island_geo::CHIP_RADIUS_DIPS, border_width_dips * 0.5),
+                    &border,
+                    border_width_dips,
+                    None,
+                );
+            }
+        }
+        return Ok(());
+    }
+
     // Theme pack / editor overrides: tint the card from `ThemeManager` tokens.
     if let Some(theme) = style.themed {
         let radius = theme
@@ -5407,12 +5427,15 @@ unsafe fn draw_chip_card(
         };
         unsafe {
             if let Some(fill) = theme.fill {
-                let brush = dc.CreateSolidColorBrush(&solid(fill, 1.0), None)?;
+                let brush =
+                    dc.CreateSolidColorBrush(&solid(fill, style.surface.opacity as f32), None)?;
                 dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
             } else {
                 let base_alpha = if is_dark { 0.08 } else { 0.06 };
-                let brush =
-                    dc.CreateSolidColorBrush(&color_rgba(ink, ink, ink, base_alpha), None)?;
+                let brush = dc.CreateSolidColorBrush(
+                    &color_rgba(ink, ink, ink, base_alpha * style.surface.opacity as f32),
+                    None,
+                )?;
                 dc.FillRoundedRectangle(&rounded(radius, 0.0), &brush);
             }
             let overlay = match interaction {
@@ -5461,11 +5484,11 @@ unsafe fn draw_chip_card(
             let stops = [
                 D2D1_GRADIENT_STOP {
                     position: 0.0,
-                    color: color_rgba(c, c, c, top),
+                    color: color_rgba(c, c, c, top * style.surface.opacity as f32),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 1.0,
-                    color: color_rgba(c, c, c, bottom),
+                    color: color_rgba(c, c, c, bottom * style.surface.opacity as f32),
                 },
             ];
             let collection = dc.CreateGradientStopCollection(
@@ -6248,6 +6271,7 @@ mod tests {
             playing: false,
             progress: 0.1,
             cover_path: None,
+            cover_pixels: None,
             has_media: true,
         });
         let mut k1 = String::new();
@@ -6257,6 +6281,7 @@ mod tests {
             playing: true,
             progress: 0.6,
             cover_path: None,
+            cover_pixels: None,
             has_media: true,
         });
         let mut k2 = String::new();

@@ -156,6 +156,7 @@ pub(crate) struct MediaChipHint {
     pub playing: bool,
     pub progress: f32,
     pub cover_path: Option<String>,
+    pub cover_pixels: Option<Arc<(u32, u32, Vec<u8>)>>,
     pub has_media: bool,
 }
 
@@ -3305,6 +3306,7 @@ impl WidgetRuntime {
                     } else {
                         None
                     },
+                    cover_pixels: snap.cover_pixels,
                     has_media,
                 });
                 let title = if has_media {

@@ -169,6 +169,10 @@ const STACK_FLYOUT_ROW_ID_BASE: u32 = 100;
 /// The pill must include both insets or a dock that fits on screen reports a
 /// bogus 2 DIP overflow (and a right scroll chevron) at rest.
 const VIEWPORT_INSET_DIPS: f32 = 1.0;
+
+fn full_width_active(settings: &DockSettings) -> bool {
+    settings.full_width && settings.dock_width_mode == DockWidthMode::Auto
+}
 /// `FILE_ATTRIBUTE_HIDDEN` / `FILE_ATTRIBUTE_SYSTEM` for folder-stack filtering.
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
@@ -215,8 +219,16 @@ impl EffectiveMetrics {
         Self {
             width_dips,
             height_dips,
-            top_gap_dips: Some(settings::effective_top_gap(settings)),
-            bottom_gap_dips: Some(settings::effective_bottom_gap(settings)),
+            top_gap_dips: Some(if settings.dock_height_mode == DockHeightMode::Fill {
+                0
+            } else {
+                settings::effective_top_gap(settings)
+            }),
+            bottom_gap_dips: Some(if settings.dock_height_mode == DockHeightMode::Fill {
+                0
+            } else {
+                settings::effective_bottom_gap(settings)
+            }),
             widget_densities,
             live_rest_content_dips: None,
         }
@@ -1651,7 +1663,7 @@ fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips
 
 fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
     let max_w = (mon_w_dips - 16.0).max(200.0);
-    if settings.full_width {
+    if full_width_active(settings) {
         return max_w;
     }
     let natural_w = content_min_pill_width(settings, slot_count, mon_w_dips);
@@ -1674,7 +1686,7 @@ fn compute_window_dips_with(
     // WS-1 `effective_width` overrides Auto/Pixels/Percent width modes.
     if let Some(width) = effective.width_dips {
         resting_w = width.min((mon_w_dips - 16.0).max(200.0));
-    } else if !settings.full_width
+    } else if !full_width_active(settings)
         && settings.dock_custom_width_dips.is_none()
         && let Some(live) = effective.live_rest_content_dips
     {
@@ -1688,7 +1700,7 @@ fn compute_window_dips_with(
     // needs no horizontal room. Only an expanding dock reserves a full arch so
     // a hover can never pop scroll chevrons or clip the Tray/Recycle Bin.
     let mag_extra =
-        if fisheye_enabled(settings) && !settings.full_width && expands && slot_count > 0 {
+        if fisheye_enabled(settings) && !full_width_active(settings) && expands && slot_count > 0 {
             layout::fisheye_expansion_reserve_dips(base + slot_gap(settings), peak) + 8.0
         } else {
             0.0
@@ -1784,7 +1796,7 @@ fn compute_window_rect_with(
             side_h,
             cross,
             margin_px,
-            settings.full_width,
+            full_width_active(settings),
         );
     }
     let monitor_top = monitor.top;
@@ -2624,7 +2636,7 @@ impl DockState {
     /// not fit the available pill width compact lowest-priority first (`ShrinkPriority`
     /// bias), before the dock falls back to scroll chevrons. Returns `true` on change.
     fn update_widget_shrink(&mut self) -> bool {
-        let next = if self.widget_visuals.is_empty() || self.settings.full_width {
+        let next = if self.widget_visuals.is_empty() || full_width_active(&self.settings) {
             HashMap::new()
         } else {
             let full: Vec<(&'static str, f32)> = self
@@ -3828,7 +3840,7 @@ impl DockState {
         let (win_w, win_h) =
             compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
         let max_w = (mon_w - 16.0).max(200.0);
-        let pill_w = if self.settings.full_width {
+        let pill_w = if full_width_active(&self.settings) {
             max_w
         } else if let Some(fixed_w) = self.effective.width_dips {
             fixed_w.min(win_w).min(max_w)
@@ -3936,7 +3948,7 @@ impl DockState {
             compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
         let max_w = (mon_w - 16.0).max(200.0);
         let rest_content = self.rest_content_width_at(now);
-        let content_driven = !self.settings.full_width
+        let content_driven = !full_width_active(&self.settings)
             && self.effective.width_dips.is_none()
             && self.settings.dock_custom_width_dips.is_none();
         let max_extent = if content_driven {
@@ -4129,7 +4141,7 @@ impl DockState {
     }
 
     fn hit_resize_edge(&self, mx: f32, my: f32) -> Option<ResizeEdge> {
-        if self.settings.full_width {
+        if full_width_active(&self.settings) {
             return None;
         }
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
