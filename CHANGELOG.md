@@ -6,6 +6,11 @@ gated against it by `scripts/check-release-version.ps1`.
 
 ## Unreleased
 
+### Packaging and build outputs
+
+- Consolidated Cargo, portable release, MSIX and CI build outputs under `artifacts/`.
+- Release packages now ship one app executable per architecture; the architecture-checked watchdog remains embedded and is extracted at runtime for crash recovery. The release manifest is schema version 3 and no longer lists a separate watchdog executable.
+
 ### Removed features and stale code paths
 
 - Removed the bundled file manager, per-monitor top bar and Wi-Fi panel, including their launch modes, settings toggles, dock menu entries and 50 panel-only locale keys. The Rust catalog gate is now **1375 keys** in each of 14 languages; the frozen reference snapshots remain at 1046 keys.

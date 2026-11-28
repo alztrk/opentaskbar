@@ -2,7 +2,8 @@
 param (
     [ValidateSet('x64', 'x86')]
     [string]$Architecture = 'x64',
-    [string]$OutputDir = $PSScriptRoot,
+    [Parameter(Mandatory = $true)]
+    [string]$OutputDir,
     [switch]$Force,
     # Release/Rust builds use this: never substitute an x64 PE for an x86 build.
     [switch]$NoFallback

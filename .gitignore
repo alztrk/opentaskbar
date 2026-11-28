@@ -1,21 +1,18 @@
-bin/
-obj/
-.vs/
 *.user
 *.suo
 *.log
-artifacts/
+# Unified build and package output root
+/artifacts/
+# Existing workspaces may still contain pre-consolidation outputs.
+/target/
+/release/
+
+# Other local and temporary data
 dist/
-release/
 tmp/
 .reports/
 .local/
 .notes/
 .research/
-OpenTaskbar-*.zip
-checksums.txt
-
-# Rust workspace (repository root)
-/target
 **/*.rs.bk
 *.pdb

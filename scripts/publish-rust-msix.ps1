@@ -4,7 +4,7 @@
 param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',
-    [string]$OutputDir = "$PSScriptRoot\..\release\msix-rust",
+    [string]$OutputDir = "$PSScriptRoot\..\artifacts\msix-rust",
     # No hardcoded version: the app release version comes from Cargo.toml.
     [string]$Version = '',
     [switch]$SignForLocalTest
@@ -52,13 +52,6 @@ if (Test-Path $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Forc
 New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination (Join-Path $stagingDir 'OpenTaskBar.exe') -Force
-# The Rust armer prefers an app-directory watchdog over a %LOCALAPPDATA% copy,
-# so the package must carry the architecture-correct PE next to the EXE.
-$archWatchdog = Join-Path $portableDir "OpenTaskbarWatchdog-$arch.exe"
-if (-not (Test-Path -LiteralPath $archWatchdog -PathType Leaf)) {
-    throw "Missing $arch watchdog beside the portable EXE: $archWatchdog"
-}
-Copy-Item -LiteralPath $archWatchdog -Destination (Join-Path $stagingDir 'OpenTaskbarWatchdog.exe') -Force
 Copy-Item -LiteralPath $assetsDir -Destination (Join-Path $stagingDir 'Assets') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stagingDir 'README.md') -Force
 

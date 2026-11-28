@@ -42,6 +42,6 @@ Please do not include live credentials, tokens or personal data in a report.
 - Provider credentials live only in local CLI/keyring stores or DPAPI-protected files under `%LOCALAPPDATA%\OpenTaskbar\secrets\`. They are never logged, passed on a command line or exported in backups.
 - Approved custom widgets can only request DPAPI-encrypted secrets in their own `widget:<slug>:<key>` namespace, and only for keys declared in their manifest; requests for other names are refused. Re-approving an edited manifest restarts the sidecar with the new code.
 - Theme/backup imports reject path traversal, absolute paths and unexpected entries; widget token overrides are capped and typed.
-- Release artifacts (`OpenTaskbar-v0.3.5-win-{x64,x86}.exe/.zip`) are covered by generated `checksums.txt`, a schemaVersion 2 `release-manifest.json`, SLSA provenance via `actions/attest` and an optional report-only VirusTotal scan. Only downloads from the official [Releases page](https://github.com/alztrk/opentaskbar/releases) are supported.
+- New release artifacts (`OpenTaskbar-v*-win-{x64,x86}.exe/.zip`) are covered by generated `checksums.txt`, a schemaVersion 3 `release-manifest.json`, SLSA provenance via `actions/attest` and an optional report-only VirusTotal scan. Each architecture ships one app EXE with its watchdog embedded. Only downloads from the official [Releases page](https://github.com/alztrk/opentaskbar/releases) are supported.
 
 General bug reports that are not security-sensitive belong in the [issue tracker](https://github.com/alztrk/opentaskbar/issues).

@@ -76,10 +76,10 @@ jobs:
       - name: Build and verify Rust portable executables (x64 + x86)
         shell: pwsh
         run: |
-          & "scripts/publish-portable.ps1" -Runtime win-x64 -OutputDir release
-          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x64.exe
-          & "scripts/publish-portable.ps1" -Runtime win-x86 -OutputDir release
-          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x86.exe
+          & "scripts/publish-portable.ps1" -Runtime win-x64 -OutputDir artifacts/release
+          & "scripts/check-portable.ps1" -OutputDir artifacts/release -ExecutableName OpenTaskbar-x64.exe
+          & "scripts/publish-portable.ps1" -Runtime win-x86 -OutputDir artifacts/release
+          & "scripts/check-portable.ps1" -OutputDir artifacts/release -ExecutableName OpenTaskbar-x86.exe
 
       - name: Package Rust release artifacts, notes, checksums and manifest
         shell: pwsh
@@ -88,19 +88,18 @@ jobs:
               -Tag '${{ steps.release_info.outputs.tag_name }}' `
               -Commit '${{ github.sha }}' `
               -Prerelease:('${{ steps.release_info.outputs.is_prerelease }}' -eq 'true') `
-              -OutputDir release
+              -OutputDir artifacts/release
 
       - name: Upload release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-assets
           path: |
-            release/OpenTaskbar-v*-win-*.exe
-            release/OpenTaskbar-v*-win-*.zip
-            release/OpenTaskbarWatchdog-*.exe
-            release/checksums.txt
-            release/release-manifest.json
-            release/release-notes.md
+            artifacts/release/OpenTaskbar-v*-win-*.exe
+            artifacts/release/OpenTaskbar-v*-win-*.zip
+            artifacts/release/checksums.txt
+            artifacts/release/release-manifest.json
+            artifacts/release/release-notes.md
           if-no-files-found: error
           retention-days: 7
 
@@ -127,16 +126,16 @@ jobs:
       - name: Package unsigned MSIX for both architectures
         shell: pwsh
         run: |
-          & "scripts/publish-rust-msix.ps1" -Runtime win-x64 -OutputDir release/msix-rust
-          & "scripts/publish-rust-msix.ps1" -Runtime win-x86 -OutputDir release/msix-rust
-          $packages = @(Get-ChildItem -LiteralPath release/msix-rust -Filter '*.msix' -File)
+          & "scripts/publish-rust-msix.ps1" -Runtime win-x64 -OutputDir artifacts/msix-rust
+          & "scripts/publish-rust-msix.ps1" -Runtime win-x86 -OutputDir artifacts/msix-rust
+          $packages = @(Get-ChildItem -LiteralPath artifacts/msix-rust -Filter '*.msix' -File)
           if ($packages.Count -ne 2) { throw "Expected two Rust MSIX packages, found $($packages.Count)." }
 
       - name: Upload MSIX packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: msix-packages
-          path: release/msix-rust/*.msix
+          path: artifacts/msix-rust/*.msix
           if-no-files-found: error
           retention-days: 7
 
@@ -159,31 +158,31 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-assets
-          path: downloaded
+          path: artifacts/downloaded
 
       - name: Download MSIX packages
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msix-packages
-          path: downloaded-msix
+          path: artifacts/downloaded-msix
 
-      - name: Restore release/ layout
+      - name: Restore artifacts/release layout
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path release -Force | Out-Null
-          Get-ChildItem -LiteralPath downloaded -Recurse -File | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path release $_.Name) -Force
+          New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
+          Get-ChildItem -LiteralPath artifacts/downloaded -Recurse -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path artifacts/release $_.Name) -Force
           }
-          Get-ChildItem -LiteralPath downloaded-msix -Recurse -File | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path release $_.Name) -Force
+          Get-ChildItem -LiteralPath artifacts/downloaded-msix -Recurse -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path artifacts/release $_.Name) -Force
           }
           $required = @('checksums.txt', 'release-manifest.json', 'release-notes.md')
           foreach ($name in $required) {
-            if (-not (Test-Path -LiteralPath (Join-Path release $name) -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath (Join-Path artifacts/release $name) -PathType Leaf)) {
               throw "Missing release asset: $name"
             }
           }
-          if (-not (Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-*.zip' -File)) {
+          if (-not (Get-ChildItem -LiteralPath artifacts/release -Filter 'OpenTaskbar-*.zip' -File)) {
             throw 'No Rust release ZIPs were downloaded.'
           }
 
@@ -192,13 +191,13 @@ jobs:
       - name: Attest release artifacts
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-checksums: release/checksums.txt
+          subject-checksums: artifacts/release/checksums.txt
 
       - name: Optional VirusTotal scan (report only)
         if: ${{ env.VIRUSTOTAL_API_KEY != '' }}
         shell: pwsh
         run: |
-          foreach ($file in Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-*.zip' -File) {
+          foreach ($file in Get-ChildItem -LiteralPath artifacts/release -Filter 'OpenTaskbar-*.zip' -File) {
             try {
               $response = & curl -sS -F "file=@$($file.FullName)" -H "x-apikey: $env:VIRUSTOTAL_API_KEY" `
                 'https://www.virustotal.com/api/v3/files' | ConvertFrom-Json
@@ -215,16 +214,15 @@ jobs:
           target_commitish: ${{ github.sha }}
           draft: false
           prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
-          body_path: release/release-notes.md
+          body_path: artifacts/release/release-notes.md
           generate_release_notes: false
           overwrite_files: true
           files: |
-            release/OpenTaskbar-v*-win-*.exe
-            release/OpenTaskbar-v*-win-*.zip
-            release/OpenTaskbarWatchdog-*.exe
-            release/*.msix
-            release/checksums.txt
-            release/release-manifest.json
+            artifacts/release/OpenTaskbar-v*-win-*.exe
+            artifacts/release/OpenTaskbar-v*-win-*.zip
+            artifacts/release/*.msix
+            artifacts/release/checksums.txt
+            artifacts/release/release-manifest.json
 
       - name: Remove stale release assets
         shell: pwsh
@@ -240,8 +238,6 @@ jobs:
             "OpenTaskbar-$env:RELEASE_TAG-win-x64.zip",
             "OpenTaskbar-$env:RELEASE_TAG-win-x86.exe",
             "OpenTaskbar-$env:RELEASE_TAG-win-x86.zip",
-            'OpenTaskbarWatchdog-x64.exe',
-            'OpenTaskbarWatchdog-x86.exe',
             "OpenTaskbar_${{ needs.build.outputs.version }}.0_x64.msix",
             "OpenTaskbar_${{ needs.build.outputs.version }}.0_x86.msix",
             'checksums.txt',

@@ -1,7 +1,7 @@
 # Verifies that the exact Rust EXE uploaded in a release is self-contained and
 # can start its short-lived icon worker without shipping sidecar DLLs.
 param (
-    [string]$OutputDir = "$PSScriptRoot\..\release",
+    [string]$OutputDir = "$PSScriptRoot\..\artifacts\release",
     [string]$ExecutableName = 'OpenTaskbar-x64.exe',
     # PE COFF machine (0x014C = x86, 0x8664 = x64). Derived from the file name
     # when omitted, so an "x86" asset can never hide an x64 payload.
@@ -44,18 +44,6 @@ if ($machine -ne $expectedMachine) {
     throw ("Wrong PE machine for {0}: 0x{1:X4}, expected 0x{2:X4} ({3})." -f $ExecutableName, $machine, $expectedMachine, $Architecture)
 }
 Write-Host ("PE machine OK for {0}: 0x{1:X4} ({2})" -f $ExecutableName, $machine, $Architecture) -ForegroundColor DarkGray
-
-# publish-portable.ps1 always drops the exact watchdog embedded by build.rs next
-# to the EXE. Its hash is recorded in the release manifest, so a missing file
-# must fail the gate instead of silently producing an unverifiable manifest.
-$watchdog = Join-Path $directory "OpenTaskbarWatchdog-$Architecture.exe"
-if (-not (Test-Path -LiteralPath $watchdog -PathType Leaf)) {
-    throw "Embedded watchdog is missing: $watchdog (run scripts/publish-portable.ps1 first)."
-}
-$watchdogMachine = Get-PeMachine -Path $watchdog
-if ($watchdogMachine -ne $expectedMachine) {
-    throw ("Wrong PE machine for embedded watchdog ({0}): 0x{1:X4}, expected 0x{2:X4}." -f $Architecture, $watchdogMachine, $expectedMachine)
-}
 
 # The release ships a single EXE. Any third-party DLL beside it would mean the
 # Rust port is not actually portable (OS-provided api-ms-win-* DLLs are fine).

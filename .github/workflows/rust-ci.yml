@@ -42,7 +42,7 @@ permissions:
 
 jobs:
   watchdog-arch:
-    name: x86 watchdog PE + i686 portable build
+    name: i686 portable build with embedded watchdog
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -57,32 +57,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: x86-watchdog
+          key: i686-embedded-watchdog
 
-      - name: Build x86 watchdog and assert PE machine 0x014C
-        working-directory: .
-        shell: pwsh
-        run: |
-          $out = Join-Path $env:RUNNER_TEMP 'opentaskbar-watchdog-x86'
-          & 'tools/watchdog/build.ps1' -Architecture x86 -OutputDir $out -Force -NoFallback
-          $path = Join-Path $out 'OpenTaskbarWatchdog.exe'
-          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "x86 watchdog was not produced: $path"
-          }
-          $bytes = [IO.File]::ReadAllBytes($path)
-          if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-            throw "x86 watchdog is not a PE executable: $path"
-          }
-          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-          if ([BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550) {
-            throw "Missing PE signature in x86 watchdog: $path"
-          }
-          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-          if ($machine -ne 0x014C) {
-            throw ("x86 watchdog PE machine is 0x{0:X4}, expected 0x014C." -f $machine)
-          }
-          Write-Host ("x86 watchdog PE machine OK: 0x{0:X4}" -f $machine) -ForegroundColor Green
-
+      # Cargo runs crates/opentaskbar-shell/build.rs, which builds the watchdog
+      # for this target, validates its PE machine, and embeds it in the app EXE.
       - name: Build Rust workspace for i686
         run: cargo build --workspace --target i686-pc-windows-msvc
 
@@ -90,8 +68,8 @@ jobs:
         working-directory: .
         shell: pwsh
         run: |
-          & 'scripts/publish-portable.ps1' -Runtime win-x86 -OutputDir release -SkipTargetInstall
-          & 'scripts/check-portable.ps1' -OutputDir release -ExecutableName OpenTaskbar-x86.exe
+          & 'scripts/publish-portable.ps1' -Runtime win-x86 -OutputDir artifacts/release -SkipTargetInstall
+          & 'scripts/check-portable.ps1' -OutputDir artifacts/release -ExecutableName OpenTaskbar-x86.exe
 
   locale-parity:
     name: Locale key parity (14 languages)

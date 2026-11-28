@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.3.5
 ```
 
-Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for packaging.
+Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for packaging. Generated build and package files are kept under `artifacts/`: Cargo intermediates in `artifacts/cargo/`, portable and versioned release files in `artifacts/release/`, and MSIX work and packages in `artifacts/msix-rust/`.
 
 ```powershell
 # Portable EXE and verification
@@ -97,7 +97,7 @@ Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for 
 .\scripts\package-rust-release.ps1 -Tag v0.3.5
 ```
 
-`publish-portable.ps1` builds a single self-contained EXE with the architecture-matched watchdog embedded; `check-portable.ps1` verifies its architecture, watchdog and icon worker. The release script writes the x64/x86 EXEs and ZIPs, `checksums.txt`, a schemaVersion 2 `release-manifest.json` and `release-notes.md`.
+`publish-portable.ps1` builds one self-contained EXE per architecture with the matching watchdog embedded; `build.rs` validates the embedded watchdog's architecture. At runtime, the app materializes the watchdog in its shared app-data directory for crash recovery. `check-portable.ps1` verifies the EXE architecture and icon worker. The release script writes the x64/x86 EXEs and ZIPs, `checksums.txt`, a schemaVersion 3 `release-manifest.json` and `release-notes.md`.
 
 Tests cover deterministic settings/i18n/shell-recovery logic; real Windows behavior needs the manual checks in [docs/development/windows-reliability-audit.md](docs/development/windows-reliability-audit.md). Design notes: [docs/development/windows-taskbar-model.md](docs/development/windows-taskbar-model.md).
 
@@ -126,7 +126,7 @@ Everything lives in `%LOCALAPPDATA%\OpenTaskbar\`:
 | `secrets\` | DPAPI-protected provider credentials |
 | `rust-cache\icon-cache\` | Extracted icons |
 | `taskbar-state.txt`, `flyout-positions.txt` | Recovery journals |
-| `OpenTaskbarWatchdog.exe` | Architecture-matched watchdog copy used by release metadata |
+| `OpenTaskbarWatchdog.exe` | Runtime watchdog extracted from the app EXE for crash recovery |
 
 Unknown settings keys are preserved on save, invalid JSON is backed up before defaults are restored, and no secret is written to the log or to `.otbackup` archives. The old separate-folder layout is retired; import a full backup to migrate from it.
 

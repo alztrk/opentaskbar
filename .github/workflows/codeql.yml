@@ -65,9 +65,10 @@ jobs:
         shell: pwsh
         working-directory: tools/watchdog
         run: |
-          & ./build.ps1 -Architecture x64 -Force -NoFallback
+          $out = '../../artifacts/tmp/watchdog-codeql'
+          & ./build.ps1 -Architecture x64 -OutputDir $out -Force -NoFallback
           if ($LASTEXITCODE -ne 0) { throw "watchdog build failed with exit code $LASTEXITCODE" }
-          if (-not (Test-Path -LiteralPath 'OpenTaskbarWatchdog.exe' -PathType Leaf)) {
+          if (-not (Test-Path -LiteralPath (Join-Path $out 'OpenTaskbarWatchdog.exe') -PathType Leaf)) {
             throw 'watchdog build did not produce OpenTaskbarWatchdog.exe'
           }
 

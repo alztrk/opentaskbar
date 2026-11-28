@@ -1,5 +1,5 @@
 # Packages the Rust portable EXEs into Rust-only tagged release artifacts.
-# Generates checksums.txt, release-manifest.json (schemaVersion 2) and
+# Generates checksums.txt, release-manifest.json (schemaVersion 3) and
 # release-notes.md under OutputDir from scratch; no reference artifact is involved.
 #
 # Attestation notes: checksums.txt is the subject-checksums input of
@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
 
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
-if (-not $OutputDir) { $OutputDir = Join-Path $RepoRoot 'release' }
+if (-not $OutputDir) { $OutputDir = Join-Path $RepoRoot 'artifacts\release' }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
     throw "Output directory does not exist: $OutputDir"
@@ -145,35 +145,28 @@ $crateVersion = Get-CargoWorkspaceVersion -Path $cargoManifest
 
 # Remove only artifacts this script owns so repeated runs are reproducible.
 Get-ChildItem -LiteralPath $OutputDir -File -Filter "OpenTaskbar-$Tag-*" | Remove-Item -Force
+foreach ($arch in @('x64', 'x86')) {
+    $legacyWatchdog = Join-Path $OutputDir "OpenTaskbarWatchdog-$arch.exe"
+    if (Test-Path -LiteralPath $legacyWatchdog -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyWatchdog -Force
+    }
+}
 foreach ($name in @('checksums.txt', 'release-manifest.json', 'release-notes.md')) {
     $path = Join-Path $OutputDir $name
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
 
 $newEntries = [System.Collections.Generic.List[object]]::new()
-$watchdogByArch = [ordered]@{}
 foreach ($arch in @('x64', 'x86')) {
     $builtExe = Join-Path $OutputDir "OpenTaskbar-$arch.exe"
     if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
         throw "Missing Rust build output: $builtExe (run scripts/publish-portable.ps1 first)."
     }
 
-    # The exact PE embedded by build.rs. A wrong-arch watchdog would silently
-    # break crash recovery on 32-bit Windows, so fail the release instead.
-    $watchdogPath = Join-Path $OutputDir "OpenTaskbarWatchdog-$arch.exe"
-    if (-not (Test-Path -LiteralPath $watchdogPath -PathType Leaf)) {
-        throw "Missing $arch watchdog: $watchdogPath (run scripts/publish-portable.ps1 first)."
-    }
     $expectedMachine = if ($arch -eq 'x86') { 0x014C } else { 0x8664 }
-    $peMachine = Get-PeMachine -Path $watchdogPath
-    if ($peMachine -ne $expectedMachine) {
-        throw ("Watchdog for {0} has PE machine 0x{1:X4}, expected 0x{2:X4}." -f $arch, $peMachine, $expectedMachine)
-    }
-    $watchdogHash = Get-FileSha256 -Path $watchdogPath
-    $watchdogByArch[$arch] = [ordered]@{
-        architecture = $arch
-        peMachine    = ('0x{0:X4}' -f $peMachine)
-        sha256       = $watchdogHash
+    $appMachine = Get-PeMachine -Path $builtExe
+    if ($appMachine -ne $expectedMachine) {
+        throw ("Rust executable for {0} has PE machine 0x{1:X4}, expected 0x{2:X4}." -f $arch, $appMachine, $expectedMachine)
     }
 
     $exeName = "OpenTaskbar-$Tag-win-$arch.exe"
@@ -203,25 +196,8 @@ foreach ($arch in @('x64', 'x86')) {
             size                 = (Get-Item -LiteralPath $item.Path).Length
             sha256               = $hash
             port                 = 'rust'
-            watchdogArchitecture = $arch
-            watchdogPeMachine    = ('0x{0:X4}' -f $peMachine)
-            watchdogSha256       = $watchdogHash
         })
     }
-
-    # Publish the exact PE the hash refers to. Without this asset the manifest's
-    # watchdogSha256 cannot be independently verified by consumers.
-    $newEntries.Add([ordered]@{
-        name                 = "OpenTaskbarWatchdog-$arch.exe"
-        architecture         = $arch
-        kind                 = 'native-watchdog'
-        size                 = (Get-Item -LiteralPath $watchdogPath).Length
-        sha256               = $watchdogHash
-        port                 = 'rust'
-        watchdogArchitecture = $arch
-        watchdogPeMachine    = ('0x{0:X4}' -f $peMachine)
-        watchdogSha256       = $watchdogHash
-    })
 }
 
 # Generate checksums.txt from the Rust assets only; no reference rows can survive.
@@ -247,7 +223,7 @@ foreach ($line in $checksumLines) {
 
 $manifestPath = Join-Path $OutputDir 'release-manifest.json'
 $manifest = [ordered]@{
-    schemaVersion  = 2
+    schemaVersion  = 3
     tag            = $Tag
     version        = $version
     prerelease     = [bool]$Prerelease
@@ -259,7 +235,11 @@ $manifest = [ordered]@{
         crateVersion = $crateVersion
         locales      = 14
         keyParity    = $true
-        watchdog     = $watchdogByArch
+        watchdog     = [ordered]@{
+            embedded                = $true
+            architectureValidatedBy = 'crates/opentaskbar-shell/build.rs'
+            runtimeExtraction       = 'shared app-data directory for crash recovery'
+        }
     }
     verification   = [ordered]@{
         checksums  = 'checksums.txt (verified against release artifacts before attestation)'
@@ -274,6 +254,6 @@ Write-Utf8NoBom -Path $notesPath -Text (Get-ReleaseNotes -ChangelogPath $changel
 
 Write-Host "Packaged Rust-only release artifacts for $Tag ($($newEntries.Count) assets, crate $crateVersion)." -ForegroundColor Green
 foreach ($entry in $newEntries) {
-    Write-Host ("  {0} [{1}, watchdog {2}, sha256 {3}]" -f `
-        $entry['name'], $entry['architecture'], $entry['watchdogPeMachine'], $entry['watchdogSha256'])
+    Write-Host ("  {0} [{1}, sha256 {2}]" -f `
+        $entry['name'], $entry['architecture'], $entry['sha256'])
 }
