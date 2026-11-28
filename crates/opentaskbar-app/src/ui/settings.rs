@@ -25,9 +25,9 @@ use opentaskbar_core::paths;
 use opentaskbar_core::settings::{
     self, AiUsageRing, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle,
     DockContentAlignment, DockGapUnit, DockHeightMode, DockPosition, DockSettings, DockSize,
-    DockWidthMode, DynamicIslandLayout, DynamicIslandStyle, DynamicIslandVisibilityMode,
-    FisheyeIntensity, MiddleClickAction, StartButtonPlacement, SurfaceBackground, TemperatureUnit,
-    WidgetDensityMode,
+    DockWidthMode, DynamicIslandClosedDisplay, DynamicIslandIdleMode, DynamicIslandLayout,
+    DynamicIslandStyle, DynamicIslandVisibilityMode, FisheyeIntensity, MiddleClickAction,
+    StartButtonPlacement, SurfaceBackground, TemperatureUnit, WidgetDensityMode,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Map, Value, json};
@@ -300,6 +300,10 @@ const WIDGET_GLYPHS: &[(&str, &str)] = &[
     ("quicksettings", "\u{E9E9}"),
     ("keyboard", "\u{E765}"),
     ("focus", "\u{E7C8}"),
+    ("clipboard", "\u{E77F}"),
+    ("shelf", "\u{E8B7}"),
+    ("todo", "\u{E73A}"),
+    ("agents", "\u{E943}"),
 ];
 const AI_USAGE_GLYPH: &str = "\u{E99A}";
 const FALLBACK_WIDGET_GLYPH: &str = "\u{F246}";
@@ -1664,7 +1668,95 @@ fn notify_docks_reload() {
 enum ActiveTextField {
     Search,
     CustomThemeName,
+    TodoIcalUrl,
     AiSecret(&'static str),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HotkeySlot {
+    Launcher,
+    Dock,
+    IslandToggle,
+    SmartOcr,
+    QuickScreenshot,
+    ClipboardHistory,
+}
+
+impl HotkeySlot {
+    const ALL: [Self; 6] = [
+        Self::Launcher,
+        Self::Dock,
+        Self::IslandToggle,
+        Self::SmartOcr,
+        Self::QuickScreenshot,
+        Self::ClipboardHistory,
+    ];
+
+    fn title_key(self) -> &'static str {
+        match self {
+            Self::Launcher => "LauncherHotkey",
+            Self::Dock => "DockHotkey",
+            Self::IslandToggle => "HotkeyIslandToggle",
+            Self::SmartOcr => "HotkeySmartOcr",
+            Self::QuickScreenshot => "HotkeyQuickScreenshot",
+            Self::ClipboardHistory => "HotkeyClipboardHistory",
+        }
+    }
+
+    fn from_settings_key(key: &str) -> Option<Self> {
+        match key {
+            "LauncherHotkey" => Some(Self::Launcher),
+            "DockHotkey" => Some(Self::Dock),
+            "IslandToggleHotkey" => Some(Self::IslandToggle),
+            "OcrHotkey" => Some(Self::SmartOcr),
+            "ScreenshotHotkey" => Some(Self::QuickScreenshot),
+            "ClipboardHotkey" => Some(Self::ClipboardHistory),
+            _ => None,
+        }
+    }
+
+    fn binding(self, settings: &DockSettings) -> Option<hotkey::HotkeyBinding> {
+        match self {
+            Self::Launcher => settings.launcher_binding(),
+            Self::Dock => settings.dock_binding(),
+            Self::IslandToggle => settings.extra_hotkey_binding("IslandToggleHotkey"),
+            Self::SmartOcr => settings.extra_hotkey_binding("OcrHotkey"),
+            Self::QuickScreenshot => settings.extra_hotkey_binding("ScreenshotHotkey"),
+            Self::ClipboardHistory => settings.extra_hotkey_binding("ClipboardHotkey"),
+        }
+    }
+
+    fn set_value(self, settings: &mut DockSettings, value: String) {
+        let disabled = value.trim().is_empty() || value.eq_ignore_ascii_case("Disabled");
+        match self {
+            Self::Launcher => {
+                settings.custom_launcher_hotkey = Some(if disabled {
+                    "Disabled".to_owned()
+                } else {
+                    value
+                });
+            }
+            Self::Dock => {
+                settings.custom_dock_hotkey = Some(if disabled {
+                    "Disabled".to_owned()
+                } else {
+                    value
+                });
+            }
+            Self::IslandToggle => {
+                settings.set_island_toggle_hotkey(if disabled { String::new() } else { value });
+            }
+            Self::SmartOcr => {
+                settings.set_ocr_hotkey(if disabled { String::new() } else { value });
+            }
+            Self::QuickScreenshot => {
+                settings.set_screenshot_hotkey(if disabled { String::new() } else { value });
+            }
+            Self::ClipboardHistory => {
+                settings.set_clipboard_hotkey(if disabled { String::new() } else { value });
+            }
+        }
+    }
 }
 
 struct SettingsView {
@@ -1679,6 +1771,14 @@ struct SettingsView {
     custom_theme_name: String,
     custom_theme_name_selection: Range<usize>,
     custom_theme_name_focus: FocusHandle,
+    /// Calendar iCal (.ics) feed URL input inside the To-Do widget drawer.
+    todo_ical_url: String,
+    todo_ical_url_selection: Range<usize>,
+    todo_ical_url_focus: FocusHandle,
+    /// Inline feedback message after clicking `AgentInstallHook`.
+    agent_hook_status: Option<String>,
+    /// Inline feedback message after triggering Smart OCR / Quick Screenshot.
+    smart_tool_status: Option<String>,
     /// Collapsible advanced token inspector in Theme Studio.
     advanced_tokens_open: bool,
     /// Per-provider API key/token input buffers & focus handles (masked in UI, never persisted
@@ -1850,6 +1950,8 @@ impl SettingsView {
             settings.show_system_stats_widget,
             settings.show_media,
         );
+        let initial_ical_url = settings.ical_feed_url();
+        let initial_ical_url_len = initial_ical_url.encode_utf16().count();
         let mut view = Self {
             page: SettingsPage::Dock,
             focus,
@@ -1859,6 +1961,11 @@ impl SettingsView {
             custom_theme_name: initial_theme_name,
             custom_theme_name_selection: initial_theme_name_len..initial_theme_name_len,
             custom_theme_name_focus: cx.focus_handle(),
+            todo_ical_url: initial_ical_url,
+            todo_ical_url_selection: initial_ical_url_len..initial_ical_url_len,
+            todo_ical_url_focus: cx.focus_handle(),
+            agent_hook_status: None,
+            smart_tool_status: None,
             advanced_tokens_open: false,
             ai_secret_buffers: HashMap::new(),
             ai_secret_selections: HashMap::new(),
@@ -1931,6 +2038,9 @@ impl SettingsView {
         if self.custom_theme_name_focus.is_focused(window) {
             return ActiveTextField::CustomThemeName;
         }
+        if self.todo_ical_url_focus.is_focused(window) {
+            return ActiveTextField::TodoIcalUrl;
+        }
         for (&provider_id, handle) in &self.ai_secret_focus {
             if handle.is_focused(window) {
                 return ActiveTextField::AiSecret(provider_id);
@@ -1945,6 +2055,10 @@ impl SettingsView {
             ActiveTextField::CustomThemeName => (
                 self.custom_theme_name.as_str(),
                 self.custom_theme_name_selection.clone(),
+            ),
+            ActiveTextField::TodoIcalUrl => (
+                self.todo_ical_url.as_str(),
+                self.todo_ical_url_selection.clone(),
             ),
             ActiveTextField::AiSecret(pid) => {
                 let text = self
@@ -1969,7 +2083,7 @@ impl SettingsView {
         range: Range<usize>,
         text: &str,
     ) {
-        // Strip newlines from single-line inputs (e.g. pasted API keys or theme names).
+        // Strip newlines from single-line inputs (e.g. pasted API keys, iCal URLs, or theme names).
         let clean: String = text
             .chars()
             .filter(|ch| !matches!(ch, '\r' | '\n'))
@@ -1980,6 +2094,9 @@ impl SettingsView {
                 &mut self.custom_theme_name,
                 &mut self.custom_theme_name_selection,
             ),
+            ActiveTextField::TodoIcalUrl => {
+                (&mut self.todo_ical_url, &mut self.todo_ical_url_selection)
+            }
             ActiveTextField::AiSecret(pid) => {
                 let buf = self.ai_secret_buffers.entry(pid).or_default();
                 let len = buf.encode_utf16().count();
@@ -2005,6 +2122,8 @@ impl SettingsView {
             // Any edit means the user is searching again; the previous jump marker is stale.
             self.highlight_row = None;
             self.scroll_anchor = None;
+        } else if field == ActiveTextField::TodoIcalUrl {
+            self.settings.set_ical_feed_url(self.todo_ical_url.clone());
         }
     }
 
@@ -2020,7 +2139,11 @@ impl SettingsView {
                 if let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     let (_, sel) = self.text_field_ref(field);
                     self.replace_text_field_range(field, sel, &pasted);
-                    cx.notify();
+                    if field == ActiveTextField::TodoIcalUrl {
+                        self.auto_save(cx);
+                    } else {
+                        cx.notify();
+                    }
                 }
                 return true;
             }
@@ -2030,6 +2153,7 @@ impl SettingsView {
                 match field {
                     ActiveTextField::Search => self.search_selection = 0..len,
                     ActiveTextField::CustomThemeName => self.custom_theme_name_selection = 0..len,
+                    ActiveTextField::TodoIcalUrl => self.todo_ical_url_selection = 0..len,
                     ActiveTextField::AiSecret(pid) => {
                         self.ai_secret_selections.insert(pid, 0..len);
                     }
@@ -2048,7 +2172,11 @@ impl SettingsView {
                 } else if end > 0 {
                     self.replace_text_field_range(field, end - 1..end, "");
                 }
-                cx.notify();
+                if field == ActiveTextField::TodoIcalUrl {
+                    self.auto_save(cx);
+                } else {
+                    cx.notify();
+                }
                 true
             }
             "delete" => {
@@ -2061,7 +2189,11 @@ impl SettingsView {
                 } else if start < len {
                     self.replace_text_field_range(field, start..start + 1, "");
                 }
-                cx.notify();
+                if field == ActiveTextField::TodoIcalUrl {
+                    self.auto_save(cx);
+                } else {
+                    cx.notify();
+                }
                 true
             }
             _ => false,
@@ -5004,8 +5136,6 @@ impl SettingsView {
         };
         let chip_bd = if is_dark { 0xffffff1c } else { 0x00000016 };
         let track_bg = if is_dark { 0xffffff1f } else { 0x00000018 };
-        let spec = self.widget_runtime.chip_spec(id, &self.settings, is_dark);
-
         let chip = |inner: gpui::Div| -> AnyElement {
             div()
                 .w(px(chip_width))
@@ -5026,6 +5156,158 @@ impl SettingsView {
                 .into_any_element()
         };
 
+        // Crisp mini preview chips for the 4 new catalog widgets.
+        match id {
+            "clipboard" => {
+                return chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon_glyph(
+                            "\u{E77F}",
+                            13.5,
+                            crate::design::gpui_rgba(pal.widget_blue, 0xff),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(11.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(loc::t("WidgetClipboard")),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(format!(
+                                            "{} max",
+                                            self.settings.clipboard_max_items()
+                                        )),
+                                ),
+                        ),
+                );
+            }
+            "shelf" => {
+                return chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon_glyph(
+                            "\u{E8B7}",
+                            13.5,
+                            crate::design::gpui_rgba(pal.warning, 0xff),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(11.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(loc::t("WidgetFileShelf")),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(loc::t("ShelfEmptyHint")),
+                                ),
+                        ),
+                );
+            }
+            "todo" => {
+                return chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon_glyph(
+                            "\u{E73A}",
+                            13.5,
+                            crate::design::gpui_rgba(pal.success, 0xff),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(11.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child("2 · 14:30"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(loc::t("WidgetTodo")),
+                                ),
+                        ),
+                );
+            }
+            "agents" => {
+                return chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon_glyph(
+                                    "\u{E943}",
+                                    13.5,
+                                    crate::design::gpui_rgba(pal.widget_accent, 0xff),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .child(
+                                            div()
+                                                .size(px(6.0))
+                                                .rounded(px(3.0))
+                                                .bg(c_rgba(pal.success, 0xff)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(11.0)))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgba(t.dock_preview_fg))
+                                                .child("Claude"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(loc::t("WidgetAiAgents")),
+                                ),
+                        ),
+                );
+            }
+            _ => {}
+        }
+
+        let spec = self.widget_runtime.chip_spec(id, &self.settings, is_dark);
         let mini_bar = |ratio: f32, col: (u8, u8, u8), bar_w: f32| {
             let fill_w = (bar_w * ratio.clamp(0.0, 1.0))
                 .round()
@@ -5831,20 +6113,13 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn record_hotkey(&mut self, launcher: bool, cx: &mut Context<Self>) {
-        let title = loc::t(if launcher {
-            "LauncherHotkey"
-        } else {
-            "DockHotkey"
-        });
+    fn record_hotkey(&mut self, slot: HotkeySlot, cx: &mut Context<Self>) {
+        let title = loc::t(slot.title_key());
         let hint = loc::t("HotkeyCaptureHint");
-        let current = if launcher {
-            self.settings.launcher_binding()
-        } else {
-            self.settings.dock_binding()
-        }
-        .map(|binding| binding.display)
-        .unwrap_or_else(|| loc::t("HotkeyDisabled"));
+        let current = slot
+            .binding(&self.settings)
+            .map(|binding| binding.display)
+            .unwrap_or_else(|| loc::t("HotkeyDisabled"));
         let Some(text) = prompt::ask_name(0, self.is_dark(), &title, &hint, &current) else {
             return;
         };
@@ -5862,32 +6137,83 @@ impl SettingsView {
                 cx.notify();
                 return;
             };
-            let other = if launcher {
-                self.settings.dock_binding()
-            } else {
-                self.settings.launcher_binding()
-            };
-            if other.as_ref() == Some(&binding) {
-                let other_name = if launcher {
-                    "DockHotkey"
-                } else {
-                    "LauncherHotkey"
-                };
-                self.hotkey_status = loc::t_fmt("HotkeyConflict", &[&loc::t(other_name)]);
+            if let Some(conflict_slot) = HotkeySlot::ALL.into_iter().find(|other| {
+                *other != slot && other.binding(&self.settings).as_ref() == Some(&binding)
+            }) {
+                self.hotkey_status =
+                    loc::t_fmt("HotkeyConflict", &[&loc::t(conflict_slot.title_key())]);
                 cx.notify();
                 return;
             }
             binding.display
         };
-        if launcher {
-            self.settings.custom_launcher_hotkey = Some(value);
-        } else {
-            self.settings.custom_dock_hotkey = Some(value);
-        }
+        slot.set_value(&mut self.settings, value);
         self.hotkey_status.clear();
         self.auto_save(cx);
     }
 
+    fn clear_hotkey(&mut self, slot: HotkeySlot, cx: &mut Context<Self>) {
+        slot.set_value(&mut self.settings, "Disabled".to_owned());
+        self.hotkey_status.clear();
+        self.auto_save(cx);
+    }
+
+    fn install_agent_hook(&mut self, cx: &mut Context<Self>) {
+        self.agent_hook_status = Some(loc::t("QuickLoading"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { crate::widgets::agents::install_claude_code_hook() })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.agent_hook_status = Some(match result {
+                    Ok(msg) => msg,
+                    Err(err) => err,
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn trigger_smart_ocr(&mut self, cx: &mut Context<Self>) {
+        self.smart_tool_status = Some(loc::t("QuickActionOcr"));
+        cx.notify();
+        crate::platform::smart_tools::capture_and_ocr_async(|outcome| match outcome {
+            Ok(text) => {
+                opentaskbar_core::log::info(format!(
+                    "Smart OCR captured {} characters.",
+                    text.chars().count()
+                ));
+            }
+            Err(err) => {
+                opentaskbar_core::log::warn(format!("Smart OCR finished: {err}"));
+            }
+        });
+    }
+
+    fn trigger_quick_screenshot(&mut self, cx: &mut Context<Self>) {
+        self.smart_tool_status = Some(loc::t("QuickActionScreenshot"));
+        cx.notify();
+        crate::platform::smart_tools::capture_region_screenshot_async(
+            None,
+            |outcome| match outcome {
+                Ok(res) => {
+                    opentaskbar_core::log::info(format!("Quick screenshot: {}", res.summary));
+                }
+                Err(err) => {
+                    opentaskbar_core::log::warn(format!("Quick screenshot finished: {err}"));
+                }
+            },
+        );
+    }
+
+    fn sync_text_buffers_from_settings(&mut self) {
+        self.todo_ical_url = self.settings.ical_feed_url();
+        let len = self.todo_ical_url.encode_utf16().count();
+        self.todo_ical_url_selection = len..len;
+    }
     // ---- Theme brush picker value helpers -----------------------------------
     // The visual picker edits HSV directly; these helpers keep the preview hex, the
     // selected gradient stop and `design::brush` state in sync.
@@ -8357,6 +8683,10 @@ impl SettingsView {
                                 this.settings.set_widget_enabled(wid, true);
                                 if wid == "media" {
                                     this.settings.show_media = true;
+                                } else if wid == "clipboard" {
+                                    this.settings.set_clipboard_history_enabled(true);
+                                } else if wid == "agents" {
+                                    this.settings.set_agent_monitor_enabled(true);
                                 }
                                 let canonical = settings::canonical_widget_setting_id(wid);
                                 this.settings
@@ -9104,6 +9434,22 @@ impl SettingsView {
                             }),
                         ),
                     ),
+                    self.target_row(
+                        "WirelessMultiBrandEnabled",
+                        t,
+                        Some("\u{E702}"),
+                        loc::t("WirelessMultiBrandEnabled"),
+                        ios_switch(
+                            "sw-bt-multi-brand",
+                            t,
+                            self.settings.wireless_multi_brand_enabled(),
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.settings.wireless_multi_brand_enabled();
+                                this.settings.set_wireless_multi_brand_enabled(next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
                 ]
             }
             "storage" => vec![self.target_row(
@@ -9113,26 +9459,350 @@ impl SettingsView {
                 loc::t("StorageCompactMode"),
                 self.widget_bool_switch("sw-storage-compact", t, "StorageCompactMode", cx),
             )],
-            "media" => vec![self.target_row(
-                "ShowMedia",
-                t,
-                Some("\u{E8D6}"),
-                loc::t("WidgetShowInDockMedia"),
-                ios_switch(
-                    "sw-show-media",
+            "media" => vec![
+                self.target_row(
+                    "ShowMedia",
                     t,
-                    self.settings.show_media,
+                    Some("\u{E8D6}"),
+                    loc::t("WidgetShowInDockMedia"),
+                    ios_switch(
+                        "sw-show-media",
+                        t,
+                        self.settings.show_media,
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.show_media;
+                            this.settings.show_media = next;
+                            if next && this.settings.focus_mode {
+                                this.settings.focus_mode = false;
+                            }
+                            this.settings.set_widget_enabled("media", next);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+                self.target_row(
+                    "MediaWaveformEnabled",
+                    t,
+                    Some("\u{E9D2}"),
+                    loc::t("MediaWaveformEnabled"),
+                    ios_switch(
+                        "sw-media-waveform",
+                        t,
+                        self.settings.media_waveform_enabled(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.media_waveform_enabled();
+                            this.settings.set_media_waveform_enabled(next);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+                self.target_row(
+                    "MediaLyricsEnabled",
+                    t,
+                    Some("\u{E8D6}"),
+                    loc::t("MediaLyricsEnabled"),
+                    ios_switch(
+                        "sw-media-lyrics",
+                        t,
+                        self.settings.media_lyrics_enabled(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.media_lyrics_enabled();
+                            this.settings.set_media_lyrics_enabled(next);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+                self.target_row(
+                    "MediaLyricsPillEnabled",
+                    t,
+                    Some("\u{E8A1}"),
+                    loc::t("MediaLyricsPillEnabled"),
+                    ios_switch(
+                        "sw-media-lyrics-pill",
+                        t,
+                        self.settings.media_lyrics_pill_enabled(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.media_lyrics_pill_enabled();
+                            this.settings.set_media_lyrics_pill_enabled(next);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+            ],
+            "quicksettings" => vec![self.target_row(
+                "QuickPowerActionsEnabled",
+                t,
+                Some("\u{E7E8}"),
+                loc::t("QuickPowerActionsEnabled"),
+                ios_switch(
+                    "sw-quick-power-actions",
+                    t,
+                    self.settings.quick_power_actions_enabled(),
                     cx.listener(|this, _, _, cx| {
-                        let next = !this.settings.show_media;
-                        this.settings.show_media = next;
-                        if next && this.settings.focus_mode {
-                            this.settings.focus_mode = false;
-                        }
-                        this.settings.set_widget_enabled("media", next);
+                        let next = !this.settings.quick_power_actions_enabled();
+                        this.settings.set_quick_power_actions_enabled(next);
                         this.auto_save(cx);
                     }),
                 ),
             )],
+            "shelf" => vec![self.target_row(
+                "ShelfMaxItems",
+                t,
+                Some("\u{E8B7}"),
+                loc::t("ShelfMaxItems"),
+                self.number_stepper(
+                    "shelf-max-items",
+                    t,
+                    self.settings.shelf_max_items() as i32,
+                    4,
+                    32,
+                    |s| s.shelf_max_items() as i32,
+                    |s, value| s.set_shelf_max_items(value.clamp(4, 32) as usize),
+                    cx,
+                ),
+            )],
+            "clipboard" => vec![
+                self.target_row_desc(
+                    "ClipboardHistoryEnabled",
+                    t,
+                    Some("\u{E77F}"),
+                    loc::t("WidgetClipboard"),
+                    loc::t("WidgetClipboardDesc"),
+                    ios_switch(
+                        "sw-clipboard-history",
+                        t,
+                        self.settings.clipboard_history_enabled(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.clipboard_history_enabled();
+                            this.settings.set_clipboard_history_enabled(next);
+                            if next && this.settings.focus_mode {
+                                this.settings.focus_mode = false;
+                            }
+                            this.settings.set_widget_enabled("clipboard", next);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+                self.target_row(
+                    "ClipboardMaxItems",
+                    t,
+                    Some("\u{E77F}"),
+                    loc::t("ClipboardMaxItems"),
+                    self.number_stepper(
+                        "clipboard-max-items",
+                        t,
+                        self.settings.clipboard_max_items() as i32,
+                        5,
+                        50,
+                        |s| s.clipboard_max_items() as i32,
+                        |s, value| s.set_clipboard_max_items(value.clamp(5, 50) as usize),
+                        cx,
+                    ),
+                ),
+                self.target_row(
+                    "ClipboardIgnoreSensitive",
+                    t,
+                    Some("\u{E72E}"),
+                    loc::t("ClipboardIgnoreSensitive"),
+                    ios_switch(
+                        "sw-clipboard-ignore-sensitive",
+                        t,
+                        self.settings.clipboard_ignore_sensitive(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.clipboard_ignore_sensitive();
+                            this.settings.set_clipboard_ignore_sensitive(next);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+            ],
+            "todo" => {
+                let url_focused = self.todo_ical_url_focus.is_focused(window);
+                let url_caret = Self::byte_index_for_utf16(
+                    &self.todo_ical_url,
+                    self.todo_ical_url_selection.start,
+                );
+                let (url_before, url_after) = self.todo_ical_url.split_at(url_caret);
+                let url_display = if self.todo_ical_url.is_empty() {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_size(px(fonts::scaled_size(12.0)))
+                        .text_color(rgba(t.text_secondary))
+                        .child("https://…/calendar.ics")
+                } else {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(12.0)))
+                                .text_color(rgba(t.text_primary))
+                                .child(url_before.to_owned()),
+                        )
+                        .when(url_focused, |line| {
+                            line.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w(px(1.0))
+                                    .h(px(13.0))
+                                    .bg(rgba(t.accent)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(12.0)))
+                                .text_color(rgba(t.text_primary))
+                                .child(url_after.to_owned()),
+                        )
+                };
+                let url_input_inner = div()
+                    .id("todo-ical-url-input")
+                    .track_focus(&self.todo_ical_url_focus)
+                    .tab_index(0)
+                    .w(px(220.0))
+                    .h(px(30.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(rgba(t.surface_muted))
+                    .border_1()
+                    .border_color(rgba(if url_focused { t.accent } else { t.border }))
+                    .flex()
+                    .items_center()
+                    .cursor_text()
+                    .on_click(cx.listener(|this, _, win, cx| {
+                        this.todo_ical_url_focus.focus(win);
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, win, cx| {
+                        if !this.todo_ical_url_focus.is_focused(win) {
+                            return;
+                        }
+                        if this.handle_text_field_key_down(ActiveTextField::TodoIcalUrl, event, cx)
+                        {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(url_display);
+                let url_input = TextInput::new(
+                    url_input_inner,
+                    self.todo_ical_url_focus.clone(),
+                    cx.entity(),
+                );
+                vec![
+                    self.target_row(
+                        "TodoRemindersEnabled",
+                        t,
+                        Some("\u{EA8F}"),
+                        loc::t("TodoRemindersEnabled"),
+                        ios_switch(
+                            "sw-todo-reminders",
+                            t,
+                            self.settings.todo_reminders_enabled(),
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.settings.todo_reminders_enabled();
+                                this.settings.set_todo_reminders_enabled(next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    self.target_row(
+                        "TodoIcalUrl",
+                        t,
+                        Some("\u{E787}"),
+                        loc::t("TodoIcalUrl"),
+                        url_input,
+                    ),
+                    self.target_row(
+                        "TodoIcalPollMinutes",
+                        t,
+                        Some("\u{E916}"),
+                        loc::t("TodoIcalPollMinutes"),
+                        self.number_stepper_with_suffix(
+                            "todo-ical-poll-minutes",
+                            t,
+                            self.settings.ical_poll_minutes() as i32,
+                            " min",
+                            5,
+                            120,
+                            5,
+                            |s| s.ical_poll_minutes() as i32,
+                            |s, value| s.set_ical_poll_minutes(value.clamp(5, 120) as u32),
+                            cx,
+                        ),
+                    ),
+                ]
+            }
+            "agents" => {
+                let mut agent_rows = vec![
+                    setting_row(
+                        t,
+                        Some("\u{E943}"),
+                        loc::t("AgentMonitorEnabled"),
+                        ios_switch(
+                            "sw-agents-drawer-monitor",
+                            t,
+                            self.settings.agent_monitor_enabled(),
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.settings.agent_monitor_enabled();
+                                this.settings.set_agent_monitor_enabled(next);
+                                if next && this.settings.focus_mode {
+                                    this.settings.focus_mode = false;
+                                }
+                                this.settings.set_widget_enabled("agents", next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E7BA}"),
+                        loc::t("AgentApprovalBanners"),
+                        ios_switch(
+                            "sw-agents-drawer-approval",
+                            t,
+                            self.settings.agent_approval_banners(),
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.settings.agent_approval_banners();
+                                this.settings.set_agent_approval_banners(next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E896}"),
+                        loc::t("AgentInstallHook"),
+                        button(
+                            "btn-agents-drawer-install-hook",
+                            t,
+                            loc::t("AgentInstallHook"),
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| this.install_agent_hook(cx)),
+                        ),
+                    )
+                    .into_any_element(),
+                ];
+                if let Some(status) = &self.agent_hook_status {
+                    agent_rows.push(
+                        div()
+                            .w_full()
+                            .px(px(16.0))
+                            .py(px(6.0))
+                            .text_size(px(fonts::scaled_size(11.5)))
+                            .text_color(rgba(t.text_secondary))
+                            .child(status.clone())
+                            .into_any_element(),
+                    );
+                }
+                agent_rows
+            }
             "audio" => vec![
                 setting_row_desc(
                     t,
@@ -9374,6 +10044,10 @@ impl SettingsView {
                 this.settings.set_widget_enabled(wid, next);
                 if wid == "media" {
                     this.settings.show_media = next;
+                } else if wid == "clipboard" {
+                    this.settings.set_clipboard_history_enabled(next);
+                } else if wid == "agents" {
+                    this.settings.set_agent_monitor_enabled(next);
                 }
                 this.auto_save(cx);
             }),
@@ -9791,6 +10465,16 @@ impl SettingsView {
     fn render_dynamic_island(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let monitors = win32::enumerate_monitors();
         let di_opacity_pct = (self.settings.dynamic_island_opacity * 100.0).round() as i32;
+        let di_scale = self.settings.dynamic_island_scale();
+        let di_scale_pct = (di_scale * 100.0).round() as i32;
+        let idle_mode = self.settings.dynamic_island_idle_mode();
+        let closed_display_dim = idle_mode == DynamicIslandIdleMode::Full;
+        let auto_close_secs = self.settings.dynamic_island_auto_close_secs() as i32;
+        let auto_close_label = if auto_close_secs == 0 {
+            loc::t("QuickOff")
+        } else {
+            format!("{auto_close_secs}s")
+        };
 
         let di_disabled = !self.settings.dynamic_island_enable;
         let mut cards = vec![
@@ -9809,6 +10493,186 @@ impl SettingsView {
                             self.settings.dynamic_island_enable,
                             |s| &mut s.dynamic_island_enable,
                             cx,
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandIdleMode",
+                            t,
+                            Some("\u{E8A1}"),
+                            loc::t("DynamicIslandIdleMode"),
+                            self.enum_dropdown(
+                                "di-idle-mode",
+                                t,
+                                vec![
+                                    (loc::t("DynamicIslandIdleFull"), DynamicIslandIdleMode::Full),
+                                    (
+                                        loc::t("DynamicIslandIdleMinimal"),
+                                        DynamicIslandIdleMode::Minimal,
+                                    ),
+                                    (
+                                        loc::t("DynamicIslandIdleClosed"),
+                                        DynamicIslandIdleMode::Closed,
+                                    ),
+                                ],
+                                idle_mode,
+                                |this, value, cx| {
+                                    this.settings.set_dynamic_island_idle_mode(value);
+                                    this.auto_save(cx);
+                                },
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled || closed_display_dim,
+                        self.target_row(
+                            "DynamicIslandClosedDisplay",
+                            t,
+                            Some("\u{E80A}"),
+                            loc::t("DynamicIslandClosedDisplay"),
+                            self.enum_dropdown(
+                                "di-closed-display",
+                                t,
+                                vec![
+                                    (
+                                        loc::t("DynamicIslandClosedLine"),
+                                        DynamicIslandClosedDisplay::MinimalLine,
+                                    ),
+                                    (loc::t("WidgetClock"), DynamicIslandClosedDisplay::Clock),
+                                    (loc::t("WidgetMedia"), DynamicIslandClosedDisplay::Music),
+                                    (loc::t("WidgetAiUsage"), DynamicIslandClosedDisplay::AiUsage),
+                                    (loc::t("QuickOff"), DynamicIslandClosedDisplay::Hidden),
+                                ],
+                                self.settings.dynamic_island_closed_display(),
+                                |this, value, cx| {
+                                    this.settings.set_dynamic_island_closed_display(value);
+                                    this.auto_save(cx);
+                                },
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandHoverExpand",
+                            t,
+                            Some("\u{E8B0}"),
+                            loc::t("DynamicIslandHoverExpand"),
+                            ios_switch(
+                                "di-hover-expand",
+                                t,
+                                self.settings.dynamic_island_hover_expand(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.dynamic_island_hover_expand();
+                                    this.settings.set_dynamic_island_hover_expand(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandAutoClose",
+                            t,
+                            Some("\u{E916}"),
+                            loc::t("DynamicIslandAutoClose"),
+                            stepper(
+                                "di-auto-close-minus",
+                                "di-auto-close-plus",
+                                t,
+                                auto_close_label,
+                                cx.listener(|this, _, _, cx| {
+                                    let cur = this.settings.dynamic_island_auto_close_secs();
+                                    this.settings
+                                        .set_dynamic_island_auto_close_secs(cur.saturating_sub(2));
+                                    this.auto_save(cx);
+                                }),
+                                cx.listener(|this, _, _, cx| {
+                                    let cur = this.settings.dynamic_island_auto_close_secs();
+                                    this.settings
+                                        .set_dynamic_island_auto_close_secs((cur + 2).min(120));
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandFollowMouse",
+                            t,
+                            Some("\u{E962}"),
+                            loc::t("DynamicIslandFollowMouse"),
+                            ios_switch(
+                                "di-follow-mouse",
+                                t,
+                                self.settings.dynamic_island_follow_mouse(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.dynamic_island_follow_mouse();
+                                    this.settings.set_dynamic_island_follow_mouse(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandScale",
+                            t,
+                            Some("\u{E71E}"),
+                            loc::t("DynamicIslandScale"),
+                            live_slider(
+                                "di-scale",
+                                t,
+                                ((di_scale - 0.80) / 0.55).clamp(0.0, 1.0),
+                                12,
+                                loc::t_fmt("OpacityPercent", &[&di_scale_pct.to_string()]),
+                                |i| {
+                                    let entity = cx.entity().downgrade();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = (0.80 + (i as f32) * 0.05).clamp(0.80, 1.35);
+                                            if (this.settings.dynamic_island_scale() - next).abs()
+                                                > 0.001
+                                            {
+                                                this.settings.set_dynamic_island_scale(next);
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "PrivacyIndicatorsEnabled",
+                            t,
+                            Some("\u{E720}"),
+                            loc::t("PrivacyIndicatorsEnabled"),
+                            ios_switch(
+                                "di-privacy-dots",
+                                t,
+                                self.settings.privacy_indicators_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.privacy_indicators_enabled();
+                                    this.settings.set_privacy_indicators_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
                         ),
                     )
                     .into_any_element(),
@@ -10049,6 +10913,306 @@ impl SettingsView {
                 ],
             )
             .into_any_element(),
+            section_card(
+                t,
+                loc::t("SectionIslandHuds"),
+                vec![
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudVolumeEnabled",
+                            t,
+                            Some("\u{E995}"),
+                            loc::t("HudVolumeEnabled"),
+                            ios_switch(
+                                "sw-hud-volume",
+                                t,
+                                self.settings.hud_volume_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_volume_enabled();
+                                    this.settings.set_hud_volume_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudBrightnessEnabled",
+                            t,
+                            Some("\u{E706}"),
+                            loc::t("HudBrightnessEnabled"),
+                            ios_switch(
+                                "sw-hud-brightness",
+                                t,
+                                self.settings.hud_brightness_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_brightness_enabled();
+                                    this.settings.set_hud_brightness_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudCapsLockEnabled",
+                            t,
+                            Some("\u{E765}"),
+                            loc::t("HudCapsLockEnabled"),
+                            ios_switch(
+                                "sw-hud-capslock",
+                                t,
+                                self.settings.hud_capslock_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_capslock_enabled();
+                                    this.settings.set_hud_capslock_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudKeyboardLangEnabled",
+                            t,
+                            Some("\u{E774}"),
+                            loc::t("HudKeyboardLangEnabled"),
+                            ios_switch(
+                                "sw-hud-kbd-lang",
+                                t,
+                                self.settings.hud_keyboard_lang_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_keyboard_lang_enabled();
+                                    this.settings.set_hud_keyboard_lang_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudPowerEnabled",
+                            t,
+                            Some("\u{E850}"),
+                            loc::t("HudPowerEnabled"),
+                            ios_switch(
+                                "sw-hud-power",
+                                t,
+                                self.settings.hud_power_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_power_enabled();
+                                    this.settings.set_hud_power_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudNetworkEnabled",
+                            t,
+                            Some("\u{E701}"),
+                            loc::t("HudNetworkEnabled"),
+                            ios_switch(
+                                "sw-hud-network",
+                                t,
+                                self.settings.hud_network_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_network_enabled();
+                                    this.settings.set_hud_network_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudBluetoothEnabled",
+                            t,
+                            Some("\u{E702}"),
+                            loc::t("HudBluetoothEnabled"),
+                            ios_switch(
+                                "sw-hud-bluetooth",
+                                t,
+                                self.settings.hud_bluetooth_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.hud_bluetooth_enabled();
+                                    this.settings.set_hud_bluetooth_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "HudDurationMs",
+                            t,
+                            Some("\u{E916}"),
+                            loc::t("HudDurationMs"),
+                            self.number_stepper_with_suffix(
+                                "hud-duration-ms",
+                                t,
+                                self.settings.hud_duration_ms() as i32,
+                                " ms",
+                                600,
+                                6000,
+                                200,
+                                |s| s.hud_duration_ms() as i32,
+                                |s, value| s.set_hud_duration_ms(value.clamp(600, 6000) as u32),
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row_desc(
+                            "IslandNotificationsEnabled",
+                            t,
+                            Some("\u{EA8F}"),
+                            loc::t("IslandNotificationsEnabled"),
+                            loc::t("IslandNotificationsDesc"),
+                            ios_switch(
+                                "sw-island-notifications",
+                                t,
+                                self.settings.island_notifications_enabled(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.island_notifications_enabled();
+                                    this.settings.set_island_notifications_enabled(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled || !self.settings.island_notifications_enabled(),
+                        self.target_row(
+                            "IslandNotificationsDuration",
+                            t,
+                            Some("\u{E916}"),
+                            loc::t("IslandNotificationsDuration"),
+                            self.number_stepper_with_suffix(
+                                "island-notif-duration",
+                                t,
+                                self.settings.island_notifications_duration_ms() as i32,
+                                " ms",
+                                1500,
+                                12_000,
+                                500,
+                                |s| s.island_notifications_duration_ms() as i32,
+                                |s, value| {
+                                    s.set_island_notifications_duration_ms(
+                                        value.clamp(1500, 12_000) as u32,
+                                    );
+                                },
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled || !self.settings.island_notifications_enabled(),
+                        self.target_row(
+                            "IslandNotificationsRespectFocus",
+                            t,
+                            Some("\u{E7C8}"),
+                            loc::t("IslandNotificationsRespectFocus"),
+                            ios_switch(
+                                "sw-island-notif-focus",
+                                t,
+                                self.settings.island_notifications_respect_focus(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.island_notifications_respect_focus();
+                                    this.settings.set_island_notifications_respect_focus(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+            section_card(t, loc::t("WidgetAiAgents"), {
+                let mut rows = vec![
+                    self.target_row(
+                        "AgentMonitorEnabled",
+                        t,
+                        Some("\u{E943}"),
+                        loc::t("AgentMonitorEnabled"),
+                        ios_switch(
+                            "sw-di-agent-monitor",
+                            t,
+                            self.settings.agent_monitor_enabled(),
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.settings.agent_monitor_enabled();
+                                this.settings.set_agent_monitor_enabled(next);
+                                this.settings.set_widget_enabled("agents", next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    self.target_row(
+                        "AgentApprovalBanners",
+                        t,
+                        Some("\u{E7BA}"),
+                        loc::t("AgentApprovalBanners"),
+                        ios_switch(
+                            "sw-di-agent-approval",
+                            t,
+                            self.settings.agent_approval_banners(),
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.settings.agent_approval_banners();
+                                this.settings.set_agent_approval_banners(next);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    setting_row(
+                        t,
+                        Some("\u{E896}"),
+                        loc::t("AgentInstallHook"),
+                        button(
+                            "btn-di-agent-install-hook",
+                            t,
+                            loc::t("AgentInstallHook"),
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| this.install_agent_hook(cx)),
+                        ),
+                    )
+                    .into_any_element(),
+                ];
+                if let Some(status) = &self.agent_hook_status {
+                    rows.push(
+                        div()
+                            .w_full()
+                            .px(px(16.0))
+                            .py(px(6.0))
+                            .text_size(px(fonts::scaled_size(11.5)))
+                            .text_color(rgba(t.text_secondary))
+                            .child(status.clone())
+                            .into_any_element(),
+                    );
+                }
+                rows
+            })
+            .into_any_element(),
         ];
 
         let all_widgets: Vec<&'static widgets::WidgetDescriptor> =
@@ -10138,6 +11302,10 @@ impl SettingsView {
                                     this.settings.set_widget_enabled(wid, true);
                                     if wid == "media" {
                                         this.settings.show_media = true;
+                                    } else if wid == "clipboard" {
+                                        this.settings.set_clipboard_history_enabled(true);
+                                    } else if wid == "agents" {
+                                        this.settings.set_agent_monitor_enabled(true);
                                     }
                                     let canonical = settings::canonical_widget_setting_id(wid);
                                     this.settings
@@ -10168,6 +11336,10 @@ impl SettingsView {
                         this.settings.set_widget_enabled(wid, true);
                         if wid == "media" {
                             this.settings.show_media = true;
+                        } else if wid == "clipboard" {
+                            this.settings.set_clipboard_history_enabled(true);
+                        } else if wid == "agents" {
+                            this.settings.set_agent_monitor_enabled(true);
                         }
                         let canonical = settings::canonical_widget_setting_id(wid);
                         this.settings
@@ -10292,6 +11464,252 @@ impl SettingsView {
             })
             .collect();
 
+        let hotkey_control = |slot: HotkeySlot,
+                              btn_id: &'static str,
+                              clear_id: &'static str,
+                              cx: &mut Context<Self>|
+         -> AnyElement {
+            let binding = slot.binding(&self.settings);
+            let label = binding
+                .as_ref()
+                .map(|b| b.display.clone())
+                .unwrap_or_else(|| loc::t("HotkeyDisabled"));
+            let has_binding = binding.is_some();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(button(
+                    btn_id,
+                    t,
+                    label,
+                    ButtonVariant::Secondary,
+                    cx.listener(move |this, _, _, cx| this.record_hotkey(slot, cx)),
+                ))
+                .when(has_binding, |row| {
+                    row.child(button(
+                        clear_id,
+                        t,
+                        loc::t("HotkeyDisabled"),
+                        ButtonVariant::Secondary,
+                        cx.listener(move |this, _, _, cx| this.clear_hotkey(slot, cx)),
+                    ))
+                })
+                .into_any_element()
+        };
+
+        let hotkey_conflicts = self.settings.detect_hotkey_conflicts();
+        let mut hotkey_rows: Vec<AnyElement> = vec![
+            setting_row(
+                t,
+                Some("\u{E721}"),
+                loc::t("LauncherHotkey"),
+                hotkey_control(
+                    HotkeySlot::Launcher,
+                    "btn-hotkey-launcher",
+                    "btn-hotkey-launcher-clear",
+                    cx,
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E765}"),
+                loc::t("DockHotkey"),
+                hotkey_control(
+                    HotkeySlot::Dock,
+                    "btn-hotkey-dock",
+                    "btn-hotkey-dock-clear",
+                    cx,
+                ),
+            )
+            .into_any_element(),
+            self.target_row(
+                "HotkeyIslandToggle",
+                t,
+                Some("\u{E8A1}"),
+                loc::t("HotkeyIslandToggle"),
+                hotkey_control(
+                    HotkeySlot::IslandToggle,
+                    "btn-hotkey-island-toggle",
+                    "btn-hotkey-island-toggle-clear",
+                    cx,
+                ),
+            ),
+            self.target_row(
+                "HotkeySmartOcr",
+                t,
+                Some("\u{E8C1}"),
+                loc::t("HotkeySmartOcr"),
+                hotkey_control(
+                    HotkeySlot::SmartOcr,
+                    "btn-hotkey-smart-ocr",
+                    "btn-hotkey-smart-ocr-clear",
+                    cx,
+                ),
+            ),
+            self.target_row(
+                "HotkeyQuickScreenshot",
+                t,
+                Some("\u{E722}"),
+                loc::t("HotkeyQuickScreenshot"),
+                hotkey_control(
+                    HotkeySlot::QuickScreenshot,
+                    "btn-hotkey-quick-screenshot",
+                    "btn-hotkey-quick-screenshot-clear",
+                    cx,
+                ),
+            ),
+            self.target_row(
+                "HotkeyClipboardHistory",
+                t,
+                Some("\u{E77F}"),
+                loc::t("HotkeyClipboardHistory"),
+                hotkey_control(
+                    HotkeySlot::ClipboardHistory,
+                    "btn-hotkey-clipboard-history",
+                    "btn-hotkey-clipboard-history-clear",
+                    cx,
+                ),
+            ),
+        ];
+        if !hotkey_conflicts.is_empty() {
+            let is_dark = self.resolve_is_dark();
+            let detail = hotkey_conflicts
+                .iter()
+                .map(|(a, b)| {
+                    let a_name = HotkeySlot::from_settings_key(a)
+                        .map(|s| loc::t(s.title_key()))
+                        .unwrap_or_else(|| a.clone());
+                    let b_name = HotkeySlot::from_settings_key(b)
+                        .map(|s| loc::t(s.title_key()))
+                        .unwrap_or_else(|| b.clone());
+                    format!("{a_name} / {b_name}")
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let warn_fg = if is_dark { 0xfcd34dff } else { 0xb45309ff };
+            let warn_bg = if is_dark { 0xf59e0b24 } else { 0xf59e0b1f };
+            let warn_bd = if is_dark { 0xf59e0b66 } else { 0xd9770666 };
+            hotkey_rows.push(
+                div()
+                    .w_full()
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(8.0))
+                            .bg(rgba(warn_bg))
+                            .border_1()
+                            .border_color(rgba(warn_bd))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon_glyph("\u{E7BA}", 13.0, warn_fg))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(fonts::scaled_size(11.5)))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(rgba(warn_fg))
+                                    .child(format!(
+                                        "{}: {detail}",
+                                        loc::t("HotkeyConflictWarning")
+                                    )),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if !self.hotkey_status.is_empty() {
+            hotkey_rows.push(
+                div()
+                    .w_full()
+                    .px(px(16.0))
+                    .py(px(6.0))
+                    .text_size(px(fonts::scaled_size(12.0)))
+                    .text_color(rgba(t.text_secondary))
+                    .child(self.hotkey_status.clone())
+                    .into_any_element(),
+            );
+        }
+
+        let mut smart_tools_rows: Vec<AnyElement> = vec![
+            self.target_row_desc(
+                "SmartOcrEnabled",
+                t,
+                Some("\u{E8C1}"),
+                loc::t("SmartOcrEnabled"),
+                loc::t("SmartOcrDesc"),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(button_with_state(
+                        "btn-smart-ocr-trigger",
+                        t,
+                        loc::t("QuickActionOcr"),
+                        ButtonVariant::Secondary,
+                        self.settings.smart_ocr_enabled(),
+                        cx.listener(|this, _, _, cx| this.trigger_smart_ocr(cx)),
+                    ))
+                    .child(ios_switch(
+                        "sw-smart-ocr",
+                        t,
+                        self.settings.smart_ocr_enabled(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.smart_ocr_enabled();
+                            this.settings.set_smart_ocr_enabled(next);
+                            this.auto_save(cx);
+                        }),
+                    )),
+            ),
+            self.target_row(
+                "QuickScreenshotEnabled",
+                t,
+                Some("\u{E722}"),
+                loc::t("QuickScreenshotEnabled"),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(button_with_state(
+                        "btn-quick-screenshot-trigger",
+                        t,
+                        loc::t("QuickActionScreenshot"),
+                        ButtonVariant::Secondary,
+                        self.settings.quick_screenshot_enabled(),
+                        cx.listener(|this, _, _, cx| this.trigger_quick_screenshot(cx)),
+                    ))
+                    .child(ios_switch(
+                        "sw-quick-screenshot",
+                        t,
+                        self.settings.quick_screenshot_enabled(),
+                        cx.listener(|this, _, _, cx| {
+                            let next = !this.settings.quick_screenshot_enabled();
+                            this.settings.set_quick_screenshot_enabled(next);
+                            this.auto_save(cx);
+                        }),
+                    )),
+            ),
+        ];
+        if let Some(status) = &self.smart_tool_status {
+            smart_tools_rows.push(
+                div()
+                    .w_full()
+                    .px(px(16.0))
+                    .py(px(6.0))
+                    .text_size(px(fonts::scaled_size(11.5)))
+                    .text_color(rgba(t.text_secondary))
+                    .child(status.clone())
+                    .into_any_element(),
+            );
+        }
+
         let mut out = vec![
             section_card(
                 t,
@@ -10306,51 +11724,8 @@ impl SettingsView {
                 )],
             )
             .into_any_element(),
-            section_card(
-                t,
-                loc::t("SectionHotkeys"),
-                vec![
-                    setting_row(
-                        t,
-                        Some("\u{E721}"),
-                        loc::t("LauncherHotkey"),
-                        button(
-                            "btn-hotkey-launcher",
-                            t,
-                            self.settings
-                                .launcher_binding()
-                                .map(|binding| binding.display)
-                                .unwrap_or_else(|| loc::t("HotkeyDisabled")),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| this.record_hotkey(true, cx)),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E765}"),
-                        loc::t("DockHotkey"),
-                        button(
-                            "btn-hotkey-dock",
-                            t,
-                            self.settings
-                                .dock_binding()
-                                .map(|binding| binding.display)
-                                .unwrap_or_else(|| loc::t("HotkeyDisabled")),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| this.record_hotkey(false, cx)),
-                        ),
-                    )
-                    .into_any_element(),
-                    div()
-                        .w_full()
-                        .text_size(px(fonts::scaled_size(12.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(self.hotkey_status.clone())
-                        .into_any_element(),
-                ],
-            )
-            .into_any_element(),
+            section_card(t, loc::t("SectionSmartTools"), smart_tools_rows).into_any_element(),
+            section_card(t, loc::t("SectionHotkeys"), hotkey_rows).into_any_element(),
             section_card(
                 t,
                 loc::t("Profiles"),
@@ -10405,6 +11780,7 @@ impl SettingsView {
                                             }
                                             this.settings.active_profile =
                                                 Some(profile_name.clone());
+                                            this.sync_text_buffers_from_settings();
                                             fonts::apply_settings(&this.settings);
                                             loc::set_language(&this.settings.language);
                                             sync_from_settings(&this.settings);
@@ -10603,6 +11979,7 @@ impl SettingsView {
                                     let src = settings::app_data_dir().join("settings.backup.json");
                                     if src.exists() {
                                         this.settings = settings::load_from(&src);
+                                        this.sync_text_buffers_from_settings();
                                         fonts::apply_settings(&this.settings);
                                         loc::set_language(&this.settings.language);
                                         sync_from_settings(&this.settings);
@@ -10627,6 +12004,9 @@ impl SettingsView {
                                 this.settings = DockSettings::default();
                                 this.custom_theme_name.clear();
                                 this.custom_theme_name_selection = 0..0;
+                                this.sync_text_buffers_from_settings();
+                                this.agent_hook_status = None;
+                                this.smart_tool_status = None;
                                 this.theme_status.clear();
                                 this.token_apply_status.clear();
                                 fonts::apply_settings(&this.settings);
@@ -10797,7 +12177,11 @@ impl EntityInputHandler for SettingsView {
         let field = self.focused_text_field(window);
         let range = range.unwrap_or_else(|| self.text_field_ref(field).1);
         self.replace_text_field_range(field, range, text);
-        cx.notify();
+        if field == ActiveTextField::TodoIcalUrl {
+            self.auto_save(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn replace_and_mark_text_in_range(
@@ -10811,7 +12195,11 @@ impl EntityInputHandler for SettingsView {
         let field = self.focused_text_field(window);
         let range = range.unwrap_or_else(|| self.text_field_ref(field).1);
         self.replace_text_field_range(field, range, new_text);
-        cx.notify();
+        if field == ActiveTextField::TodoIcalUrl {
+            self.auto_save(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn bounds_for_range(

@@ -94,6 +94,16 @@ impl BatterySource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WirelessDeviceKind {
+    Mouse,
+    Keyboard,
+    Headphones,
+    Gamepad,
+    #[default]
+    Other,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WirelessReading {
     /// VID:PID:serial tabanlı, sağlayıcı önekli kararlı kimlik.
@@ -105,6 +115,9 @@ pub struct WirelessReading {
     pub is_charging: bool,
     pub source: BatterySource,
     pub stale: bool,
+    pub device_kind: WirelessDeviceKind,
+    /// Optional secondary / spare dock battery (e.g. SteelSeries Arctis Nova Pro / Arctis Pro).
+    pub secondary_level: Option<f32>,
 }
 
 impl WirelessReading {
@@ -199,6 +212,76 @@ const HID_CLASS_GUID: Guid = Guid {
 };
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct DevPropKey {
+    fmtid: Guid,
+    pid: u32,
+}
+
+#[repr(C)]
+struct SpDevinfoData {
+    cb_size: u32,
+    class_guid: Guid,
+    dev_inst: u32,
+    reserved: usize,
+}
+
+/// `DEVPKEY_Bluetooth_Battery`: `{104EA319-6EE2-4701-BD47-8DDBF425BBE5}, 2`.
+const DEVPKEY_BLUETOOTH_BATTERY: DevPropKey = DevPropKey {
+    fmtid: Guid {
+        data1: 0x104E_A319,
+        data2: 0x6EE2,
+        data3: 0x4701,
+        data4: [0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5],
+    },
+    pid: 2,
+};
+
+/// `DEVPKEY_Device_IsPresent`: `{540B947E-8B40-45BC-A8A2-6A0B894CBDA2}, 5`.
+const DEVPKEY_DEVICE_IS_PRESENT: DevPropKey = DevPropKey {
+    fmtid: Guid {
+        data1: 0x540B_947E,
+        data2: 0x8B40,
+        data3: 0x45BC,
+        data4: [0xA8, 0xA2, 0x6A, 0x0B, 0x89, 0x4C, 0xBD, 0xA2],
+    },
+    pid: 5,
+};
+
+/// `DEVPKEY_Device_FriendlyName`: `{A45C254E-DF1C-4EFD-8020-67D146A850E0}, 14`.
+const DEVPKEY_DEVICE_FRIENDLY_NAME: DevPropKey = DevPropKey {
+    fmtid: Guid {
+        data1: 0xA45C_254E,
+        data2: 0xDF1C,
+        data3: 0x4EFD,
+        data4: [0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0],
+    },
+    pid: 14,
+};
+
+/// `DEVPKEY_Device_DeviceDesc`: `{A45C254E-DF1C-4EFD-8020-67D146A850E0}, 2`.
+const DEVPKEY_DEVICE_DESC: DevPropKey = DevPropKey {
+    fmtid: Guid {
+        data1: 0xA45C_254E,
+        data2: 0xDF1C,
+        data3: 0x4EFD,
+        data4: [0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0],
+    },
+    pid: 2,
+};
+
+/// `DEVPKEY_Device_InstanceId`: `{78C34FC8-104A-4ACA-9EA4-524D52996E57}, 256`.
+const DEVPKEY_DEVICE_INSTANCE_ID: DevPropKey = DevPropKey {
+    fmtid: Guid {
+        data1: 0x78C3_4FC8,
+        data2: 0x104A,
+        data3: 0x4ACA,
+        data4: [0x9E, 0xA4, 0x52, 0x4D, 0x52, 0x99, 0x6E, 0x57],
+    },
+    pid: 256,
+};
+
+#[repr(C)]
 struct SpDeviceInterfaceData {
     cb_size: u32,
     interface_class_guid: Guid,
@@ -285,7 +368,12 @@ const FILE_SHARE_WRITE: u32 = 0x2;
 const OPEN_EXISTING: u32 = 3;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 const DIGCF_PRESENT: u32 = 0x2;
+const DIGCF_ALLCLASSES: u32 = 0x4;
 const DIGCF_DEVICEINTERFACE: u32 = 0x10;
+const DEVPROP_TYPE_BYTE: u32 = 0x0000_0003;
+const DEVPROP_TYPE_UINT32: u32 = 0x0000_0007;
+const DEVPROP_TYPE_BOOLEAN: u32 = 0x0000_0011;
+const DEVPROP_TYPE_STRING: u32 = 0x0000_0012;
 const ERROR_IO_PENDING: u32 = 997;
 const ERROR_NOT_FOUND: u32 = 1168;
 const WAIT_OBJECT_0: u32 = 0;
@@ -373,6 +461,21 @@ unsafe extern "system" {
         detail_data_size: u32,
         required_size: *mut u32,
         device_info_data: *mut c_void,
+    ) -> i32;
+    fn SetupDiEnumDeviceInfo(
+        info_set: Handle,
+        member_index: u32,
+        device_info_data: *mut SpDevinfoData,
+    ) -> i32;
+    fn SetupDiGetDevicePropertyW(
+        info_set: Handle,
+        device_info_data: *const SpDevinfoData,
+        property_key: *const DevPropKey,
+        property_type: *mut u32,
+        property_buffer: *mut u8,
+        property_buffer_size: u32,
+        required_size: *mut u32,
+        flags: u32,
     ) -> i32;
     fn SetupDiDestroyDeviceInfoList(info_set: Handle) -> i32;
 }
@@ -480,6 +583,8 @@ fn reading(
     is_charging: bool,
     source: BatterySource,
 ) -> WirelessReading {
+    let device_kind =
+        super::wireless_vendors_ext::classify_wireless_device_kind(0, 0, &name, source, &id);
     WirelessReading {
         id,
         name,
@@ -488,6 +593,32 @@ fn reading(
         is_charging,
         source,
         stale: false,
+        device_kind,
+        secondary_level: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reading_with_meta(
+    id: String,
+    name: String,
+    level_01: f32,
+    is_connected: bool,
+    is_charging: bool,
+    source: BatterySource,
+    device_kind: WirelessDeviceKind,
+    secondary_level: Option<f32>,
+) -> WirelessReading {
+    WirelessReading {
+        id,
+        name,
+        level_01: clamp01(level_01),
+        is_connected,
+        is_charging,
+        source,
+        stale: false,
+        device_kind,
+        secondary_level: secondary_level.map(clamp01),
     }
 }
 
@@ -554,6 +685,10 @@ pub fn is_ignored_wired_device(name: &str) -> bool {
         return true;
     }
     lower.contains("wired") && !lower.contains("wireless")
+}
+
+fn is_ignored_wired_product(product: &str) -> bool {
+    !product.trim().is_empty() && is_ignored_wired_device(product)
 }
 
 fn is_ignored_wired_reading(reading: &WirelessReading) -> bool {
@@ -885,6 +1020,28 @@ impl HidSession {
         };
         let handle = OwnedHandle::new(handle)?;
         if !feature_only && is_system_mouse_or_keyboard(handle.raw()) {
+            return None;
+        }
+        Some(Self { handle })
+    }
+
+    /// Opens an overlapped read-only HID session (`GENERIC_READ`, no write access).
+    /// Used by passive input-report readers such as `GamepadHid`.
+    fn open_read_only(path: &str) -> Option<Self> {
+        let wide_path = wide(path);
+        let handle = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                0,
+            )
+        };
+        let handle = OwnedHandle::new(handle)?;
+        if is_system_mouse_or_keyboard(handle.raw()) {
             return None;
         }
         Some(Self { handle })
@@ -1352,6 +1509,11 @@ fn razer_parse_reply(raw: &[u8], expected_command: u8) -> Option<u8> {
     Some(payload[9])
 }
 
+fn razer_reply_tx_id(raw: &[u8]) -> Option<u8> {
+    let payload = razer_normalize(raw);
+    (payload.len() >= RAZER_PAYLOAD_LEN).then_some(payload[1])
+}
+
 fn razer_level_01(raw: u8) -> f32 {
     clamp01(f32::from(raw) / 255.0)
 }
@@ -1366,6 +1528,7 @@ enum SsProtocol {
     ArctisLegacy,
     ArctisPro,
     Mouse,
+    Keyboard,
 }
 
 struct SsParsed {
@@ -1377,41 +1540,57 @@ struct SsParsed {
 
 fn ss_protocol_for_pid(pid: u16) -> Option<SsProtocol> {
     match pid {
-        0x12E0 | 0x12E5 => Some(SsProtocol::NovaPro),
-        0x2202 | 0x2206 | 0x220A | 0x223A | 0x2258 | 0x227E | 0x2266 | 0x226A | 0x220E | 0x2212
-        | 0x2216 => Some(SsProtocol::Nova7),
-        0x2232 | 0x2236 | 0x223E => Some(SsProtocol::Nova5),
+        0x12E0 | 0x12E2 | 0x12E5 | 0x12E6 => Some(SsProtocol::NovaPro),
+        0x2202 | 0x2204 | 0x2206 | 0x2208 | 0x220A | 0x223A | 0x2258 | 0x225A | 0x227E | 0x2266
+        | 0x226A | 0x220E | 0x2212 | 0x2216 => Some(SsProtocol::Nova7),
+        0x2232 | 0x2234 | 0x2236 | 0x223E | 0x2240 | 0x2242 => Some(SsProtocol::Nova5),
         0x12B3 | 0x12B6 | 0x1260 | 0x12AD | 0x12D5 | 0x12D7 | 0x12C2 => {
             Some(SsProtocol::ArctisLegacy)
         }
         0x1290 => Some(SsProtocol::ArctisPro),
-        0x1838 | 0x1852 | 0x1858 | 0x185E | 0x1842 | 0x1848 | 0x1830 | 0x172B => {
-            Some(SsProtocol::Mouse)
-        }
+        0x1624 | 0x1626 | 0x162C | 0x162E | 0x1630 => Some(SsProtocol::Keyboard),
+        0x1838 | 0x183A | 0x1852 | 0x1854 | 0x1858 | 0x185A | 0x185E | 0x1860 | 0x1842 | 0x1848
+        | 0x1830 | 0x1832 | 0x172B => Some(SsProtocol::Mouse),
         _ => None,
     }
 }
 
 fn ss_default_name(pid: u16) -> &'static str {
     match pid {
-        0x12E0 | 0x12E5 => "Arctis Nova Pro Wireless",
-        0x2202 | 0x2206 | 0x220A | 0x223A | 0x2258 | 0x227E => "Arctis Nova 7 Wireless",
+        0x12E0 | 0x12E2 | 0x12E5 | 0x12E6 => "Arctis Nova Pro Wireless",
+        0x2202 | 0x2204 | 0x2206 | 0x2208 | 0x220A | 0x223A | 0x2258 | 0x225A | 0x227E => {
+            "Arctis Nova 7 Wireless"
+        }
         0x2266 => "Arctis Nova 3P Wireless",
         0x226A => "Arctis Nova 3X Wireless",
-        0x2232 | 0x2236 | 0x223E => "Arctis Nova 5 Wireless",
+        0x2232 | 0x2234 | 0x2236 | 0x223E | 0x2240 | 0x2242 => "Arctis Nova 5 Wireless",
         0x12B3 | 0x12B6 => "Arctis 1 Wireless",
         0x220E | 0x2212 | 0x2216 => "Arctis 7+ Wireless",
         0x1260 | 0x12AD | 0x12D5 | 0x12D7 => "Arctis 7 Wireless",
         0x12C2 => "Arctis 9 Wireless",
         0x1290 => "Arctis Pro Wireless",
-        0x1838 | 0x1852 => "Aerox 3 Wireless",
-        0x1858 => "Aerox 5 Wireless",
-        0x185E => "Aerox 9 Wireless",
+        0x1624 | 0x1626 => "Apex Pro Mini Wireless",
+        0x162C | 0x162E | 0x1630 => "Apex Pro TKL Wireless",
+        0x1838 | 0x183A | 0x1852 | 0x1854 => "Aerox 3 Wireless",
+        0x1858 | 0x185A => "Aerox 5 Wireless",
+        0x185E | 0x1860 => "Aerox 9 Wireless",
         0x1842 => "Prime Wireless",
         0x1848 => "Prime Mini Wireless",
-        0x1830 => "Rival 3 Wireless",
+        0x1830 | 0x1832 => "Rival 3 Wireless",
         0x172B => "Rival 650 Wireless",
         _ => "SteelSeries Wireless",
+    }
+}
+
+fn ss_device_kind(protocol: SsProtocol) -> WirelessDeviceKind {
+    match protocol {
+        SsProtocol::Mouse => WirelessDeviceKind::Mouse,
+        SsProtocol::Keyboard => WirelessDeviceKind::Keyboard,
+        SsProtocol::NovaPro
+        | SsProtocol::Nova7
+        | SsProtocol::Nova5
+        | SsProtocol::ArctisLegacy
+        | SsProtocol::ArctisPro => WirelessDeviceKind::Headphones,
     }
 }
 
@@ -1436,7 +1615,7 @@ fn ss_build_request(protocol: SsProtocol, report_len: usize, prepend_zero: bool)
             buffer[offset] = 0x40;
             buffer[offset + 1] = 0xAA;
         }
-        SsProtocol::Mouse => buffer[offset] = 0xD2,
+        SsProtocol::Mouse | SsProtocol::Keyboard => buffer[offset] = 0xD2,
         _ => {
             buffer[offset] = 0x06;
             buffer[offset + 1] = 0xB0;
@@ -1456,7 +1635,7 @@ fn ss_valid_packet(protocol: SsProtocol, raw: &[u8]) -> bool {
         }
         SsProtocol::ArctisLegacy => payload.len() >= 4 && payload[0] == 0x06 && payload[1] == 0x18,
         SsProtocol::ArctisPro => payload.len() >= 4 && payload[0] == 0x40 && payload[1] == 0xAA,
-        SsProtocol::Mouse => payload.len() >= 3 && payload[0] == 0xD2,
+        SsProtocol::Mouse | SsProtocol::Keyboard => payload.len() >= 3 && payload[0] == 0xD2,
     }
 }
 
@@ -1569,7 +1748,7 @@ fn ss_parse(protocol: SsProtocol, raw: &[u8]) -> Option<SsParsed> {
                 },
             })
         }
-        SsProtocol::Mouse => {
+        SsProtocol::Mouse | SsProtocol::Keyboard => {
             if reply.len() < 2 || reply[0] != 0xD2 {
                 return None;
             }
@@ -1749,10 +1928,10 @@ fn probe_standard_hid(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        if !filter(device) || is_ignored_wired_device(&device.product) {
+        if !filter(device) || is_ignored_wired_product(&device.product) {
             continue;
         }
-        if !seen.insert((device.vid, device.pid)) {
+        if seen.contains(&(device.vid, device.pid)) {
             continue;
         }
         let Some(cap) = device.battery_caps.iter().find(|c| is_capacity_cap(c)) else {
@@ -1781,13 +1960,13 @@ fn probe_standard_hid(
             BatterySource::Keyboard24gHid => "keyboard24g",
             _ => "hid",
         };
-        result.push(reading(
-            device.id(prefix),
-            name,
-            level,
-            true,
-            charging,
-            source,
+        let id = device.id(prefix);
+        let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+            device.vid, device.pid, &name, source, &id,
+        );
+        seen.insert((device.vid, device.pid));
+        result.push(reading_with_meta(
+            id, name, level, true, charging, source, kind, None,
         ));
     }
     result
@@ -1947,13 +2126,23 @@ fn probe_logitech(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessRea
                 } else {
                     device.product.trim().to_owned()
                 };
-                result.push(reading(
-                    format!("{}:{device_index:02X}", device.id("logitech")),
+                let id = format!("{}:{device_index:02X}", device.id("logitech"));
+                let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                    device.vid,
+                    device.pid,
+                    &name,
+                    BatterySource::LogitechHidPlusPlus,
+                    &id,
+                );
+                result.push(reading_with_meta(
+                    id,
                     name,
                     percent,
                     true,
                     is_charging,
                     BatterySource::LogitechHidPlusPlus,
+                    kind,
+                    None,
                 ));
             }
         }
@@ -1986,44 +2175,90 @@ fn razer_query(
 
 fn probe_razer(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessReading> {
     let mut result = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<(String, u8)> = HashSet::new();
     for device in devices
         .iter()
         .filter(|d| d.vid == 0x1532 && d.feature_len >= 90)
     {
-        if cancel.load(Ordering::Relaxed) || !seen.insert(device.pid) {
-            continue;
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
         let Some(session) = HidSession::open(&device.path, true) else {
             continue;
         };
         let buffer_len = (device.feature_len as usize).max(RAZER_BUFFER_LEN);
+        let mut path_echoed_tx: HashSet<u8> = HashSet::new();
+        let mut path_signatures: HashSet<(u8, bool)> = HashSet::new();
         for transaction_id in [0x1Fu8, 0x3F, 0xFF, 0x7F, 0x00] {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let Some(raw_level) =
-                razer_query(&session, RAZER_CMD_BATTERY, transaction_id, buffer_len)
-                    .filter(|&v| v != 0)
-            else {
+            if !seen.insert((device.path.clone(), transaction_id)) {
+                continue;
+            }
+            let mut request = razer_build_command(
+                RAZER_CMD_BATTERY,
+                transaction_id,
+                buffer_len >= RAZER_BUFFER_LEN,
+            );
+            request.resize(buffer_len, 0);
+            if !session.set_feature(&request) {
+                continue;
+            }
+            unsafe { Sleep(15) };
+            let mut response = vec![0u8; buffer_len];
+            if !session.get_feature(&mut response) {
+                continue;
+            }
+            let Some(raw_level) = razer_parse_reply(&response, RAZER_CMD_BATTERY) else {
                 continue;
             };
+            if raw_level == 0 {
+                continue;
+            }
+            let echoed_tx = razer_reply_tx_id(&response).unwrap_or(transaction_id);
+            if !path_echoed_tx.insert(echoed_tx) {
+                continue;
+            }
             let charging = razer_query(&session, RAZER_CMD_CHARGING, transaction_id, buffer_len)
                 .is_some_and(|value| value != 0);
+            // Single-device dongles often echo the same level across arbitrary tx_ids;
+            // only keep additional tx_ids on the same path when the dongle echoes a distinct slot.
+            if !path_signatures.insert((raw_level, charging)) && echoed_tx != transaction_id {
+                continue;
+            }
             let name = if device.product.trim().is_empty() {
                 "Razer Wireless".to_owned()
             } else {
                 device.product.trim().to_owned()
             };
-            result.push(reading(
+            let id = format!(
+                "{}:{transaction_id:02X}:{:08X}",
                 device.id("razer"),
+                fnv1a_u32(device.path.as_bytes())
+            );
+            let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                device.vid,
+                device.pid,
+                &name,
+                BatterySource::RazerHid,
+                &id,
+            );
+            result.push(reading_with_meta(
+                id,
                 name,
                 razer_level_01(raw_level),
                 true,
                 charging,
                 BatterySource::RazerHid,
+                kind,
+                None,
             ));
-            break;
+            // On a single-interface path, if the device didn't preserve our tx_id (non-HyperSpeed),
+            // stop probing further tx_ids on this path.
+            if echoed_tx != transaction_id {
+                break;
+            }
         }
     }
     result
@@ -2038,17 +2273,20 @@ fn probe_steelseries(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<Wireless
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     for device in devices {
-        if budget.expired(cancel) || !seen.insert((device.vid, device.pid)) {
+        if budget.expired(cancel) {
+            break;
+        }
+        if device.vid != 0x1038
+            || !matches!(device.usage_page, 0xFFC0 | 0xFF00 | 0xFF02)
+            || !matches!(device.input_len, 64 | 65)
+            || !matches!(device.output_len, 64 | 65)
+        {
             continue;
         }
         let Some(protocol) = ss_protocol_for_pid(device.pid) else {
             continue;
         };
-        if device.vid != 0x1038
-            || !matches!(device.usage_page, 0xFFC0 | 0xFF00)
-            || !matches!(device.input_len, 64 | 65)
-            || !matches!(device.output_len, 64 | 65)
-        {
+        if seen.contains(&(device.vid, device.pid)) {
             continue;
         }
         let Some(session) = HidSession::open(&device.path, false) else {
@@ -2080,14 +2318,16 @@ fn probe_steelseries(devices: &[HidDevice], cancel: &AtomicBool) -> Vec<Wireless
         if !parsed.connected {
             continue;
         }
-        // Yedek pil (spare) bu API'de taşınmadığı için yalnızca ana pil raporlanır.
-        result.push(reading(
+        seen.insert((device.vid, device.pid));
+        result.push(reading_with_meta(
             device.id("steelseries"),
             name,
             parsed.level,
             parsed.connected,
             parsed.charging,
             BatterySource::SteelSeriesHid,
+            ss_device_kind(protocol),
+            parsed.spare,
         ));
     }
     result
@@ -2211,10 +2451,10 @@ fn ble_registry_reading(key: Handle, id_hint: &str) -> Option<WirelessReading> {
 }
 
 /// Reads the BLE Battery Service (0x180F) characteristic (0x2A19) through WinRT.
-/// Returns an empty vector when WinRT/Bluetooth is unavailable; the caller then
-/// falls back to the cached registry values below.
-fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
-    use windows::Devices::Bluetooth::BluetoothLEDevice;
+/// Returns `None` when WinRT/Bluetooth initialization fails (so callers may fall back
+/// to cached registry data), or `Some(readings)` when enumeration succeeded cleanly.
+fn ble_gatt_readings(cancel: &AtomicBool) -> Option<Vec<WirelessReading>> {
+    use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
     use windows::Devices::Enumeration::DeviceInformation;
     use windows::Storage::Streams::DataReader;
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
@@ -2225,7 +2465,7 @@ fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
 
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     if hr.is_err() && hr.0 != 0x8001_0106u32 as i32 {
-        return Vec::new();
+        return None;
     }
     let initialized = hr.is_ok();
 
@@ -2241,6 +2481,9 @@ fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
             let name = info.Name()?.to_string_lossy();
             let read = (|| -> windows::core::Result<Option<u8>> {
                 let device = BluetoothLEDevice::FromIdAsync(&device_id)?.join()?;
+                if device.ConnectionStatus()? != BluetoothConnectionStatus::Connected {
+                    return Ok(None);
+                }
                 let services = device.GetGattServicesAsync()?.join()?;
                 for service in services.Services()? {
                     if service.Uuid()? != BATTERY_SERVICE {
@@ -2263,17 +2506,24 @@ fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
                 && percent <= 100
                 && !is_ignored_wired_device(&name)
             {
-                let id = format!(
-                    "ble-gatt:{:08X}",
-                    fnv1a_u32(device_id.to_string_lossy().as_bytes())
+                let dev_id_str = device_id.to_string_lossy();
+                let id = format!("ble-gatt:{:08X}", fnv1a_u32(dev_id_str.as_bytes()));
+                let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                    0,
+                    0,
+                    &name,
+                    BatterySource::BluetoothGatt,
+                    &dev_id_str,
                 );
-                readings.push(reading(
+                readings.push(reading_with_meta(
                     id,
                     name,
                     percent_01(percent as i32),
                     true,
                     false,
                     BatterySource::BluetoothGatt,
+                    kind,
+                    None,
                 ));
             }
         }
@@ -2282,14 +2532,14 @@ fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
     if initialized {
         unsafe { windows::Win32::System::Com::CoUninitialize() };
     }
-    result.unwrap_or_default()
+    result.ok()
 }
 
 fn probe_ble_gatt(_devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessReading> {
-    let mut result = ble_gatt_readings(cancel);
-    if !result.is_empty() {
-        return result;
+    if let Some(readings) = ble_gatt_readings(cancel) {
+        return readings;
     }
+    let mut result = Vec::new();
     let roots = [
         (
             HKEY_CURRENT_USER,
@@ -2362,11 +2612,203 @@ fn reg_percent(key: Handle, name: &str) -> Option<i32> {
     (0..=100).contains(&value).then_some(value)
 }
 
-/// Reads battery percentages from Bluetooth PnP device nodes (~150 ms) rather
-/// than starting a fresh association discovery (~30 s). Both the classic
-/// `Enum\Bluetooth` tree and the BTHENUM tree are scanned; a device instance is
-/// only reported when its node is present (connected).
+fn setupdi_prop_string(
+    info_set: Handle,
+    devinfo: &SpDevinfoData,
+    key: &DevPropKey,
+) -> Option<String> {
+    let mut prop_type = 0u32;
+    let mut required = 0u32;
+    let mut buffer = [0u8; 512];
+    let ok = unsafe {
+        SetupDiGetDevicePropertyW(
+            info_set,
+            devinfo,
+            key,
+            &mut prop_type,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut required,
+            0,
+        )
+    } != 0;
+    if !ok || prop_type != DEVPROP_TYPE_STRING {
+        return None;
+    }
+    let len = (required as usize).min(buffer.len());
+    let text = utf16_from_bytes(&buffer[..len]).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn setupdi_prop_is_present(info_set: Handle, devinfo: &SpDevinfoData) -> Option<bool> {
+    let mut prop_type = 0u32;
+    let mut required = 0u32;
+    let mut buffer = [0u8; 4];
+    let ok = unsafe {
+        SetupDiGetDevicePropertyW(
+            info_set,
+            devinfo,
+            &DEVPKEY_DEVICE_IS_PRESENT,
+            &mut prop_type,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut required,
+            0,
+        )
+    } != 0;
+    if ok && prop_type == DEVPROP_TYPE_BOOLEAN && required >= 1 {
+        Some(buffer[0] != 0)
+    } else {
+        None
+    }
+}
+
+fn setupdi_prop_bluetooth_battery(info_set: Handle, devinfo: &SpDevinfoData) -> Option<i32> {
+    let mut prop_type = 0u32;
+    let mut required = 0u32;
+    let mut buffer = [0u8; 8];
+    let ok = unsafe {
+        SetupDiGetDevicePropertyW(
+            info_set,
+            devinfo,
+            &DEVPKEY_BLUETOOTH_BATTERY,
+            &mut prop_type,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut required,
+            0,
+        )
+    } != 0;
+    if !ok {
+        return None;
+    }
+    let value = match prop_type {
+        DEVPROP_TYPE_BYTE if required >= 1 => i32::from(buffer[0]),
+        DEVPROP_TYPE_UINT32 if required >= 4 => {
+            u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as i32
+        }
+        _ => return None,
+    };
+    (0..=100).contains(&value).then_some(value)
+}
+
+/// Collects present Bluetooth PnP instance IDs (`BTHENUM`, `BTHLE`, `BLUETOOTH`)
+/// via SetupDi so registry fallback never reports ghost offline devices.
+fn collect_present_bluetooth_instances(cancel: &AtomicBool) -> Option<HashSet<String>> {
+    let mut present = HashSet::new();
+    let mut any_opened = false;
+    for enumerator in ["BTHENUM", "BTHLE", "BLUETOOTH"] {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let enum_wide = wide(enumerator);
+        let set = unsafe {
+            SetupDiGetClassDevsW(
+                std::ptr::null(),
+                enum_wide.as_ptr(),
+                0,
+                DIGCF_ALLCLASSES | DIGCF_PRESENT,
+            )
+        };
+        if invalid(set) {
+            continue;
+        }
+        any_opened = true;
+        for index in 0..512u32 {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut devinfo: SpDevinfoData = unsafe { std::mem::zeroed() };
+            devinfo.cb_size = size_of::<SpDevinfoData>() as u32;
+            if unsafe { SetupDiEnumDeviceInfo(set, index, &mut devinfo) } == 0 {
+                break;
+            }
+            if setupdi_prop_is_present(set, &devinfo) == Some(false) {
+                continue;
+            }
+            if let Some(instance_id) =
+                setupdi_prop_string(set, &devinfo, &DEVPKEY_DEVICE_INSTANCE_ID)
+            {
+                present.insert(instance_id.to_ascii_uppercase());
+            }
+        }
+        unsafe { SetupDiDestroyDeviceInfoList(set) };
+    }
+    any_opened.then_some(present)
+}
+
+/// Reads live battery percentages from present Bluetooth PnP devices via native
+/// Win32 SetupDi (`DEVPKEY_Bluetooth_Battery` + `DEVPKEY_Device_IsPresent`) —
+/// capturing AirPods/Beats, Sony WH/WF-1000XM, Bose, Sennheiser, Jabra, Anker
+/// Soundcore, Galaxy Buds, and standard HFP/BLE peripherals with zero PowerShell
+/// spawns and zero ghost offline devices. Falls back to PnP registry ONLY for
+/// instances confirmed present by SetupDi.
 fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
+    let mut seen = HashSet::new();
+    let mut readings = Vec::new();
+
+    // Primary path: SetupDiGetClassDevsW(DIGCF_ALLCLASSES | DIGCF_PRESENT) + DEVPKEY_Bluetooth_Battery.
+    let set = unsafe {
+        SetupDiGetClassDevsW(
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DIGCF_ALLCLASSES | DIGCF_PRESENT,
+        )
+    };
+    if !invalid(set) {
+        for index in 0..2048u32 {
+            if cancel.load(Ordering::Relaxed) || readings.len() >= 32 {
+                break;
+            }
+            let mut devinfo: SpDevinfoData = unsafe { std::mem::zeroed() };
+            devinfo.cb_size = size_of::<SpDevinfoData>() as u32;
+            if unsafe { SetupDiEnumDeviceInfo(set, index, &mut devinfo) } == 0 {
+                break;
+            }
+            let Some(level) = setupdi_prop_bluetooth_battery(set, &devinfo) else {
+                continue;
+            };
+            if setupdi_prop_is_present(set, &devinfo) == Some(false) {
+                continue;
+            }
+            let instance_id = setupdi_prop_string(set, &devinfo, &DEVPKEY_DEVICE_INSTANCE_ID)
+                .unwrap_or_else(|| format!("setupdi:{index}"));
+            let raw_name = setupdi_prop_string(set, &devinfo, &DEVPKEY_DEVICE_FRIENDLY_NAME)
+                .or_else(|| setupdi_prop_string(set, &devinfo, &DEVPKEY_DEVICE_DESC))
+                .unwrap_or_else(|| normalize_name(&instance_id));
+            let name = super::wireless_vendors_ext::clean_bluetooth_device_name(&raw_name);
+            if is_ignored_wired_device(&name) {
+                continue;
+            }
+            let id = format!(
+                "bt-pnp:{:08X}",
+                fnv1a_u32(instance_id.to_ascii_uppercase().as_bytes())
+            );
+            let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                0,
+                0,
+                &name,
+                BatterySource::Bluetooth,
+                &instance_id,
+            );
+            if seen.insert(id.clone()) {
+                readings.push(reading_with_meta(
+                    id,
+                    name,
+                    percent_01(level),
+                    true,
+                    false,
+                    BatterySource::Bluetooth,
+                    kind,
+                    None,
+                ));
+            }
+        }
+        unsafe { SetupDiDestroyDeviceInfoList(set) };
+    }
+
+    // Secondary fallback: PnP registry ONLY for Bluetooth instances confirmed present by SetupDi.
     const BATTERY_LEVEL_PROPERTY: &str = "{104ea319-6ee2-4701-bd47-8ddbf425bbe5} 2";
     const BATTERY_LIFE_PROPERTY: &str = "System.Devices.BatteryLife";
     const NAME_KEYS: &[&str] = &["FriendlyName", "Name", "DisplayName"];
@@ -2376,21 +2818,31 @@ fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
         "BatteryLevel",
         "BatteryPercent",
     ];
-    const ROOTS: &[(Handle, &str)] = &[
+    const ROOTS: &[(Handle, &str, &str)] = &[
         (
             HKEY_LOCAL_MACHINE,
             r"SYSTEM\CurrentControlSet\Enum\Bluetooth",
+            "BLUETOOTH",
         ),
-        (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\BTHENUM"),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Enum\BTHENUM",
+            "BTHENUM",
+        ),
     ];
 
-    let mut seen = HashSet::new();
-    let mut readings = Vec::new();
-    for (root, path) in ROOTS {
+    let Some(present_instances) = collect_present_bluetooth_instances(cancel) else {
+        return readings;
+    };
+    if present_instances.is_empty() {
+        return readings;
+    }
+
+    for &(root, path, prefix) in ROOTS {
         if cancel.load(Ordering::Relaxed) || readings.len() >= 32 {
             break;
         }
-        let Some(key) = RegKey::open(*root, path) else {
+        let Some(key) = RegKey::open(root, path) else {
             continue;
         };
         for family in reg_subkeys(key.raw()).into_iter().take(64) {
@@ -2403,6 +2855,10 @@ fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
             for instance in reg_subkeys(family_key.raw()).into_iter().take(64) {
                 if cancel.load(Ordering::Relaxed) || readings.len() >= 32 {
                     break;
+                }
+                let full_instance = format!("{prefix}\\{family}\\{instance}").to_ascii_uppercase();
+                if !present_instances.contains(&full_instance) {
+                    continue;
                 }
                 let Some(node) = RegKey::open(family_key.raw(), &instance) else {
                     continue;
@@ -2420,25 +2876,32 @@ fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
                 let Some(level) = level else {
                     continue;
                 };
-                let name = NAME_KEYS
+                let raw_name = NAME_KEYS
                     .iter()
                     .find_map(|name| reg_string(node.raw(), name))
                     .unwrap_or_else(|| normalize_name(&instance));
+                let name = super::wireless_vendors_ext::clean_bluetooth_device_name(&raw_name);
                 if is_ignored_wired_device(&name) {
                     continue;
                 }
-                let id = format!(
-                    "bt-pnp:{:08X}",
-                    fnv1a_u32(format!("{family}\\{instance}").as_bytes())
+                let id = format!("bt-pnp:{:08X}", fnv1a_u32(full_instance.as_bytes()));
+                let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                    0,
+                    0,
+                    &name,
+                    BatterySource::Bluetooth,
+                    &full_instance,
                 );
                 if seen.insert(id.clone()) {
-                    readings.push(reading(
+                    readings.push(reading_with_meta(
                         id,
                         name,
                         percent_01(level),
                         true,
                         false,
                         BatterySource::Bluetooth,
+                        kind,
+                        None,
                     ));
                 }
             }
@@ -2580,30 +3043,1108 @@ fn url_port(url: &str) -> Option<u16> {
 }
 
 // ---------------------------------------------------------------------------
-// Sağlayıcı 7-12: vendor HID pil capacity (gerçek HID usage değerleri)
+// Sağlayıcı 7-12: canlı çoklu-marka vendor HID protokolleri
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct ProbePolicy {
+    listen_only: bool,
+    multi_brand_enabled: bool,
+    disabled_vendors: Vec<String>,
+}
+
+impl Default for ProbePolicy {
+    fn default() -> Self {
+        Self {
+            listen_only: false,
+            multi_brand_enabled: true,
+            disabled_vendors: Vec::new(),
+        }
+    }
+}
+
+impl From<&AggregatorSettings> for ProbePolicy {
+    fn from(settings: &AggregatorSettings) -> Self {
+        Self {
+            listen_only: settings.listen_only,
+            multi_brand_enabled: settings.multi_brand_enabled,
+            disabled_vendors: settings.disabled_vendors.clone(),
+        }
+    }
+}
+
+fn is_multi_brand_source(source: BatterySource) -> bool {
+    matches!(
+        source,
+        BatterySource::AsusRogHid
+            | BatterySource::CorsairHid
+            | BatterySource::HyperXHid
+            | BatterySource::CompxAtkVxe
+            | BatterySource::Keyboard24gHid
+            | BatterySource::GamepadHid
+    )
+}
+
+fn source_vendor_tokens(source: BatterySource) -> &'static [&'static str] {
+    match source {
+        BatterySource::LogitechHidPlusPlus | BatterySource::LogitechGHub => {
+            &["logitech", "hid++", "ghub"]
+        }
+        BatterySource::RazerHid => &["razer"],
+        BatterySource::SteelSeriesHid | BatterySource::SteelSeriesGg => &["steelseries", "ss"],
+        BatterySource::AsusRogHid => &["asus", "rog", "asusrog"],
+        BatterySource::CorsairHid => &["corsair"],
+        BatterySource::HyperXHid => &["hyperx", "hp", "kingston"],
+        BatterySource::CompxAtkVxe => &["compx", "atk", "vxe"],
+        BatterySource::Keyboard24gHid => &["keyboard24g", "2.4g"],
+        BatterySource::GamepadHid => &["gamepad", "sony", "nintendo"],
+        BatterySource::XInput => &["xinput", "xbox"],
+        BatterySource::Bluetooth | BatterySource::BluetoothGatt => &["bluetooth", "ble"],
+        BatterySource::StandardHid => &["hid", "standardhid"],
+    }
+}
+
+impl ProbePolicy {
+    fn has_disabled_token(&self, token: &str) -> bool {
+        self.disabled_vendors
+            .iter()
+            .any(|v| v.trim().eq_ignore_ascii_case(token))
+    }
+
+    fn is_source_disabled(&self, source: BatterySource) -> bool {
+        if self.listen_only && !source.is_passive() {
+            return true;
+        }
+        if !self.multi_brand_enabled && is_multi_brand_source(source) {
+            return true;
+        }
+        source_vendor_tokens(source)
+            .iter()
+            .any(|tok| self.has_disabled_token(tok))
+    }
+
+    fn allows_source(&self, source: BatterySource) -> bool {
+        !self.is_source_disabled(source)
+    }
+
+    fn is_vid_disabled(&self, vid: u16, product: &str) -> bool {
+        if self.disabled_vendors.is_empty() {
+            return false;
+        }
+        if let Some(tok) = super::wireless_vendors_ext::vendor_token_for_vid(vid)
+            && self.has_disabled_token(tok)
+        {
+            return true;
+        }
+        super::wireless_vendors_ext::is_glorious_device(vid, 0, product)
+            && self.has_disabled_token("glorious")
+    }
+}
+
+fn build_corsair_legacy_request(report_len: usize) -> Vec<u8> {
+    let len = report_len.max(64);
+    let mut packet = vec![0u8; len];
+    let offset = usize::from(len == 65);
+    packet[offset] = 0xC9;
+    packet[offset + 1] = 0x64;
+    packet
+}
+
+fn build_nordic64_request(report_len: usize) -> Vec<u8> {
+    let len = if report_len == 65 { 65 } else { 64 };
+    let mut packet = vec![0u8; len];
+    packet[0] = 0x08;
+    packet[1] = COMPX_QUERY_CMD;
+    packet[16] = 0x49;
+    packet
+}
+
+fn build_atk1k_feature_request(report_len: usize, report_id_zero: bool) -> Vec<u8> {
+    let mut packet = vec![0u8; report_len.max(9)];
+    if report_id_zero {
+        packet[0] = 0x00;
+        packet[1] = 0x82;
+    } else {
+        packet[0] = 0x82;
+    }
+    packet
+}
+
+fn build_keyboard_24g_query(expected_len: usize, buffer_len: usize) -> Vec<u8> {
+    if expected_len == COMPX_REPORT_LEN {
+        return build_compx_request().to_vec();
+    }
+    let len = buffer_len.max(64);
+    let mut packet = vec![0u8; len];
+    let offset = usize::from(len == 65);
+    packet[offset] = 0x08;
+    packet[offset + 1] = COMPX_QUERY_CMD;
+    packet[offset + 16] = 0x49;
+    packet
+}
+
+fn probe_asus_rog(
+    devices: &[HidDevice],
+    cancel: &AtomicBool,
+    policy: &ProbePolicy,
+) -> Vec<WirelessReading> {
+    if !policy.allows_source(BatterySource::AsusRogHid) {
+        return Vec::new();
+    }
+    let budget = Budget::new(900);
+    let mut result = Vec::new();
+    let mut seen_pids = HashSet::new();
+    for device in devices {
+        if budget.expired(cancel) {
+            break;
+        }
+        if device.vid != ASUS_VID
+            || !matches!(device.usage_page, 0xFF00 | 0xFF01)
+            || !matches!(device.input_len, 64 | 65)
+            || !matches!(device.output_len, 64 | 65)
+            || is_ignored_wired_product(&device.product)
+            || seen_pids.contains(&device.pid)
+        {
+            continue;
+        }
+        let Some(session) = HidSession::open(&device.path, false) else {
+            continue;
+        };
+        let out_len = (device.output_len as usize).max(64);
+        let in_len = (device.input_len as usize).max(64);
+        let request = build_asus_request(out_len);
+        let mut response = vec![0u8; in_len];
+        let Some(bytes) = session.transact(
+            &request,
+            &mut response,
+            220,
+            |pkt| {
+                let r = normalize_framing(pkt);
+                r.len() >= 6 && r[0] == ASUS_CMD_CATEGORY && r[1] == ASUS_CMD_GET_BATTERY
+            },
+            cancel,
+        ) else {
+            continue;
+        };
+        let name = if device.product.trim().is_empty() {
+            "ASUS ROG Wireless".to_owned()
+        } else {
+            device.product.trim().to_owned()
+        };
+        let id = device.id("rog");
+        if let Some(parsed) = parse_asus_rog(&response[..bytes], &id, &name) {
+            let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                device.vid,
+                device.pid,
+                &parsed.name,
+                BatterySource::AsusRogHid,
+                &parsed.id,
+            );
+            seen_pids.insert(device.pid);
+            result.push(reading_with_meta(
+                parsed.id,
+                parsed.name,
+                percent_01(parsed.level),
+                parsed.connected,
+                parsed.charging,
+                BatterySource::AsusRogHid,
+                kind,
+                None,
+            ));
+        }
+    }
+    let fallback = probe_standard_hid(devices, cancel, BatterySource::AsusRogHid, |d| {
+        d.vid == ASUS_VID && !seen_pids.contains(&d.pid)
+    });
+    result.extend(fallback);
+    result
+}
+
+fn probe_corsair(
+    devices: &[HidDevice],
+    cancel: &AtomicBool,
+    policy: &ProbePolicy,
+) -> Vec<WirelessReading> {
+    if !policy.allows_source(BatterySource::CorsairHid) {
+        return Vec::new();
+    }
+    let budget = Budget::new(950);
+    let mut result = Vec::new();
+    let mut seen_pids = HashSet::new();
+    for device in devices {
+        if budget.expired(cancel) {
+            break;
+        }
+        if device.vid != CORSAIR_VID
+            || !matches!(
+                device.usage_page,
+                BRAGI_USAGE_PAGE | CORSAIR_LEGACY_USAGE_PAGE
+            )
+            || !matches!(device.input_len, 64 | 65)
+            || !matches!(device.output_len, 64 | 65)
+            || is_ignored_wired_product(&device.product)
+            || seen_pids.contains(&device.pid)
+        {
+            continue;
+        }
+        let Some(session) = HidSession::open(&device.path, false) else {
+            continue;
+        };
+        let out_len = (device.output_len as usize).max(64);
+        let in_len = (device.input_len as usize).max(64);
+        let name = if device.product.trim().is_empty() {
+            "Corsair Wireless".to_owned()
+        } else {
+            device.product.trim().to_owned()
+        };
+        let id = device.id("corsair");
+        let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+            device.vid,
+            device.pid,
+            &name,
+            BatterySource::CorsairHid,
+            &id,
+        );
+
+        if device.usage_page == BRAGI_USAGE_PAGE {
+            // Query Slipstream sub-device (0x09) AND direct host endpoint (0x08).
+            for endpoint in [0x09u8, 0x08u8] {
+                if budget.expired(cancel) {
+                    break;
+                }
+                let level_req = build_bragi_request(endpoint, BRAGI_PROPERTY_LEVEL, out_len);
+                let mut level_resp = vec![0u8; in_len];
+                let Some(read_len) =
+                    session.transact(&level_req, &mut level_resp, 220, valid_bragi, cancel)
+                else {
+                    continue;
+                };
+                let Some(level) = parse_corsair_bragi_level(&level_resp[..read_len]) else {
+                    continue;
+                };
+                let mut charging = false;
+                let status_req = build_bragi_request(endpoint, BRAGI_PROPERTY_STATUS, out_len);
+                let mut status_resp = vec![0u8; in_len];
+                if let Some(status_len) =
+                    session.transact(&status_req, &mut status_resp, 180, valid_bragi, cancel)
+                    && let Some(ch) = parse_corsair_bragi_charging(&status_resp[..status_len])
+                {
+                    charging = ch;
+                }
+                seen_pids.insert(device.pid);
+                result.push(reading_with_meta(
+                    id.clone(),
+                    name.clone(),
+                    percent_01(level as i32),
+                    true,
+                    charging,
+                    BatterySource::CorsairHid,
+                    kind,
+                    None,
+                ));
+                break;
+            }
+        } else if device.usage_page == CORSAIR_LEGACY_USAGE_PAGE {
+            let req = build_corsair_legacy_request(out_len);
+            let mut resp = vec![0u8; in_len];
+            if let Some(read_len) = session.transact(
+                &req,
+                &mut resp,
+                220,
+                |pkt| {
+                    let r = corsair_framing(pkt);
+                    r.len() >= 5 && r[0] == 0xC9 && r[1] == 0x64
+                },
+                cancel,
+            ) && let Some(parsed) = parse_corsair_legacy(&resp[..read_len], &id, &name)
+            {
+                seen_pids.insert(device.pid);
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::CorsairHid,
+                    WirelessDeviceKind::Headphones,
+                    None,
+                ));
+            }
+        }
+    }
+    let fallback = probe_standard_hid(devices, cancel, BatterySource::CorsairHid, |d| {
+        d.vid == CORSAIR_VID && !seen_pids.contains(&d.pid)
+    });
+    result.extend(fallback);
+    result
+}
+
+fn probe_hyperx(
+    devices: &[HidDevice],
+    cancel: &AtomicBool,
+    policy: &ProbePolicy,
+) -> Vec<WirelessReading> {
+    use super::wireless_vendors_ext::{
+        HP_HYPERX_VID, KINGSTON_HYPERX_VID, build_hyperx_protocol_request, hyperx_profile,
+        is_valid_hyperx_protocol_reply, parse_hyperx_protocol,
+    };
+
+    if !policy.allows_source(BatterySource::HyperXHid) {
+        return Vec::new();
+    }
+    let budget = Budget::new(950);
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for device in devices {
+        if budget.expired(cancel) {
+            break;
+        }
+        if !matches!(device.vid, HP_HYPERX_VID | KINGSTON_HYPERX_VID)
+            || !matches!(device.usage_page, 0xFF00 | 0xFF13 | 0xFF90 | 0xFFC0)
+            || !(20..=65).contains(&device.input_len)
+            || !(20..=65).contains(&device.output_len)
+            || is_ignored_wired_product(&device.product)
+            || seen.contains(&(device.vid, device.pid))
+        {
+            continue;
+        }
+        let id = device.id("hyperx");
+
+        if let Some(profile) = hyperx_profile(device.vid, device.pid) {
+            let Some(session) = HidSession::open(&device.path, false) else {
+                continue;
+            };
+            let out_len = (device.output_len as usize).max(20);
+            let in_len = (device.input_len as usize).max(20);
+            let request = build_hyperx_protocol_request(profile.protocol, out_len);
+            let mut response = vec![0u8; in_len];
+            let Some(bytes) = session.transact(
+                &request,
+                &mut response,
+                240,
+                |pkt| is_valid_hyperx_protocol_reply(profile.protocol, pkt),
+                cancel,
+            ) else {
+                continue;
+            };
+            let name = if device.product.trim().is_empty() {
+                profile.default_name.to_owned()
+            } else {
+                device.product.trim().to_owned()
+            };
+            if let Some(parsed) = parse_hyperx_protocol(
+                profile.protocol,
+                &response[..bytes],
+                &id,
+                &name,
+                profile.device_kind,
+            ) {
+                seen.insert((device.vid, device.pid));
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::HyperXHid,
+                    parsed.device_kind,
+                    None,
+                ));
+            }
+        } else if let Some(family) = hyperx_family(device.usage_page, device.vid) {
+            // Only probe unknown HP/Kingston PIDs when their product string explicitly identifies HyperX.
+            let lower = device.product.to_ascii_lowercase();
+            if !(lower.contains("hyperx") || lower.contains("cloud") || lower.contains("pulsefire"))
+            {
+                continue;
+            }
+            let Some(session) = HidSession::open(&device.path, false) else {
+                continue;
+            };
+            let out_len = (device.output_len as usize).max(64);
+            let in_len = (device.input_len as usize).max(64);
+            let request = build_hyperx_request(family, out_len);
+            let mut response = vec![0u8; in_len];
+            if let Some(bytes) = session.transact(
+                &request,
+                &mut response,
+                220,
+                |pkt| valid_hyperx(family, pkt),
+                cancel,
+            ) && let Some(parsed) =
+                parse_hyperx(family, &response[..bytes], &id, &device.product)
+            {
+                let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                    device.vid,
+                    device.pid,
+                    &parsed.name,
+                    BatterySource::HyperXHid,
+                    &parsed.id,
+                );
+                seen.insert((device.vid, device.pid));
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::HyperXHid,
+                    kind,
+                    None,
+                ));
+            }
+        }
+    }
+
+    let fallback = probe_standard_hid(devices, cancel, BatterySource::HyperXHid, |d| {
+        matches!(d.vid, HP_HYPERX_VID | KINGSTON_HYPERX_VID)
+            && !seen.contains(&(d.vid, d.pid))
+            && (hyperx_profile(d.vid, d.pid).is_some()
+                || d.product.to_ascii_lowercase().contains("hyperx"))
+    });
+    result.extend(fallback);
+    result
+}
+
+fn is_verified_keyboard_24g_profile(vid: u16, pid: u16) -> Option<(u16, usize)> {
+    match (vid, pid) {
+        (0x258A, 0x010C | 0x013C | 0x0152 | 0x00B5) => Some((0xFF00, 64)),
+        (0x3554, 0xFA09) => Some((0xFF02, 17)),
+        (0x3151, 0x4011 | 0x4015) => Some((0xFF02, 64)),
+        _ => None,
+    }
+}
+
+fn probe_compx_and_mice(
+    devices: &[HidDevice],
+    cancel: &AtomicBool,
+    policy: &ProbePolicy,
+) -> Vec<WirelessReading> {
+    use super::wireless_vendors_ext::{
+        ENDGAME_GEAR_VID, FINALMOUSE_VID, KEYCHRON_VENDOR_USAGE_PAGE, KEYCHRON_VID,
+        build_endgame_gear_request, build_finalmouse_request, build_glorious_request,
+        build_zowie_request, compx_default_model_name, endgame_gear_model_name,
+        finalmouse_model_name, is_glorious_device, is_glorious_keyboard, is_keychron_keyboard,
+        is_valid_endgame_gear_reply, is_valid_finalmouse_reply, is_valid_zowie_reply,
+        is_zowie_device, parse_endgame_gear_reply, parse_finalmouse_reply, parse_glorious_reply,
+        parse_zowie_reply, zowie_model_name,
+    };
+
+    if !policy.allows_source(BatterySource::CompxAtkVxe) {
+        return Vec::new();
+    }
+    let budget = Budget::new(1000);
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for device in devices {
+        if budget.expired(cancel) {
+            break;
+        }
+        if is_ignored_wired(device.vid, device.pid, &device.product)
+            || is_ignored_wired_product(&device.product)
+            || policy.is_vid_disabled(device.vid, &device.product)
+            || seen.contains(&(device.vid, device.pid))
+        {
+            continue;
+        }
+        // Leave dedicated 2.4G / Keychron / GMMK keyboards to Keyboard24gHid.
+        if is_verified_keyboard_24g_profile(device.vid, device.pid).is_some()
+            || is_keychron_keyboard(device.vid, device.pid, &device.product, device.usage_page)
+            || is_glorious_keyboard(device.vid, device.pid, &device.product)
+        {
+            continue;
+        }
+
+        let id = device.id("compx");
+
+        // 1. Glorious Wireless Mice (65-byte Feature Report)
+        if is_glorious_device(device.vid, device.pid, &device.product)
+            && matches!(device.usage_page, 0xFF00..=0xFF02)
+            && device.feature_len >= 64
+        {
+            let Some(session) = HidSession::open(&device.path, true) else {
+                continue;
+            };
+            let feat_len = (device.feature_len as usize).max(65);
+            let req = build_glorious_request(feat_len);
+            if session.set_feature(&req) {
+                unsafe { Sleep(20) };
+                let mut resp = vec![0u8; feat_len];
+                if session.get_feature(&mut resp)
+                    && let Some(parsed) =
+                        parse_glorious_reply(&resp, device.vid, device.pid, &id, &device.product)
+                {
+                    seen.insert((device.vid, device.pid));
+                    result.push(reading_with_meta(
+                        parsed.id,
+                        parsed.name,
+                        percent_01(parsed.level),
+                        parsed.connected,
+                        parsed.charging,
+                        parsed.source,
+                        parsed.device_kind,
+                        None,
+                    ));
+                }
+            }
+            continue;
+        }
+
+        // 2. Endgame Gear (0x3367: OP1we, XM2we, XM2w 4k, OP1w 4k)
+        if device.vid == ENDGAME_GEAR_VID
+            && matches!(device.usage_page, 0xFF00 | 0xFF02 | 0xFFA0)
+            && (matches!(device.input_len, 17 | 64 | 65)
+                && matches!(device.output_len, 17 | 64 | 65))
+        {
+            let Some(session) = HidSession::open(&device.path, false) else {
+                continue;
+            };
+            let out_len = device.output_len as usize;
+            let in_len = (device.input_len as usize).max(17);
+            let name = if device.product.trim().is_empty() {
+                endgame_gear_model_name(device.pid).to_owned()
+            } else {
+                device.product.trim().to_owned()
+            };
+            let req = build_endgame_gear_request(out_len);
+            let mut resp = vec![0u8; in_len];
+            let parsed = session
+                .transact(&req, &mut resp, 220, is_valid_endgame_gear_reply, cancel)
+                .and_then(|n| parse_endgame_gear_reply(&resp[..n], device.pid, &id, &name))
+                .or_else(|| {
+                    if out_len >= 64 {
+                        let nordic_req = build_nordic64_request(out_len);
+                        let mut nordic_resp = vec![0u8; in_len];
+                        session
+                            .transact(
+                                &nordic_req,
+                                &mut nordic_resp,
+                                220,
+                                is_valid_endgame_gear_reply,
+                                cancel,
+                            )
+                            .and_then(|n| {
+                                parse_endgame_gear_reply(&nordic_resp[..n], device.pid, &id, &name)
+                            })
+                    } else {
+                        None
+                    }
+                });
+            if let Some(parsed) = parsed {
+                seen.insert((device.vid, device.pid));
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::CompxAtkVxe,
+                    WirelessDeviceKind::Mouse,
+                    None,
+                ));
+            }
+            continue;
+        }
+
+        // 3. Finalmouse (0x361D: UltralightX / Starlight-12)
+        if device.vid == FINALMOUSE_VID
+            && matches!(device.usage_page, 0xFF00..=0xFF02)
+            && matches!(device.input_len, 64 | 65)
+            && matches!(device.output_len, 64 | 65)
+        {
+            let Some(session) = HidSession::open(&device.path, false) else {
+                continue;
+            };
+            let out_len = (device.output_len as usize).max(64);
+            let in_len = (device.input_len as usize).max(64);
+            let name = if device.product.trim().is_empty() {
+                finalmouse_model_name(device.pid).to_owned()
+            } else {
+                device.product.trim().to_owned()
+            };
+            let req = build_finalmouse_request(out_len);
+            let mut resp = vec![0u8; in_len];
+            if let Some(bytes) =
+                session.transact(&req, &mut resp, 220, is_valid_finalmouse_reply, cancel)
+                && let Some(parsed) = parse_finalmouse_reply(&resp[..bytes], device.pid, &id, &name)
+            {
+                seen.insert((device.vid, device.pid));
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::CompxAtkVxe,
+                    WirelessDeviceKind::Mouse,
+                    None,
+                ));
+            }
+            continue;
+        }
+
+        // 4. Zowie / BenQ (0x3057 / 0x1EA7 Enhanced Receiver)
+        if is_zowie_device(device.vid, device.pid, &device.product)
+            && matches!(device.usage_page, 0xFF00 | 0xFF01 | 0xFF02 | 0xFFA0)
+            && matches!(device.input_len, 64 | 65)
+            && matches!(device.output_len, 64 | 65)
+        {
+            let Some(session) = HidSession::open(&device.path, false) else {
+                continue;
+            };
+            let out_len = (device.output_len as usize).max(64);
+            let in_len = (device.input_len as usize).max(64);
+            let name = if device.product.trim().is_empty() {
+                zowie_model_name(device.vid, device.pid).to_owned()
+            } else {
+                device.product.trim().to_owned()
+            };
+            let req = build_zowie_request(out_len);
+            let mut resp = vec![0u8; in_len];
+            if let Some(bytes) =
+                session.transact(&req, &mut resp, 220, is_valid_zowie_reply, cancel)
+                && let Some(parsed) =
+                    parse_zowie_reply(&resp[..bytes], device.vid, device.pid, &id, &name)
+            {
+                seen.insert((device.vid, device.pid));
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::CompxAtkVxe,
+                    WirelessDeviceKind::Mouse,
+                    None,
+                ));
+            }
+            continue;
+        }
+
+        // 5. All COMPX_VENDORS (ATK / VXE / VGN / MCHOSE / Scyrox / WLMouse / Lamzu / Ninjutso / Ajazz / Attack Shark / Darmoshark / Zaopin / Incott / Keychron / Dareu / Rapoo)
+        if !is_compx_vendor(device.vid) {
+            continue;
+        }
+        let is_compx17 = device.usage_page == 0xFF02
+            && device.input_len as usize == COMPX_REPORT_LEN
+            && device.output_len as usize == COMPX_REPORT_LEN;
+        let is_atk1k = device.vid == 0x373B
+            && device.pid == 0x10F0
+            && device.usage_page == 0xFF10
+            && device.feature_len >= 9
+            && device.input_len >= 10;
+        let is_nordic64 = (matches!(device.usage_page, 0xFF02 | 0xFF00)
+            || (device.vid == KEYCHRON_VID && device.usage_page == KEYCHRON_VENDOR_USAGE_PAGE))
+            && matches!(device.input_len, 64 | 65)
+            && matches!(device.output_len, 64 | 65);
+        if !is_compx17 && !is_atk1k && !is_nordic64 {
+            continue;
+        }
+
+        let Some(session) = HidSession::open(&device.path, false) else {
+            continue;
+        };
+        let name = if device.product.trim().is_empty() {
+            compx_default_model_name(device.vid, device.pid).to_owned()
+        } else {
+            device.product.trim().to_owned()
+        };
+
+        let parsed = if is_compx17 {
+            let req = build_compx_request();
+            let mut resp = [0u8; COMPX_REPORT_LEN];
+            session
+                .transact(
+                    &req,
+                    &mut resp,
+                    250,
+                    |pkt| pkt.len() >= 10 && pkt[0] == 0x08 && pkt[1] == COMPX_QUERY_CMD,
+                    cancel,
+                )
+                .and_then(|bytes| parse_compx17(&resp[..bytes], &id, &name))
+        } else if is_atk1k {
+            let feat_len = (device.feature_len as usize).max(9);
+            let sent = session.set_feature(&build_atk1k_feature_request(feat_len, true))
+                || session.set_feature(&build_atk1k_feature_request(feat_len, false));
+            if sent {
+                let in_len = (device.input_len as usize).max(65);
+                let mut resp = vec![0u8; in_len];
+                let mut found = None;
+                for _ in 0..4 {
+                    if budget.expired(cancel) {
+                        break;
+                    }
+                    let Some(bytes) = session.read_report(&mut resp, 250) else {
+                        break;
+                    };
+                    if let Some(reading) = parse_atk1k(&resp[..bytes], &id, &name) {
+                        found = Some(reading);
+                        break;
+                    }
+                }
+                found
+            } else {
+                None
+            }
+        } else {
+            let out_len = (device.output_len as usize).max(64);
+            let in_len = (device.input_len as usize).max(64);
+            let req = build_nordic64_request(out_len);
+            let mut resp = vec![0u8; in_len];
+            session
+                .transact(
+                    &req,
+                    &mut resp,
+                    250,
+                    |pkt| {
+                        let r = normalize_nordic(pkt);
+                        (r.len() >= 10 && r[0] == 0x08 && r[1] == COMPX_QUERY_CMD)
+                            || (r.len() >= 9 && r[0] == COMPX_QUERY_CMD)
+                    },
+                    cancel,
+                )
+                .and_then(|bytes| parse_compx_nordic(&resp[..bytes], &id, &name))
+        };
+
+        if let Some(parsed) = parsed {
+            let kind = super::wireless_vendors_ext::classify_wireless_device_kind(
+                device.vid,
+                device.pid,
+                &parsed.name,
+                BatterySource::CompxAtkVxe,
+                &parsed.id,
+            );
+            seen.insert((device.vid, device.pid));
+            result.push(reading_with_meta(
+                parsed.id,
+                parsed.name,
+                percent_01(parsed.level),
+                parsed.connected,
+                parsed.charging,
+                BatterySource::CompxAtkVxe,
+                kind,
+                None,
+            ));
+        }
+    }
+    result
+}
+
+fn probe_keyboard_24g(
+    devices: &[HidDevice],
+    cancel: &AtomicBool,
+    policy: &ProbePolicy,
+) -> Vec<WirelessReading> {
+    use super::wireless_vendors_ext::{
+        build_glorious_request, build_keychron_raw_hid_request, is_glorious_keyboard,
+        is_keychron_keyboard, is_valid_keychron_raw_hid_reply, keyboard_24g_default_name,
+        parse_glorious_reply, parse_keychron_raw_hid_reply,
+    };
+
+    if !policy.allows_source(BatterySource::Keyboard24gHid) {
+        return Vec::new();
+    }
+    let budget = Budget::new(950);
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for device in devices {
+        if budget.expired(cancel) {
+            break;
+        }
+        if is_ignored_wired(device.vid, device.pid, &device.product)
+            || is_ignored_wired_product(&device.product)
+            || policy.is_vid_disabled(device.vid, &device.product)
+            || seen.contains(&(device.vid, device.pid))
+        {
+            continue;
+        }
+
+        let id = device.id("kbd24g");
+
+        // 1. Keychron wireless keyboards (0x3434, Raw HID 0xFF60 / 0xFFC1)
+        if is_keychron_keyboard(device.vid, device.pid, &device.product, device.usage_page)
+            && (32..=65).contains(&device.input_len)
+            && (32..=65).contains(&device.output_len)
+        {
+            let Some(session) = HidSession::open(&device.path, false) else {
+                continue;
+            };
+            let out_len = (device.output_len as usize).clamp(32, 65);
+            let in_len = (device.input_len as usize).clamp(32, 65);
+            let name = if device.product.trim().is_empty() {
+                keyboard_24g_default_name(device.vid, device.pid).to_owned()
+            } else {
+                device.product.trim().to_owned()
+            };
+            let req = build_keychron_raw_hid_request(out_len);
+            let mut resp = vec![0u8; in_len];
+            if let Some(bytes) = session.transact(
+                &req,
+                &mut resp,
+                220,
+                is_valid_keychron_raw_hid_reply,
+                cancel,
+            ) && let Some(parsed) =
+                parse_keychron_raw_hid_reply(&resp[..bytes], device.pid, &id, &name)
+            {
+                seen.insert((device.vid, device.pid));
+                result.push(reading_with_meta(
+                    parsed.id,
+                    parsed.name,
+                    percent_01(parsed.level),
+                    parsed.connected,
+                    parsed.charging,
+                    BatterySource::Keyboard24gHid,
+                    WirelessDeviceKind::Keyboard,
+                    None,
+                ));
+            }
+            continue;
+        }
+
+        // 2. Glorious GMMK Wireless keyboards (0x320F)
+        if is_glorious_keyboard(device.vid, device.pid, &device.product)
+            && matches!(device.usage_page, 0xFF00..=0xFF02)
+            && device.feature_len >= 64
+        {
+            let Some(session) = HidSession::open(&device.path, true) else {
+                continue;
+            };
+            let feat_len = (device.feature_len as usize).max(65);
+            let req = build_glorious_request(feat_len);
+            if session.set_feature(&req) {
+                unsafe { Sleep(20) };
+                let mut resp = vec![0u8; feat_len];
+                if session.get_feature(&mut resp)
+                    && let Some(parsed) =
+                        parse_glorious_reply(&resp, device.vid, device.pid, &id, &device.product)
+                {
+                    seen.insert((device.vid, device.pid));
+                    result.push(reading_with_meta(
+                        parsed.id,
+                        parsed.name,
+                        percent_01(parsed.level),
+                        parsed.connected,
+                        parsed.charging,
+                        BatterySource::Keyboard24gHid,
+                        WirelessDeviceKind::Keyboard,
+                        None,
+                    ));
+                }
+            }
+            continue;
+        }
+
+        // 3. Verified 2.4G keyboards: AULA F75/F99, Weikav NUT75, Royal Kludge, Compx FA09, MonsGeek, Akko
+        let Some((required_page, expected_len)) =
+            is_verified_keyboard_24g_profile(device.vid, device.pid)
+        else {
+            continue;
+        };
+        if device.usage_page != required_page {
+            continue;
+        }
+        let len_ok = if expected_len == COMPX_REPORT_LEN {
+            device.input_len as usize == COMPX_REPORT_LEN
+                && device.output_len as usize == COMPX_REPORT_LEN
+        } else {
+            matches!(device.input_len, 64 | 65) && matches!(device.output_len, 64 | 65)
+        };
+        if !len_ok {
+            continue;
+        }
+        let Some(session) = HidSession::open(&device.path, false) else {
+            continue;
+        };
+        let out_len = (device.output_len as usize).max(expected_len);
+        let in_len = (device.input_len as usize).max(expected_len);
+        let req = build_keyboard_24g_query(expected_len, out_len);
+        let mut resp = vec![0u8; in_len];
+        let Some(bytes) = session.transact(
+            &req,
+            &mut resp,
+            240,
+            |pkt| {
+                if expected_len == COMPX_REPORT_LEN {
+                    pkt.len() >= 10 && pkt[0] == 0x08 && pkt[1] == COMPX_QUERY_CMD
+                } else {
+                    let p = normalize_keyboard_24g_framing(pkt);
+                    (p.len() >= 10 && p[0] == 0x08 && p[1] == COMPX_QUERY_CMD)
+                        || (p.len() >= 9 && p[0] == COMPX_QUERY_CMD)
+                        || (p.len() >= 3 && p[0] == 0x83 && p[1] <= 1)
+                }
+            },
+            cancel,
+        ) else {
+            continue;
+        };
+        let name = if device.product.trim().is_empty() {
+            keyboard_24g_default_name(device.vid, device.pid).to_owned()
+        } else {
+            device.product.trim().to_owned()
+        };
+        if let Some(parsed) = parse_keyboard_24g(&resp[..bytes], expected_len, &id, &name) {
+            seen.insert((device.vid, device.pid));
+            result.push(reading_with_meta(
+                parsed.id,
+                parsed.name,
+                percent_01(parsed.level),
+                parsed.connected,
+                parsed.charging,
+                BatterySource::Keyboard24gHid,
+                WirelessDeviceKind::Keyboard,
+                None,
+            ));
+        }
+    }
+
+    let fallback = probe_standard_hid(devices, cancel, BatterySource::Keyboard24gHid, |d| {
+        if seen.contains(&(d.vid, d.pid)) {
+            return false;
+        }
+        let lower = d.product.to_ascii_lowercase();
+        (lower.contains("2.4g") || lower.contains("2,4g"))
+            && (lower.contains("keyboard") || lower.contains("klavye"))
+    });
+    result.extend(fallback);
+    result
+}
+
+fn default_gamepad_name(vid: u16, pid: u16) -> &'static str {
+    match (vid, pid) {
+        (0x054C, 0x0CE6) => "DualSense Wireless Controller",
+        (0x054C, 0x0DF2) => "DualSense Edge Wireless Controller",
+        (0x054C, 0x05C4 | 0x09CC) => "DUALSHOCK 4 Wireless Controller",
+        (0x057E, 0x2009) => "Switch Pro Controller",
+        _ => "Wireless Controller",
+    }
+}
+
+fn is_supported_gamepad_pid(vid: u16, pid: u16) -> bool {
+    matches!(
+        (vid, pid),
+        (0x054C, 0x0CE6 | 0x0DF2 | 0x05C4 | 0x09CC) | (0x057E, 0x2009)
+    )
+}
+
+fn probe_gamepad_hid(
+    devices: &[HidDevice],
+    cancel: &AtomicBool,
+    policy: &ProbePolicy,
+) -> Vec<WirelessReading> {
+    if !policy.allows_source(BatterySource::GamepadHid) {
+        return Vec::new();
+    }
+    let budget = Budget::new(800);
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for device in devices {
+        if budget.expired(cancel) {
+            break;
+        }
+        if !is_supported_gamepad_pid(device.vid, device.pid)
+            || device.usage_page != 0x0001
+            || !matches!(device.usage, 0x0004 | 0x0005)
+            || device.input_len < 16
+            || policy.is_vid_disabled(device.vid, &device.product)
+            || seen.contains(&(device.vid, device.pid))
+        {
+            continue;
+        }
+        // Strictly read-only HID access (safe even in listen_only mode).
+        let Some(session) = HidSession::open_read_only(&device.path)
+            .or_else(|| HidSession::open(&device.path, true))
+        else {
+            continue;
+        };
+        let in_len = (device.input_len as usize).max(78);
+        let id = device.id("gamepad");
+        let name = if device.product.trim().is_empty() {
+            default_gamepad_name(device.vid, device.pid).to_owned()
+        } else {
+            device.product.trim().to_owned()
+        };
+
+        let mut buffer = vec![0u8; in_len];
+        let mut parsed = session
+            .read_report(&mut buffer, 120)
+            .and_then(|bytes| parse_gamepad(device.vid, device.pid, &buffer[..bytes], &id, &name));
+
+        // DualSense / DS4 over Bluetooth may start in short 0x01 mode until a read-only
+        // calibration feature (0x05) or explicit 0x31 / 0x11 input report is queried.
+        if parsed.is_none() && device.vid == 0x054C {
+            let feat_len = (device.feature_len as usize).max(41);
+            if feat_len <= 128 {
+                let mut cal = vec![0u8; feat_len];
+                cal[0] = 0x05;
+                let _ = session.get_feature(&mut cal);
+            }
+            for report_id in [0x31u8, 0x11u8, 0x01u8] {
+                if budget.expired(cancel) {
+                    break;
+                }
+                buffer.fill(0);
+                buffer[0] = report_id;
+                if session.get_input_report(&mut buffer)
+                    && let Some(r) = parse_gamepad(device.vid, device.pid, &buffer, &id, &name)
+                {
+                    parsed = Some(r);
+                    break;
+                }
+            }
+            if parsed.is_none()
+                && let Some(bytes) = session.read_report(&mut buffer, 120)
+            {
+                parsed = parse_gamepad(device.vid, device.pid, &buffer[..bytes], &id, &name);
+            }
+        }
+
+        if let Some(parsed) = parsed {
+            seen.insert((device.vid, device.pid));
+            result.push(reading_with_meta(
+                parsed.id,
+                parsed.name,
+                percent_01(parsed.level),
+                parsed.connected,
+                parsed.charging,
+                BatterySource::GamepadHid,
+                WirelessDeviceKind::Gamepad,
+                None,
+            ));
+        }
+    }
+
+    let fallback = probe_standard_hid(devices, cancel, BatterySource::GamepadHid, |d| {
+        d.usage_page == 0x0001
+            && matches!(d.usage, 0x0004 | 0x0005)
+            && !seen.contains(&(d.vid, d.pid))
+    });
+    result.extend(fallback);
+    result
+}
 
 fn probe_vendor_hid(
     devices: &[HidDevice],
     cancel: &AtomicBool,
     source: BatterySource,
+    policy: &ProbePolicy,
 ) -> Vec<WirelessReading> {
-    let filter = |device: &HidDevice| match source {
-        BatterySource::AsusRogHid => device.vid == 0x0B05,
-        BatterySource::CorsairHid => device.vid == 0x1B1C,
-        BatterySource::HyperXHid => device.vid == 0x03F0,
-        BatterySource::CompxAtkVxe => device.vid == 0x1EA7 || device.vid == 0x04E8,
-        BatterySource::GamepadHid => {
-            device.usage_page == 0x0001 && matches!(device.usage, 0x0004 | 0x0005)
-        }
-        BatterySource::Keyboard24gHid => {
-            let name = device.product.to_ascii_lowercase();
-            (name.contains("2.4g") || name.contains("2,4g"))
-                && (name.contains("keyboard") || name.contains("klavye"))
-        }
-        _ => false,
-    };
-    probe_standard_hid(devices, cancel, source, filter)
+    if !policy.allows_source(source) {
+        return Vec::new();
+    }
+    match source {
+        BatterySource::AsusRogHid => probe_asus_rog(devices, cancel, policy),
+        BatterySource::CorsairHid => probe_corsair(devices, cancel, policy),
+        BatterySource::HyperXHid => probe_hyperx(devices, cancel, policy),
+        BatterySource::CompxAtkVxe => probe_compx_and_mice(devices, cancel, policy),
+        BatterySource::Keyboard24gHid => probe_keyboard_24g(devices, cancel, policy),
+        BatterySource::GamepadHid => probe_gamepad_hid(devices, cancel, policy),
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2689,11 +4230,32 @@ fn finalize(fresh: Vec<WirelessReading>) -> Vec<WirelessReading> {
             continue;
         }
         let key = canonical_key(&item);
-        if deduplicated
-            .get(&key)
-            .is_none_or(|existing| prefer(&item, existing))
-        {
-            deduplicated.insert(key, item);
+        match deduplicated.get_mut(&key) {
+            Some(existing) if prefer(&item, existing) => {
+                let mut preferred = item;
+                if preferred.secondary_level.is_none() {
+                    preferred.secondary_level = existing.secondary_level;
+                }
+                if preferred.device_kind == WirelessDeviceKind::Other
+                    && existing.device_kind != WirelessDeviceKind::Other
+                {
+                    preferred.device_kind = existing.device_kind;
+                }
+                *existing = preferred;
+            }
+            Some(existing) => {
+                if existing.secondary_level.is_none() {
+                    existing.secondary_level = item.secondary_level;
+                }
+                if existing.device_kind == WirelessDeviceKind::Other
+                    && item.device_kind != WirelessDeviceKind::Other
+                {
+                    existing.device_kind = item.device_kind;
+                }
+            }
+            None => {
+                deduplicated.insert(key, item);
+            }
         }
     }
     let active: HashSet<String> = deduplicated.keys().cloned().collect();
@@ -2721,7 +4283,11 @@ fn run_probe(
     source: BatterySource,
     devices: &[HidDevice],
     cancel: &AtomicBool,
+    policy: &ProbePolicy,
 ) -> Vec<WirelessReading> {
+    if !policy.allows_source(source) {
+        return Vec::new();
+    }
     match source {
         BatterySource::XInput => probe_xinput(cancel),
         BatterySource::StandardHid => {
@@ -2738,9 +4304,8 @@ fn run_probe(
         | BatterySource::HyperXHid
         | BatterySource::CompxAtkVxe
         | BatterySource::GamepadHid
-        | BatterySource::Keyboard24gHid => probe_vendor_hid(devices, cancel, source),
-        // WS-4: real passive transports (PnP registry + loopback JSON) now feed
-        // the same parsers instead of only being exposed as standalone helpers.
+        | BatterySource::Keyboard24gHid => probe_vendor_hid(devices, cancel, source, policy),
+        // WS-4: real passive transports (SetupDi PnP + loopback JSON) feed live readings.
         BatterySource::Bluetooth => bluetooth_pnp_readings(cancel),
         BatterySource::LogitechGHub => probe_ghub_loopback(cancel),
         BatterySource::SteelSeriesGg => probe_steelseries_loopback(cancel),
@@ -2774,33 +4339,38 @@ fn try_claim_source(source: BatterySource) -> Option<SourceInFlightGuard> {
     }
 }
 
-/// Tüm kablosuz pil okumalarını toplar. Engelleyici değildir: her sağlayıcı ayrı
-/// iş parçacığında 1.2 sn'lik bütçeyle çalışır, zaman aşanlar atlanır.
-pub fn read_all() -> Vec<WirelessReading> {
+/// Runs only the policy-permitted providers inside the bounded `ALL_SOURCES` slots
+/// and returns raw fresh readings before aggregation.
+fn read_all_raw(policy: &ProbePolicy) -> Option<Vec<WirelessReading>> {
     let gate = POLL_GATE.get_or_init(|| Mutex::new(()));
     let Ok(_guard) = gate.try_lock() else {
-        return cached_snapshot();
+        return None;
     };
     let devices = Arc::new(enumerate_hid_devices());
-    let sources = ALL_SOURCES;
+    let policy = Arc::new(policy.clone());
     let (sender, receiver) = mpsc::channel::<Vec<WirelessReading>>();
-    let mut cancellations = Vec::with_capacity(sources.len());
-    let mut threads = Vec::with_capacity(sources.len());
-    for source in sources {
+    let mut cancellations = Vec::with_capacity(ALL_SOURCES.len());
+    let mut threads = Vec::with_capacity(ALL_SOURCES.len());
+    for source in ALL_SOURCES {
+        if !policy.allows_source(source) {
+            continue;
+        }
         let Some(in_flight_guard) = try_claim_source(source) else {
             continue;
         };
         let sender = sender.clone();
         let devices = Arc::clone(&devices);
+        let policy = Arc::clone(&policy);
         let cancel = Arc::new(AtomicBool::new(false));
         cancellations.push(Arc::clone(&cancel));
         if let Ok(handle) = std::thread::Builder::new()
             .name(format!("ot-wb-{source:?}"))
             .spawn(move || {
                 let _in_flight_guard = in_flight_guard;
-                let result =
-                    catch_unwind(AssertUnwindSafe(|| run_probe(source, &devices, &cancel)))
-                        .unwrap_or_default();
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    run_probe(source, &devices, &cancel, &policy)
+                }))
+                .unwrap_or_default();
                 let _ = sender.send(result);
             })
         {
@@ -2821,9 +4391,7 @@ pub fn read_all() -> Vec<WirelessReading> {
     for cancel in &cancellations {
         cancel.store(true, Ordering::Relaxed);
     }
-    // WS-4: previously the handles were dropped without joining, so blocked HID
-    // probes leaked one thread per poll (~10 threads / 10 s). Give cancelled
-    // probes a bounded grace period, then join every finished thread.
+    // WS-4: give cancelled probes a bounded grace period, then join every finished thread.
     let join_deadline = Instant::now() + Duration::from_millis(400);
     while Instant::now() < join_deadline && threads.iter().any(|handle| !handle.is_finished()) {
         std::thread::sleep(Duration::from_millis(5));
@@ -2833,7 +4401,16 @@ pub fn read_all() -> Vec<WirelessReading> {
             let _ = handle.join();
         }
     }
-    finalize(fresh)
+    Some(fresh)
+}
+
+/// Tüm kablosuz pil okumalarını toplar. Engelleyici değildir: her sağlayıcı ayrı
+/// iş parçacığında 1.2 sn'lik bütçeyle çalışır, zaman aşanlar atlanır.
+pub fn read_all() -> Vec<WirelessReading> {
+    match read_all_raw(&ProbePolicy::default()) {
+        Some(fresh) => finalize(fresh),
+        None => cached_snapshot(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3135,13 +4712,17 @@ pub struct BatteryReading {
     pub voltage_mv: Option<u32>,
     pub secondary_level: Option<i32>,
     pub level_override: Option<String>,
+    pub device_kind: WirelessDeviceKind,
 }
 
 impl BatteryReading {
     pub fn new(id: &str, name: &str, level: u32, charging: bool, source: BatterySource) -> Self {
+        let trimmed = name.trim();
+        let device_kind =
+            super::wireless_vendors_ext::classify_wireless_device_kind(0, 0, trimmed, source, id);
         Self {
             id: id.to_owned(),
-            name: name.trim().to_owned(),
+            name: trimmed.to_owned(),
             level: level.min(100) as i32,
             connected: true,
             charging,
@@ -3151,6 +4732,7 @@ impl BatteryReading {
             voltage_mv: None,
             secondary_level: None,
             level_override: None,
+            device_kind,
         }
     }
 }
@@ -3541,45 +5123,87 @@ pub fn is_compx_vendor(vendor_id: u16) -> bool {
 // 5. 2.4 GHz keyboards (Sinowealth/Compx/Akko receivers, 17/64/65-byte reports)
 // ---------------------------------------------------------------------------------------------
 
+fn normalize_keyboard_24g_framing(raw: &[u8]) -> &[u8] {
+    if raw.len() >= 4 && raw[0] == 0x00 && matches!(raw[1], 0x08 | 0x04 | 0x83) {
+        &raw[1..]
+    } else {
+        raw
+    }
+}
+
 pub fn parse_keyboard_24g(
     reply: &[u8],
     report_len: usize,
     id: &str,
     name: &str,
 ) -> Option<BatteryReading> {
-    if report_len == 17 {
+    if report_len == COMPX_REPORT_LEN {
         return parse_compx17(reply, id, name).map(|mut r| {
             r.source = BatterySource::Keyboard24gHid;
+            r.device_kind = WirelessDeviceKind::Keyboard;
             r
         });
     }
-    let r = normalize_nordic(reply);
-    let base = if r.len() >= 10 && r[0] == 0x08 && r[1] == COMPX_QUERY_CMD {
-        6
+    let r = normalize_keyboard_24g_framing(reply);
+    if r.len() < 3 {
+        return None;
+    }
+    let (level, charging) = if r.len() >= 10 && r[0] == 0x08 && r[1] == COMPX_QUERY_CMD {
+        if r.len() >= COMPX_REPORT_LEN && compx_checksum(r) != r[COMPX_REPORT_LEN - 1] {
+            return None;
+        }
+        let level = r[6];
+        let charge_flag = r[7];
+        let voltage_mv = u16::from_be_bytes([r[8], r[9]]);
+        if level > 100 || charge_flag > 1 || (level == 0 && charge_flag == 0 && voltage_mv == 0) {
+            return None;
+        }
+        (level, charge_flag == 1)
     } else if r.len() >= 9 && r[0] == COMPX_QUERY_CMD {
-        5
+        let level = r[5];
+        let charge_flag = r[6];
+        let voltage_mv = u16::from_be_bytes([r[7], r[8]]);
+        if level > 100 || charge_flag > 1 || (level == 0 && charge_flag == 0 && voltage_mv == 0) {
+            return None;
+        }
+        (level, charge_flag == 1)
+    } else if r[0] == 0x83 {
+        // Sinowealth 64-byte keyboard battery response: [0x83, chargingFlag (0/1), batteryPercent (1..100), ...]
+        if r[1] > 1 {
+            return None;
+        }
+        let charging = r[1] == 1;
+        let level = r[2];
+        if level == 0 || level > 100 {
+            return None;
+        }
+        (level, charging)
     } else {
         return None;
     };
-    let level = *r.get(base)?;
-    let charging = *r.get(base + 1)? == 1;
-    if level == 0 && !charging {
+    let clean_name = if name.trim().is_empty() {
+        "2.4G Wireless Keyboard"
+    } else {
+        name.trim()
+    };
+    if is_ignored_wired(0, 0, clean_name) {
         return None;
     }
-    Some(BatteryReading::new(
+    let mut reading = BatteryReading::new(
         id,
-        if name.trim().is_empty() {
-            "2.4G Wireless Keyboard"
-        } else {
-            name
-        },
-        level as u32,
+        clean_name,
+        u32::from(level),
         charging,
         BatterySource::Keyboard24gHid,
-    ))
+    );
+    reading.device_kind = WirelessDeviceKind::Keyboard;
+    Some(reading)
 }
 
 pub fn is_keyboard_24g(vendor_id: u16, product_id: u16) -> bool {
+    if vendor_id == 0x258A && (0x2011..=0x2022).contains(&product_id) {
+        return false;
+    }
     matches!(vendor_id, 0x258A)
         || (vendor_id == 0x3554 && product_id == 0xFA09)
         || (vendor_id == 0x3151 && matches!(product_id, 0x4011 | 0x4015))
@@ -3952,7 +5576,9 @@ pub fn deduplicate(readings: Vec<BatteryReading>) -> Vec<BatteryReading> {
         };
         match by_key.get_mut(&key) {
             Some(existing) if ws_g_prefer(&r, existing) => {
-                merge_metadata(existing, &r);
+                let mut preferred = r;
+                merge_metadata(&mut preferred, existing);
+                *existing = preferred;
             }
             Some(existing) => merge_metadata(existing, &r),
             None => {
@@ -3984,6 +5610,11 @@ fn merge_metadata(primary: &mut BatteryReading, secondary: &BatteryReading) {
     }
     if primary.secondary_level.is_none() {
         primary.secondary_level = secondary.secondary_level;
+    }
+    if primary.device_kind == WirelessDeviceKind::Other
+        && secondary.device_kind != WirelessDeviceKind::Other
+    {
+        primary.device_kind = secondary.device_kind;
     }
 }
 
@@ -4036,6 +5667,8 @@ pub struct AggregatorSettings {
     pub ignored_devices: Vec<String>,
     pub aliases: HashMap<String, String>,
     pub listen_only: bool,
+    pub multi_brand_enabled: bool,
+    pub disabled_vendors: Vec<String>,
 }
 
 impl Default for AggregatorSettings {
@@ -4046,6 +5679,8 @@ impl Default for AggregatorSettings {
             ignored_devices: Vec::new(),
             aliases: HashMap::new(),
             listen_only: false,
+            multi_brand_enabled: true,
+            disabled_vendors: Vec::new(),
         }
     }
 }
@@ -4065,10 +5700,10 @@ impl AggregatorSettings {
     }
 
     pub fn allows(&self, source: BatterySource) -> bool {
-        !self.listen_only || source.is_passive()
+        ProbePolicy::from(self).allows_source(source)
     }
 
-    /// Applies the same ignore / alias / listen-only policy to the live transport readings.
+    /// Applies the same ignore / alias / listen-only / multi-brand / vendor policy to live readings.
     pub fn allows_reading(&self, reading: &WirelessReading) -> bool {
         !Self::is_ignored_fields(&self.ignored_devices, &reading.id, &reading.name)
             && self.allows(reading.source)
@@ -4107,6 +5742,8 @@ impl From<&DockSettings> for AggregatorSettings {
                 .map(|(id, alias)| (id.to_ascii_lowercase(), alias.clone()))
                 .collect(),
             listen_only: settings.wireless_battery_listen_only,
+            multi_brand_enabled: settings.wireless_multi_brand_enabled(),
+            disabled_vendors: settings.wireless_disabled_vendors(),
         }
     }
 }
@@ -4118,17 +5755,27 @@ fn to_battery_reading(item: &WirelessReading) -> BatteryReading {
         BatteryReading::new(&item.id, &item.name, level, item.is_charging, item.source);
     reading.connected = item.is_connected;
     reading.stale = item.stale;
+    reading.device_kind = item.device_kind;
+    reading.secondary_level = item
+        .secondary_level
+        .map(|v| (v * 100.0).round().clamp(0.0, 100.0) as i32);
     reading
 }
 
 fn to_wireless_reading(item: BatteryReading) -> WirelessReading {
-    let mut wireless = reading(
+    let secondary_level = item
+        .secondary_level
+        .filter(|&v| (0..=100).contains(&v))
+        .map(percent_01);
+    let mut wireless = reading_with_meta(
         item.id,
         item.name,
         percent_01(item.level),
         item.connected,
         item.charging,
         item.source,
+        item.device_kind,
+        secondary_level,
     );
     wireless.stale = item.stale;
     wireless
@@ -4146,9 +5793,10 @@ fn cached_aggregate() -> Option<Vec<WirelessReading>> {
 }
 
 /// Live transports + the real aggregator (outlier guard, 30-minute stale
-/// retention, ignore/alias policy and the on-disk JSON cache). The poll cadence
-/// comes from `WirelessBatteryPollSeconds`; intermediate callers receive the
-/// last aggregate instead of starting another round of HID probes.
+/// retention, ignore/alias policy and the on-disk JSON cache). Enforces
+/// `listen_only`, `wireless_multi_brand_enabled()`, and `wireless_disabled_vendors()`
+/// BEFORE opening/writing any HID device, then merges cleanly through
+/// [`WirelessBatteryAggregator`].
 pub fn read_all_with_settings(settings: &DockSettings) -> Vec<WirelessReading> {
     let agg_settings = AggregatorSettings::from(settings);
     let interval = Duration::from_secs(agg_settings.poll_seconds_clamped() as u64);
@@ -4172,7 +5820,15 @@ pub fn read_all_with_settings(settings: &DockSettings) -> Vec<WirelessReading> {
         return readings.clone();
     }
 
-    let fresh: Vec<BatteryReading> = read_all().iter().map(to_battery_reading).collect();
+    let policy = ProbePolicy::from(&agg_settings);
+    let Some(raw_fresh) = read_all_raw(&policy) else {
+        return cached_aggregate().unwrap_or_else(cached_snapshot);
+    };
+    let fresh: Vec<BatteryReading> = raw_fresh
+        .iter()
+        .filter(|r| !is_ignored_wired_reading(r))
+        .map(to_battery_reading)
+        .collect();
     let mut aggregator = WirelessBatteryAggregator::new(agg_settings);
     // The aggregator object is rebuilt per poll; the guard is not. Carry the
     // pending-drop state in and write it back so consecutive drops are detected.
@@ -4307,6 +5963,12 @@ impl WirelessBatteryAggregator {
                     .unwrap_or("-1");
                 reading.level_override = Some(override_text.to_owned());
             }
+            if let Some(spare) = cache_field(value, "secondary_level", "SecondaryBatteryLevel")
+                .and_then(|x| x.as_i64())
+                .filter(|&v| (0..=100).contains(&v))
+            {
+                reading.secondary_level = Some(spare as i32);
+            }
             reading.stale = true;
             reading.sampled_at = now - Duration::from_secs(age_secs.min(1800));
             self.cache.insert(key.clone(), reading);
@@ -4340,6 +6002,7 @@ impl WirelessBatteryAggregator {
                     "source": r.source as u8,
                     "age_secs": age_secs,
                     "written_at": wall_now,
+                    "secondary_level": r.secondary_level,
                     "Id": r.id,
                     "Name": r.name,
                     "BatteryLevel": r.level,
@@ -4347,6 +6010,7 @@ impl WirelessBatteryAggregator {
                     "Source": r.source as u8,
                     "SampledAt": unix_secs_to_rfc3339(sampled),
                     "LevelOverrideText": r.level_override,
+                    "SecondaryBatteryLevel": r.secondary_level,
                 }),
             );
         }
@@ -4884,6 +6548,8 @@ mod ws_g_tests {
             is_charging: false,
             source: BatterySource::AsusRogHid,
             stale: false,
+            device_kind: WirelessDeviceKind::Headphones,
+            secondary_level: None,
         };
         assert!(!agg.allows_reading(&active)); // listen-only excludes active HID probes
         assert_eq!(agg.display_name_of(&active), "My Headset");
@@ -4897,5 +6563,173 @@ mod ws_g_tests {
             ..active
         };
         assert!(agg.allows_reading(&passive));
+    }
+
+    #[test]
+    fn keyboard_24g_sinowealth_0x83_and_checksum_validation() {
+        // Sinowealth 64-byte response: [0x83, charging=1, level=77]
+        let mut sino = vec![0u8; 64];
+        sino[0] = 0x83;
+        sino[1] = 1;
+        sino[2] = 77;
+        let r = parse_keyboard_24g(&sino, 64, "kbd:aula", "AULA F75").expect("Sinowealth 0x83");
+        assert_eq!(r.level, 77);
+        assert!(r.charging);
+        assert_eq!(r.source, BatterySource::Keyboard24gHid);
+        assert_eq!(r.device_kind, WirelessDeviceKind::Keyboard);
+
+        // Leading 0x00 framed Sinowealth 0x83
+        let mut framed = vec![0u8; 65];
+        framed[1] = 0x83;
+        framed[2] = 0;
+        framed[3] = 52;
+        let r2 = parse_keyboard_24g(&framed, 64, "kbd:rk", "Royal Kludge")
+            .expect("framed Sinowealth 0x83");
+        assert_eq!(r2.level, 52);
+        assert!(!r2.charging);
+
+        // Invalid Sinowealth (0% or >100% or invalid charging flag)
+        sino[2] = 0;
+        assert!(parse_keyboard_24g(&sino, 64, "kbd:bad", "AULA").is_none());
+        sino[2] = 101;
+        assert!(parse_keyboard_24g(&sino, 64, "kbd:bad", "AULA").is_none());
+        sino[1] = 2;
+        sino[2] = 50;
+        assert!(parse_keyboard_24g(&sino, 64, "kbd:bad", "AULA").is_none());
+
+        // Glorious mouse PIDs on 0x258A must NOT be classified as 2.4G keyboards
+        assert!(!is_keyboard_24g(0x258A, 0x2016));
+        assert!(is_keyboard_24g(0x258A, 0x010C));
+    }
+
+    #[test]
+    fn steelseries_expanded_pids_and_spare_dock_battery_roundtrip() {
+        assert_eq!(ss_protocol_for_pid(0x12E2), Some(SsProtocol::NovaPro));
+        assert_eq!(ss_protocol_for_pid(0x12E6), Some(SsProtocol::NovaPro));
+        assert_eq!(ss_protocol_for_pid(0x2240), Some(SsProtocol::Nova5));
+        assert_eq!(ss_protocol_for_pid(0x162C), Some(SsProtocol::Keyboard));
+        assert_eq!(ss_protocol_for_pid(0x1854), Some(SsProtocol::Mouse));
+        assert_eq!(
+            ss_device_kind(SsProtocol::Keyboard),
+            WirelessDeviceKind::Keyboard
+        );
+        assert_eq!(
+            ss_device_kind(SsProtocol::NovaPro),
+            WirelessDeviceKind::Headphones
+        );
+
+        let live = reading_with_meta(
+            "steelseries:1038:12E0:ABC".into(),
+            "Arctis Nova Pro Wireless".into(),
+            0.75,
+            true,
+            false,
+            BatterySource::SteelSeriesHid,
+            WirelessDeviceKind::Headphones,
+            Some(0.50),
+        );
+        let br = to_battery_reading(&live);
+        assert_eq!(br.secondary_level, Some(50));
+        assert_eq!(br.device_kind, WirelessDeviceKind::Headphones);
+
+        let cache_path =
+            std::env::temp_dir().join(format!("otb-ss-spare-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&cache_path);
+        let mut agg = WirelessBatteryAggregator::new(AggregatorSettings::default())
+            .with_cache_path(cache_path.clone());
+        let merged = agg.merge(vec![br]);
+        assert_eq!(merged.len(), 1);
+        let restored = to_wireless_reading(merged[0].clone());
+        assert_eq!(restored.secondary_level, Some(0.50));
+        assert_eq!(restored.device_kind, WirelessDeviceKind::Headphones);
+        let _ = std::fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn dualsense_and_ds4_bluetooth_reports_parse() {
+        // DualSense BT 0x31 report (battery at byte 54)
+        let mut ds_bt = vec![0u8; 78];
+        ds_bt[0] = 0x31;
+        ds_bt[54] = 0x07; // discharging, 70%
+        let parsed = parse_gamepad(0x054C, 0x0DF2, &ds_bt, "gp:edge", "DualSense Edge")
+            .expect("DualSense BT 0x31");
+        assert_eq!(parsed.level, 70);
+        assert!(!parsed.charging);
+        assert_eq!(parsed.device_kind, WirelessDeviceKind::Gamepad);
+
+        // DualShock 4 BT 0x11 report (battery at byte 32)
+        let mut ds4_bt = vec![0u8; 78];
+        ds4_bt[0] = 0x11;
+        ds4_bt[32] = 0x16; // cable + step 6 -> 60% charging
+        let parsed4 = parse_gamepad(0x054C, 0x09CC, &ds4_bt, "gp:ds4", "DualShock 4")
+            .expect("DualShock 4 BT 0x11");
+        assert_eq!(parsed4.level, 60);
+        assert!(parsed4.charging);
+        assert_eq!(parsed4.device_kind, WirelessDeviceKind::Gamepad);
+    }
+
+    #[test]
+    fn corsair_bragi_both_endpoints_and_probe_policy_gating() {
+        let req08 = build_bragi_request(0x08, BRAGI_PROPERTY_LEVEL, 64);
+        assert_eq!(req08[0], 0x08);
+        assert_eq!(&req08[1..4], &[0x02, 0x0F, 0x00]);
+        let req09 = build_bragi_request(0x09, BRAGI_PROPERTY_STATUS, 65);
+        assert_eq!(req09[0], 0x00);
+        assert_eq!(req09[1], 0x09);
+        assert_eq!(&req09[2..5], &[0x02, 0x10, 0x00]);
+
+        let listen_only_policy = ProbePolicy {
+            listen_only: true,
+            multi_brand_enabled: true,
+            disabled_vendors: Vec::new(),
+        };
+        assert!(!listen_only_policy.allows_source(BatterySource::AsusRogHid));
+        assert!(!listen_only_policy.allows_source(BatterySource::CorsairHid));
+        assert!(!listen_only_policy.allows_source(BatterySource::HyperXHid));
+        assert!(!listen_only_policy.allows_source(BatterySource::CompxAtkVxe));
+        assert!(!listen_only_policy.allows_source(BatterySource::Keyboard24gHid));
+        assert!(!listen_only_policy.allows_source(BatterySource::RazerHid));
+        assert!(listen_only_policy.allows_source(BatterySource::GamepadHid));
+        assert!(listen_only_policy.allows_source(BatterySource::Bluetooth));
+
+        let no_multi_brand = ProbePolicy {
+            listen_only: false,
+            multi_brand_enabled: false,
+            disabled_vendors: Vec::new(),
+        };
+        assert!(!no_multi_brand.allows_source(BatterySource::AsusRogHid));
+        assert!(!no_multi_brand.allows_source(BatterySource::CompxAtkVxe));
+        assert!(no_multi_brand.allows_source(BatterySource::LogitechHidPlusPlus));
+
+        let disabled_vendor = ProbePolicy {
+            listen_only: false,
+            multi_brand_enabled: true,
+            disabled_vendors: vec!["Corsair".into(), "glorious".into(), "zowie".into()],
+        };
+        assert!(!disabled_vendor.allows_source(BatterySource::CorsairHid));
+        assert!(disabled_vendor.allows_source(BatterySource::AsusRogHid));
+        assert!(disabled_vendor.is_vid_disabled(0x258A, "Glorious Model O 2"));
+        assert!(disabled_vendor.is_vid_disabled(0x3057, "ZOWIE U2"));
+        assert!(!disabled_vendor.is_vid_disabled(0x372E, "Lamzu Maya"));
+    }
+
+    #[test]
+    fn razer_reply_tx_id_distinguishes_hyperspeed_slots() {
+        let mut reply_a = vec![0u8; RAZER_BUFFER_LEN];
+        reply_a[1] = RAZER_STATUS_SUCCESS;
+        reply_a[2] = 0x1F;
+        reply_a[7] = RAZER_COMMAND_CLASS_POWER;
+        reply_a[8] = RAZER_CMD_BATTERY;
+        reply_a[10] = 180;
+        reply_a[89] = razer_xor_crc(&reply_a);
+        assert_eq!(razer_reply_tx_id(&reply_a), Some(0x1F));
+        assert_eq!(razer_parse_reply(&reply_a, RAZER_CMD_BATTERY), Some(180));
+
+        let mut reply_b = reply_a.clone();
+        reply_b[2] = 0x3F;
+        reply_b[10] = 90;
+        reply_b[89] = razer_xor_crc(&reply_b);
+        assert_eq!(razer_reply_tx_id(&reply_b), Some(0x3F));
+        assert_eq!(razer_parse_reply(&reply_b, RAZER_CMD_BATTERY), Some(90));
     }
 }

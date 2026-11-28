@@ -62,16 +62,16 @@ use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, CS_DBLCLKS, CallNextHookEx, CreateWindowExW,
     DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-    HHOOK, HTCLIENT, HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic,
-    IsWindow, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE, WindowFromPoint,
+    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, HHOOK, HTCLIENT, HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND,
+    IDC_SIZEWE, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG,
+    MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
+    SetCursor, SetForegroundWindow, SetTimer, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WindowFromPoint,
 };
 
 pub mod dcomp;
@@ -102,6 +102,7 @@ use crate::design;
 use crate::platform::icon_cache::{self, RawIcon};
 use crate::platform::pins::{self, PinnedApp};
 use crate::platform::shell_files;
+use crate::platform::smart_tools;
 use crate::platform::tray_host;
 use crate::platform::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
@@ -158,6 +159,29 @@ const WM_HOTKEY: u32 = 0x0312;
 const WM_CLOSE: u32 = 0x0010;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
+/// Optional global hotkeys, registered only when bound in `DockSettings::extra`.
+const HOTKEY_ISLAND_TOGGLE: i32 = 0x4F03;
+const HOTKEY_SMART_OCR: i32 = 0x4F04;
+const HOTKEY_QUICK_SCREENSHOT: i32 = 0x4F05;
+const HOTKEY_CLIPBOARD: i32 = 0x4F06;
+/// `(hotkey id, DockSettings::extra key)` of the optional global hotkeys.
+const EXTRA_HOTKEYS: [(i32, &str); 4] = [
+    (HOTKEY_ISLAND_TOGGLE, "IslandToggleHotkey"),
+    (HOTKEY_SMART_OCR, "OcrHotkey"),
+    (HOTKEY_QUICK_SCREENSHOT, "ScreenshotHotkey"),
+    (HOTKEY_CLIPBOARD, "ClipboardHotkey"),
+];
+const ALL_HOTKEY_IDS: [i32; 6] = [
+    HOTKEY_LAUNCHER_ID,
+    HOTKEY_DOCK_ID,
+    HOTKEY_ISLAND_TOGGLE,
+    HOTKEY_SMART_OCR,
+    HOTKEY_QUICK_SCREENSHOT,
+    HOTKEY_CLIPBOARD,
+];
+/// Smart OCR / quick screenshot workers finished: the UI thread drains
+/// `SMART_CAPTURE_RESULTS` and shows the confirmation HUD on the island.
+const WM_APP_SMART_CAPTURE_DONE: u32 = WM_APP + 0x21;
 /// Integration menu ids live above every dock/app menu id so a native command
 /// can never be mistaken for a dock context action.
 const NATIVE_APP_MENU_ID_BASE: u32 = 7000;
@@ -2085,6 +2109,7 @@ impl DockState {
             let shared = unsafe { dynamic_island::SharedRuntime::new(&mut widget_runtime) };
             let mut mgr = dynamic_island::DynamicIslandManager::new(shared);
             mgr.apply(&settings, &all_monitors, is_dark);
+            sync_island_alert_forwarding(&settings);
             Some(mgr)
         } else {
             None
@@ -2684,6 +2709,8 @@ impl DockState {
         if dynamic_island::is_modal_flyout_active() {
             return false;
         }
+        // Capture results that arrived while a modal flyout was pumping messages.
+        self.drain_smart_capture_results();
         // A newly enabled/removed widget changes the strip width; the window
         // must follow, or the pill stays clamped to the old window (bogus
         // overflow + scroll chevrons) until some unrelated resize happens.
@@ -3480,6 +3507,7 @@ impl DockState {
         if let Some(ref mut island) = self.dynamic_island {
             island.apply(&self.settings, &self.all_monitors, self.is_dark);
         }
+        sync_island_alert_forwarding(&self.settings);
         self.pins = load_effective_pins(&self.settings);
         for wv in &mut self.widget_visuals {
             wv.last_key.clear();
@@ -7363,6 +7391,13 @@ impl DockState {
             {
                 let rel_x = mx - rc.0;
                 let width = (rc.2 - rc.0).max(1.0);
+                // N6: the Media chip's album art cycles between SMTC sessions.
+                if dynamic_island::media_album_art_hit(wid, rel_x, rc.3 - rc.1) {
+                    dynamic_island::cycle_media_session_async();
+                    self.refresh_widgets_throttled();
+                    self.update_visuals();
+                    return;
+                }
                 let outcome =
                     self.widget_runtime
                         .handle_direct_click(wid, rel_x, width, &mut self.settings);
@@ -7608,9 +7643,160 @@ impl DockState {
         self.update_visuals();
     }
 
+    /// O5 portable fallback: forwards flashing / alerting background windows to the
+    /// Dynamic Island as notification pills (only the primary dock owns the island).
+    fn forward_island_alerts(&mut self) {
+        let alerts: Vec<(String, isize)> = ISLAND_ALERTS
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default();
+        if alerts.is_empty() || !self.settings.island_notifications_enabled() {
+            return;
+        }
+        let Some(island) = self.dynamic_island.as_mut() else {
+            return;
+        };
+        let mut seen: HashSet<isize> = HashSet::new();
+        for (path, hwnd) in alerts {
+            if hwnd == 0 || !seen.insert(hwnd) {
+                continue;
+            }
+            let app_name = Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            island.push_shell_alert(app_name, window_title_text(hwnd), hwnd);
+        }
+    }
+
+    /// Global `IslandToggleHotkey`.
+    fn toggle_island_from_hotkey(&mut self) {
+        match self.dynamic_island.as_mut() {
+            Some(island) if island.has_islands() => island.toggle_open(),
+            _ => opentaskbar_core::log::info(
+                "Island toggle hotkey ignored: the Dynamic Island is disabled",
+            ),
+        }
+    }
+
+    /// Global `OcrHotkey`: region select + offline OCR on a worker; the result comes back
+    /// through `WM_APP_SMART_CAPTURE_DONE`.
+    fn start_smart_ocr(&mut self) {
+        if !self.settings.smart_ocr_enabled() || smart_tools::is_capture_active() {
+            return;
+        }
+        let hwnd = self.hwnd;
+        smart_tools::capture_and_ocr_async(move |outcome| {
+            post_smart_capture(hwnd, SmartCaptureOutcome::Ocr(outcome));
+        });
+    }
+
+    /// Global `ScreenshotHotkey`: region screenshot to the clipboard and a PNG on a worker.
+    fn start_quick_screenshot(&mut self) {
+        if !self.settings.quick_screenshot_enabled() || smart_tools::is_capture_active() {
+            return;
+        }
+        let hwnd = self.hwnd;
+        smart_tools::capture_region_screenshot_async(None, move |outcome| {
+            post_smart_capture(hwnd, SmartCaptureOutcome::Screenshot(outcome));
+        });
+    }
+
+    /// UI thread: turns finished captures into island HUDs (and Shelf entries).
+    fn drain_smart_capture_results(&mut self) {
+        if dynamic_island::is_modal_flyout_active() {
+            // `refresh_widgets` drains them once the modal loop is gone.
+            return;
+        }
+        let results: Vec<SmartCaptureOutcome> = SMART_CAPTURE_RESULTS
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default();
+        for outcome in results {
+            let event = match outcome {
+                SmartCaptureOutcome::Ocr(Ok(text)) => {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        capture_toast(
+                            "\u{E8C8}",
+                            localized_or("SmartOcrNoText", "No text found"),
+                            String::new(),
+                        )
+                    } else {
+                        let preview: String = text
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .chars()
+                            .take(120)
+                            .collect();
+                        capture_toast(
+                            "\u{E8C8}",
+                            localized_or("SmartOcrCopied", "Text copied"),
+                            preview,
+                        )
+                    }
+                }
+                SmartCaptureOutcome::Screenshot(Ok(result)) => {
+                    if self.settings.shelf_enabled()
+                        && let Some(path) = &result.saved_path
+                    {
+                        let _ = self
+                            .widget_runtime
+                            .add_shelf_files(std::slice::from_ref(path), &self.settings);
+                    }
+                    capture_toast(
+                        "\u{E722}",
+                        localized_or("QuickScreenshotSaved", "Screenshot saved"),
+                        result.summary,
+                    )
+                }
+                SmartCaptureOutcome::Ocr(Err(err)) | SmartCaptureOutcome::Screenshot(Err(err)) => {
+                    if is_capture_cancel(&err) {
+                        continue;
+                    }
+                    capture_toast(
+                        "\u{E783}",
+                        localized_or("SmartCaptureFailed", "Capture failed"),
+                        err,
+                    )
+                }
+            };
+            if let Some(island) = self.dynamic_island.as_mut() {
+                island.push_hud_event(event);
+            }
+        }
+    }
+
+    /// Global `ClipboardHotkey`: opens the Clipboard History flyout above the dock.
+    fn open_clipboard_flyout_from_hotkey(&mut self) {
+        if self.hover_flyout_open || dynamic_island::is_modal_flyout_active() {
+            return;
+        }
+        if !widgets::widget_has_flyout("clipboard") {
+            return;
+        }
+        let sm = self.live_scroll_metrics();
+        let cx = (sm.vp_left + sm.vp_right) * 0.5;
+        crate::ui::flyout::set_next_hover_anchor(None);
+        if self.open_widget_flyout_at("clipboard", (cx, 0.0, cx, 0.0)) {
+            let _ = opentaskbar_core::settings::save_to(
+                &opentaskbar_core::settings::settings_path(),
+                &self.settings,
+            );
+            self.reload_settings_live();
+        } else {
+            self.refresh_widgets_throttled();
+            self.update_visuals();
+        }
+    }
+
     /// Drains EVENT_SYSTEM_ALERT posts on the UI thread. Even when badges are
     /// disabled the queue is cleared so it cannot grow across a long session.
     fn drain_notification_badges(&mut self) {
+        if self.dynamic_island.is_some() {
+            self.forward_island_alerts();
+        }
         let alerts: Vec<String> = NOTIFICATION_ALERTS
             .lock()
             .map(|mut queue| std::mem::take(&mut *queue))
@@ -8524,18 +8710,26 @@ thread_local! {
     static HOTKEY_OWNER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Re-registers the launcher/dock hotkeys for the primary dock window. Bindings that
+/// Releases every global hotkey id this process may have registered on `hwnd`.
+fn unregister_global_hotkeys(hwnd: HWND) {
+    for id in ALL_HOTKEY_IDS {
+        // SAFETY: unregistering an id that is not registered is a harmless no-op.
+        unsafe {
+            UnregisterHotKey(hwnd, id);
+        }
+    }
+}
+
+/// Re-registers the launcher/dock hotkeys plus the optional island toggle, Smart OCR,
+/// quick screenshot and clipboard hotkeys for the primary dock window. Bindings that
 /// fail (another app owns the combination) stay pending and retry on the next reload.
 fn register_global_hotkeys(hwnd: HWND, settings: &DockSettings) {
     let previous = HOTKEY_OWNER.replace(hwnd as usize);
+    if previous != 0 && previous != hwnd as usize {
+        unregister_global_hotkeys(previous as HWND);
+    }
+    unregister_global_hotkeys(hwnd);
     unsafe {
-        if previous != 0 && previous != hwnd as usize {
-            UnregisterHotKey(previous as HWND, HOTKEY_LAUNCHER_ID);
-            UnregisterHotKey(previous as HWND, HOTKEY_DOCK_ID);
-        }
-        UnregisterHotKey(hwnd, HOTKEY_LAUNCHER_ID);
-        UnregisterHotKey(hwnd, HOTKEY_DOCK_ID);
-
         let launcher = settings.launcher_binding();
         let dock = settings.dock_binding();
         let no_repeat = opentaskbar_core::hotkey::MOD_NOREPEAT;
@@ -8568,6 +8762,97 @@ fn register_global_hotkeys(hwnd: HWND, settings: &DockSettings) {
                 windows_sys::Win32::Foundation::GetLastError()
             ));
         }
+
+        let mut taken: Vec<opentaskbar_core::hotkey::HotkeyBinding> =
+            launcher.into_iter().chain(dock).collect();
+        for (id, key) in EXTRA_HOTKEYS {
+            let Some(binding) = settings.extra_hotkey_binding(key) else {
+                continue;
+            };
+            if taken.contains(&binding) {
+                opentaskbar_core::log::warn(format!(
+                    "Hotkey {key} ({}) conflicts with another OpenTaskbar hotkey; skipped",
+                    binding.display
+                ));
+                continue;
+            }
+            if RegisterHotKey(hwnd, id, binding.modifiers | no_repeat, binding.virtual_key) == 0 {
+                opentaskbar_core::log::warn(format!(
+                    "RegisterHotKey {key} ({}) failed: {}",
+                    binding.display,
+                    windows_sys::Win32::Foundation::GetLastError()
+                ));
+            } else {
+                taken.push(binding);
+            }
+        }
+    }
+}
+
+/// Finished Smart OCR / screenshot capture, produced on a worker thread.
+enum SmartCaptureOutcome {
+    Ocr(Result<String, String>),
+    Screenshot(Result<smart_tools::CaptureResult, String>),
+}
+
+/// Worker -> UI thread hand-off; drained by `WM_APP_SMART_CAPTURE_DONE` (bounded).
+static SMART_CAPTURE_RESULTS: Mutex<Vec<SmartCaptureOutcome>> = Mutex::new(Vec::new());
+const MAX_SMART_CAPTURE_RESULTS: usize = 8;
+
+fn post_smart_capture(dock_hwnd: usize, outcome: SmartCaptureOutcome) {
+    if let Ok(mut queue) = SMART_CAPTURE_RESULTS.lock() {
+        if queue.len() >= MAX_SMART_CAPTURE_RESULTS {
+            queue.remove(0);
+        }
+        queue.push(outcome);
+    }
+    // SAFETY: posting to the dock window; a destroyed window just drops the message.
+    unsafe {
+        let _ = PostMessageW(dock_hwnd as HWND, WM_APP_SMART_CAPTURE_DONE, 0, 0);
+    }
+}
+
+fn is_capture_cancel(err: &str) -> bool {
+    err.eq_ignore_ascii_case("Capture cancelled")
+        || err.eq_ignore_ascii_case("Capture already in progress")
+}
+
+fn capture_toast(
+    icon: &'static str,
+    title: String,
+    subtitle: String,
+) -> crate::platform::hud_monitor::HudEvent {
+    crate::platform::hud_monitor::make_toast_hud(icon, title, subtitle, 2600)
+}
+
+/// Localized string with an English fallback while a catalog lacks the key.
+fn localized_or(key: &str, fallback: &str) -> String {
+    let text = loc::t(key);
+    if text == key || text.trim().is_empty() {
+        fallback.to_owned()
+    } else {
+        text
+    }
+}
+
+/// Caption of an alerting window (bounded; empty when it has none).
+fn window_title_text(hwnd: isize) -> String {
+    let mut buffer = [0u16; 256];
+    // SAFETY: `buffer` is valid for `buffer.len()` UTF-16 units.
+    let len = unsafe { GetWindowTextW(hwnd as HWND, buffer.as_mut_ptr(), buffer.len() as i32) };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..(len as usize).min(buffer.len())])
+}
+
+/// Enables the EVENT_SYSTEM_ALERT -> island forwarding queue only while island
+/// notifications can show (the hook itself is shared with the dock badges).
+fn sync_island_alert_forwarding(settings: &DockSettings) {
+    let enabled = settings.dynamic_island_enable && settings.island_notifications_enabled();
+    ISLAND_ALERTS_ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled && let Ok(mut queue) = ISLAND_ALERTS.lock() {
+        queue.clear();
     }
 }
 
@@ -8691,6 +8976,11 @@ unsafe extern "system" {
 /// no badge surface is created off-thread.
 static NOTIFICATION_ALERTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static NOTIFICATION_COUNTS: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+/// `(executable path, alerting window)` for the Dynamic Island notification pills; filled
+/// only while `ISLAND_ALERTS_ENABLED` and bounded by `MAX_ISLAND_ALERTS`.
+static ISLAND_ALERTS: Mutex<Vec<(String, isize)>> = Mutex::new(Vec::new());
+static ISLAND_ALERTS_ENABLED: AtomicBool = AtomicBool::new(false);
+const MAX_ISLAND_ALERTS: usize = 16;
 
 /// Resolves the executable behind an alert window once, on the hook thread.
 fn exe_path_from_hwnd(hwnd: HWND) -> String {
@@ -8737,6 +9027,14 @@ unsafe extern "system" fn notification_alert_hook(
         } else {
             counts.push((path.clone(), 1));
         }
+    }
+    if ISLAND_ALERTS_ENABLED.load(Ordering::Relaxed)
+        && let Ok(mut queue) = ISLAND_ALERTS.lock()
+    {
+        if queue.len() >= MAX_ISLAND_ALERTS {
+            queue.remove(0);
+        }
+        queue.push((path.clone(), hwnd as isize));
     }
     if let Ok(mut queue) = NOTIFICATION_ALERTS.lock() {
         queue.push(path);
@@ -9185,6 +9483,10 @@ unsafe extern "system" fn wnd_proc(
             state.drain_notification_badges();
             0
         }
+        WM_APP_SMART_CAPTURE_DONE => {
+            state.drain_smart_capture_results();
+            0
+        }
         WM_APP_SHELL_FLYOUT => {
             let kind = flyout_kind_from_code(wparam);
             // Unknown flyout HWND: pass 0 and let the reposition worker discover
@@ -9203,6 +9505,10 @@ unsafe extern "system" fn wnd_proc(
                     // between slots, Enter launches, Escape returns focus).
                     state.start_keyboard_navigation();
                 }
+                HOTKEY_ISLAND_TOGGLE => state.toggle_island_from_hotkey(),
+                HOTKEY_SMART_OCR => state.start_smart_ocr(),
+                HOTKEY_QUICK_SCREENSHOT => state.start_quick_screenshot(),
+                HOTKEY_CLIPBOARD => state.open_clipboard_flyout_from_hotkey(),
                 _ => {}
             }
             0
@@ -9677,10 +9983,7 @@ pub fn run(settings: DockSettings) {
     }
     let owner = HOTKEY_OWNER.take();
     if owner != 0 {
-        unsafe {
-            UnregisterHotKey(owner as HWND, HOTKEY_LAUNCHER_ID);
-            UnregisterHotKey(owner as HWND, HOTKEY_DOCK_ID);
-        }
+        unregister_global_hotkeys(owner as HWND);
     }
     tray_host::stop_host();
     DOCK_HWNDS.with(|list| list.borrow_mut().clear());

@@ -99,6 +99,20 @@ unsafe extern "system" {
     fn GetTimeZoneInformation(info: *mut WinTimeZoneInformation) -> u32;
 }
 
+/// Current local UTC offset in seconds (positive east of UTC, negative west of UTC).
+pub(crate) fn local_utc_offset_secs() -> i64 {
+    let mut info: WinTimeZoneInformation = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` matches Win32 `TIME_ZONE_INFORMATION` and is stack-owned.
+    let mode = unsafe { GetTimeZoneInformation(&mut info) };
+    // Windows `Bias` satisfies: UTC = local_time + bias_minutes, so east-of-UTC offset = -bias.
+    let extra = match mode {
+        2 => info.daylight_bias, // TIME_ZONE_ID_DAYLIGHT
+        1 => info.standard_bias, // TIME_ZONE_ID_STANDARD
+        _ => 0,
+    };
+    -i64::from(info.bias + extra) * 60
+}
+
 /// Standard/daylight display name for the current timezone (`TimeZoneInfo` parity).
 pub fn timezone_display_name() -> String {
     let mut info: WinTimeZoneInformation = unsafe { std::mem::zeroed() };

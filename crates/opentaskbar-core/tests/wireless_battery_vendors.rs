@@ -316,3 +316,76 @@ fn production_hid_parsers_match_the_reference_vectors() {
     assert_eq!(asus_rog(0x1B1C, &report), None);
     assert_eq!(outlier_filter(&[80, 82, 79, 81, 5]), Some(80));
 }
+
+/// Bridge pinning all 6 live multi-brand probes, extended vendor parsers,
+/// SetupDi Bluetooth presence, BLE Connected guard, WirelessDeviceKind,
+/// spare dock battery preservation, and settings gating in production code.
+#[test]
+fn production_live_multi_brand_and_extended_vendors_are_wired() {
+    const BATTERY: &str = "crates/opentaskbar-app/src/platform/wireless_battery.rs";
+    const VENDORS_EXT: &str = "crates/opentaskbar-app/src/platform/wireless_vendors_ext.rs";
+
+    common::assert_source_has(
+        BATTERY,
+        &[
+            "pub enum WirelessDeviceKind",
+            "pub secondary_level: Option<f32>",
+            "pub device_kind: WirelessDeviceKind",
+            "fn probe_asus_rog(",
+            "fn probe_corsair(",
+            "fn probe_hyperx(",
+            "fn probe_compx_and_mice(",
+            "fn probe_keyboard_24g(",
+            "fn probe_gamepad_hid(",
+            "DEVPKEY_BLUETOOTH_BATTERY",
+            "DEVPKEY_DEVICE_IS_PRESENT",
+            "SetupDiGetDevicePropertyW",
+            "BluetoothConnectionStatus::Connected",
+            "wireless_multi_brand_enabled()",
+            "wireless_disabled_vendors()",
+            "else if r[0] == 0x83",
+        ],
+    );
+
+    common::assert_source_has(
+        VENDORS_EXT,
+        &[
+            "pub enum HyperXDeviceProtocol",
+            "HpCloudHeadset64",
+            "KingstonCloud20",
+            "PulsefireMouse64",
+            "pub fn parse_glorious_reply(",
+            "pub fn parse_endgame_gear_reply(",
+            "pub fn parse_finalmouse_reply(",
+            "pub fn parse_zowie_reply(",
+            "pub fn parse_keychron_raw_hid_reply(",
+            "pub fn classify_wireless_device_kind(",
+        ],
+    );
+
+    let ext_src = common::source(VENDORS_EXT);
+    assert_eq!(
+        common::numeric_const(&ext_src, "HP_HYPERX_VID"),
+        Some(0x03F0)
+    );
+    assert_eq!(
+        common::numeric_const(&ext_src, "KINGSTON_HYPERX_VID"),
+        Some(0x0951)
+    );
+    assert_eq!(
+        common::numeric_const(&ext_src, "ENDGAME_GEAR_VID"),
+        Some(0x3367)
+    );
+    assert_eq!(
+        common::numeric_const(&ext_src, "FINALMOUSE_VID"),
+        Some(0x361D)
+    );
+    assert_eq!(
+        common::numeric_const(&ext_src, "ZOWIE_BENQ_VID"),
+        Some(0x3057)
+    );
+    assert_eq!(
+        common::numeric_const(&ext_src, "KEYCHRON_VID"),
+        Some(0x3434)
+    );
+}

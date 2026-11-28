@@ -202,9 +202,121 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
                 "dynamic island transparency opacity",
             ),
             (
+                "DynamicIslandIdleMode",
+                "",
+                "dynamic island idle resting mode full minimal closed hidden",
+            ),
+            (
+                "DynamicIslandClosedDisplay",
+                "",
+                "dynamic island closed minimal display line clock music ai usage off",
+            ),
+            (
+                "DynamicIslandHoverExpand",
+                "",
+                "dynamic island hover expand mouse open",
+            ),
+            (
+                "DynamicIslandAutoClose",
+                "",
+                "dynamic island auto collapse close delay seconds timeout",
+            ),
+            (
+                "DynamicIslandFollowMouse",
+                "",
+                "dynamic island follow active mouse cursor display monitor",
+            ),
+            (
+                "DynamicIslandScale",
+                "",
+                "dynamic island scale size zoom percent",
+            ),
+            (
+                "PrivacyIndicatorsEnabled",
+                "",
+                "privacy indicators camera microphone dots indicator green orange",
+            ),
+            (
                 "DynamicIslandWidgetLocation",
                 "",
                 "dynamic island widget location display dock",
+            ),
+        ],
+    );
+    add(
+        SettingsPage::DynamicIsland,
+        "SectionIslandHuds",
+        &[
+            (
+                "HudVolumeEnabled",
+                "",
+                "hud volume audio sound pill dynamic island",
+            ),
+            (
+                "HudBrightnessEnabled",
+                "",
+                "hud brightness screen backlight display dynamic island",
+            ),
+            (
+                "HudCapsLockEnabled",
+                "",
+                "hud caps lock num lock keyboard indicator dynamic island",
+            ),
+            (
+                "HudKeyboardLangEnabled",
+                "",
+                "hud keyboard layout language input switcher dynamic island",
+            ),
+            (
+                "HudPowerEnabled",
+                "",
+                "hud power charging battery plugged unplugged dynamic island",
+            ),
+            (
+                "HudNetworkEnabled",
+                "",
+                "hud network wifi ethernet connection status dynamic island",
+            ),
+            (
+                "HudBluetoothEnabled",
+                "",
+                "hud bluetooth device connected wireless dynamic island",
+            ),
+            (
+                "HudDurationMs",
+                "",
+                "hud display duration timeout milliseconds dynamic island",
+            ),
+            (
+                "IslandNotificationsEnabled",
+                "",
+                "notifications mirror toast alert windows dynamic island",
+            ),
+            (
+                "IslandNotificationsDuration",
+                "",
+                "notification duration timeout milliseconds dynamic island",
+            ),
+            (
+                "IslandNotificationsRespectFocus",
+                "",
+                "notifications pause focus mode quiet dynamic island",
+            ),
+        ],
+    );
+    add(
+        SettingsPage::DynamicIsland,
+        "WidgetAiAgents",
+        &[
+            (
+                "AgentMonitorEnabled",
+                "",
+                "ai coding agent monitor claude codex cursor pipe dynamic island",
+            ),
+            (
+                "AgentApprovalBanners",
+                "",
+                "ai agent approval banners allow deny inline card diff",
             ),
         ],
     );
@@ -302,6 +414,76 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "show media music player dock",
         ),
         (
+            "media",
+            "MediaWaveformEnabled",
+            "WidgetMedia",
+            "",
+            "media live audio waveform visualizer bars music",
+        ),
+        (
+            "media",
+            "MediaLyricsEnabled",
+            "WidgetMedia",
+            "",
+            "media synced song lyrics lrclib music",
+        ),
+        (
+            "media",
+            "MediaLyricsPillEnabled",
+            "WidgetMedia",
+            "",
+            "media lyric line closed island pill music",
+        ),
+        (
+            "quicksettings",
+            "QuickPowerActionsEnabled",
+            "WidgetQuickSettings",
+            "",
+            "quick settings power lock sleep actions",
+        ),
+        (
+            "shelf",
+            "ShelfMaxItems",
+            "WidgetFileShelf",
+            "",
+            "file shelf max items drag drop limit",
+        ),
+        (
+            "clipboard",
+            "ClipboardMaxItems",
+            "WidgetClipboard",
+            "",
+            "clipboard history max items limit snippets",
+        ),
+        (
+            "clipboard",
+            "ClipboardIgnoreSensitive",
+            "WidgetClipboard",
+            "",
+            "clipboard ignore sensitive password manager secret",
+        ),
+        (
+            "todo",
+            "TodoRemindersEnabled",
+            "WidgetTodo",
+            "",
+            "todo tasks reminder alerts dynamic island calendar",
+        ),
+        (
+            "todo",
+            "TodoIcalUrl",
+            "WidgetTodo",
+            "",
+            "todo calendar ical ics feed url subscription",
+        ),
+        (
+            "todo",
+            "TodoIcalPollMinutes",
+            "WidgetTodo",
+            "",
+            "todo calendar ical refresh interval poll minutes",
+        ),
+        (
             "countdown",
             "CountdownDefaultMinutes",
             "WidgetCountdown",
@@ -321,6 +503,13 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "WidgetBluetoothBattery",
             "",
             "wireless bluetooth restore ignored hidden devices",
+        ),
+        (
+            "bluetoothbattery",
+            "WirelessMultiBrandEnabled",
+            "WidgetBluetoothBattery",
+            "",
+            "wireless bluetooth multi brand headset mouse protocols hid logitech razer corsair steelseries",
         ),
         (
             "focus",
@@ -468,6 +657,48 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ],
     );
     // Preferences
+    add(
+        SettingsPage::Preferences,
+        "SectionSmartTools",
+        &[
+            (
+                "SmartOcrEnabled",
+                "",
+                "offline smart ocr extract text screen capture copy",
+            ),
+            (
+                "QuickScreenshotEnabled",
+                "",
+                "quick region screenshot capture screen png clipboard",
+            ),
+        ],
+    );
+    add(
+        SettingsPage::Preferences,
+        "SectionHotkeys",
+        &[
+            (
+                "HotkeyIslandToggle",
+                "",
+                "hotkey shortcut dynamic island toggle show hide",
+            ),
+            (
+                "HotkeySmartOcr",
+                "",
+                "hotkey shortcut smart ocr capture text",
+            ),
+            (
+                "HotkeyQuickScreenshot",
+                "",
+                "hotkey shortcut quick region screenshot capture",
+            ),
+            (
+                "HotkeyClipboardHistory",
+                "",
+                "hotkey shortcut clipboard history open",
+            ),
+        ],
+    );
     add(
         SettingsPage::Preferences,
         "SectionSystem",
@@ -859,8 +1090,45 @@ settings_rows! {
         ("Focus Sessions", "FocusSessions", &["session"]),
         ("Wireless Battery Poll", "WirelessBatteryPollSeconds", &["bluetooth", "interval"]),
         ("Wireless Battery Threshold", "WirelessBatteryLowThreshold", &["low", "percent"]),
+        ("Extended Wireless Protocols", "WirelessMultiBrandEnabled", &["wireless", "bluetooth", "headset", "mouse", "hid"]),
         ("AI Usage Ring", "AiUsageRing", &["quota", "providers", "AiUsageRingLabel"]),
         ("Show Media", "ShowMedia", &["music", "player"]),
+        ("Live Audio Waveform", "MediaWaveformEnabled", &["media", "waveform", "visualizer", "music"]),
+        ("Synced Song Lyrics", "MediaLyricsEnabled", &["media", "lyrics", "lrclib", "music"]),
+        ("Lyrics Pill in Closed Island", "MediaLyricsPillEnabled", &["media", "lyrics", "island", "pill"]),
+        ("Quick Power Actions", "QuickPowerActionsEnabled", &["quicksettings", "lock", "sleep", "power"]),
+        ("Maximum Shelf Items", "ShelfMaxItems", &["shelf", "files", "drag", "drop"]),
+        ("Clipboard History Limit", "ClipboardMaxItems", &["clipboard", "history", "limit"]),
+        ("Ignore Sensitive Clipboard", "ClipboardIgnoreSensitive", &["clipboard", "password", "sensitive"]),
+        ("Task Reminder Alerts", "TodoRemindersEnabled", &["todo", "tasks", "reminders"]),
+        ("Calendar iCal URL", "TodoIcalUrl", &["todo", "calendar", "ical", "ics"]),
+        ("Calendar Refresh Interval", "TodoIcalPollMinutes", &["todo", "calendar", "ical", "poll"]),
+    ],
+    ("DynamicIsland", "Dynamic Island") => [
+        ("Resting Island Mode", "DynamicIslandIdleMode", &["island", "idle", "minimal", "closed", "full"]),
+        ("Minimal Mode Content", "DynamicIslandClosedDisplay", &["island", "closed", "line", "clock", "music"]),
+        ("Expand on Hover", "DynamicIslandHoverExpand", &["island", "hover", "expand"]),
+        ("Auto-Collapse Delay", "DynamicIslandAutoCloseSecs", &["island", "auto close", "collapse", "delay"]),
+        ("Follow Active Mouse Display", "DynamicIslandFollowMouse", &["island", "mouse", "monitor", "display"]),
+        ("Island Scale", "DynamicIslandScale", &["island", "scale", "zoom"]),
+        ("Privacy Indicators", "PrivacyIndicatorsEnabled", &["camera", "microphone", "privacy", "dots"]),
+    ],
+    ("DynamicIsland", "System HUDs & Notifications") => [
+        ("Volume HUD", "HudVolumeEnabled", &["hud", "volume", "audio"]),
+        ("Brightness HUD", "HudBrightnessEnabled", &["hud", "brightness", "screen"]),
+        ("Caps Lock & Num Lock HUD", "HudCapsLockEnabled", &["hud", "caps lock", "num lock"]),
+        ("Keyboard Language HUD", "HudKeyboardLangEnabled", &["hud", "keyboard", "language"]),
+        ("Charging & Battery HUD", "HudPowerEnabled", &["hud", "power", "battery", "charging"]),
+        ("Wi-Fi Status HUD", "HudNetworkEnabled", &["hud", "wifi", "network"]),
+        ("Bluetooth Connected HUD", "HudBluetoothEnabled", &["hud", "bluetooth", "device"]),
+        ("HUD Display Duration", "HudDurationMs", &["hud", "duration", "timeout"]),
+        ("Mirror Notifications", "IslandNotificationsEnabled", &["notifications", "toast", "island"]),
+        ("Notification Duration", "IslandNotificationsDurationMs", &["notifications", "duration", "timeout"]),
+        ("Pause Notifications in Focus Mode", "IslandNotificationsRespectFocus", &["notifications", "focus", "pause"]),
+    ],
+    ("DynamicIsland", "AI Agent Monitor") => [
+        ("Enable Coding Agent Monitor", "AgentMonitorEnabled", &["agent", "claude", "codex", "cursor", "monitor"]),
+        ("Show Inline Approval Banners", "AgentApprovalBanners", &["agent", "approval", "banner", "diff"]),
     ],
     ("Widgets", "Widget Density") => [
         ("Density Override", "WidgetDensityOverride", &["WidgetDensityCompact", "WidgetDensityFull", "per widget"]),
@@ -870,9 +1138,17 @@ settings_rows! {
         ("Window Picker", "WindowPickerEnabled", &["WindowPickerTitle", "WindowPickerPrevious", "WindowPickerNext"]),
         ("Start with Windows", "Startup", &["startup", "run", "registry"]),
     ],
+    ("Preferences", "Smart Capture & OCR") => [
+        ("Offline Smart OCR", "SmartOcrEnabled", &["ocr", "extract text", "capture", "smart tools"]),
+        ("Quick Region Screenshot", "QuickScreenshotEnabled", &["screenshot", "region", "capture", "png"]),
+    ],
     ("Preferences", "Hotkeys") => [
         ("Launcher Hotkey", "LauncherHotkey", &["capture", "shortcut", "key"]),
         ("Dock Hotkey", "DockHotkey", &["capture", "shortcut", "key"]),
+        ("Toggle Dynamic Island Hotkey", "IslandToggleHotkey", &["capture", "shortcut", "island", "toggle"]),
+        ("Smart OCR Hotkey", "OcrHotkey", &["capture", "shortcut", "ocr"]),
+        ("Quick Screenshot Hotkey", "ScreenshotHotkey", &["capture", "shortcut", "screenshot"]),
+        ("Clipboard History Hotkey", "ClipboardHotkey", &["capture", "shortcut", "clipboard"]),
     ],
     ("Preferences", "Accounts") => [
         ("Cursor Sign In", "CursorAuth", &["oauth", "pkce", "ai", "account"]),
