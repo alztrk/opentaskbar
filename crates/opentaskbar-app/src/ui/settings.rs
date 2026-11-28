@@ -4156,6 +4156,7 @@ impl SettingsView {
                 div()
                     .id(SharedString::from(format!("studio-accent-{slug}")))
                     .size(px(24.0))
+                    .flex_shrink_0()
                     .rounded(px(12.0))
                     .bg(rgba(color_u32))
                     .border_2()
@@ -4168,7 +4169,28 @@ impl SettingsView {
             );
         }
         body.push(
-            setting_row(t, Some("\u{E790}"), loc::t("ColorSwatchAccent"), swatch_bar)
+            div()
+                .w_full()
+                .px(px(16.0))
+                .py(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon_glyph("\u{E790}", 14.0, t.text_secondary))
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(13.0)))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgba(t.text_primary))
+                                .child(loc::t("ColorSwatchAccent")),
+                        ),
+                )
+                .child(swatch_bar)
                 .into_any_element(),
         );
 
