@@ -43,10 +43,25 @@ Copy-Item -LiteralPath $built -Destination $finalExe -Force
 # manifest can record its architecture and SHA-256 (and CI can re-verify it).
 $buildRoot = Join-Path $repoRoot "target\$target\release\build"
 $watchdogExe = Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue |
-    ForEach-Object { Join-Path $_.FullName 'out\watchdog\OpenTaskbarWatchdog.exe' } |
-    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-    Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending |
-    Select-Object -First 1
+    ForEach-Object {
+        $buildOutput = Join-Path $_.FullName 'output'
+        if (Test-Path -LiteralPath $buildOutput -PathType Leaf) {
+            $watchdogLine = Get-Content -LiteralPath $buildOutput |
+                Where-Object { $_.StartsWith('cargo:rustc-env=OT_WATCHDOG_EXE=', [StringComparison]::Ordinal) } |
+                Select-Object -Last 1
+            if ($watchdogLine) {
+                $path = $watchdogLine.Substring('cargo:rustc-env=OT_WATCHDOG_EXE='.Length)
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                    [pscustomobject]@{
+                        Path = $path
+                        LastWriteTimeUtc = (Get-Item -LiteralPath $buildOutput).LastWriteTimeUtc
+                    }
+                }
+            }
+        }
+    } |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1 -ExpandProperty Path
 if (-not $watchdogExe) {
     throw "No architecture-specific watchdog produced by build.rs under $buildRoot"
 }
