@@ -1,27 +1,32 @@
-//! Unified 22-widget registry, runtime state, and reference parity `DockFlyout` builders.
+//! Unified 26-widget registry, runtime state, and reference parity `DockFlyout` builders.
 //!
 //! Categories (matching `DockWidgetService.cs`):
 //! - `Time & Weather`    (5): `clock`, `weather`, `dayprogress`, `stopwatch`, `countdown`
 //! - `System & Hardware` (5): `stats`, `netspeed`, `battery`, `bluetoothbattery`, `storage`
-//! - `AI Quotas`         (7): `aiusage_claude`, `aiusage_codex`,
+//! - `AI Quotas`         (8): `aiusage_claude`, `aiusage_codex`,
 //!   `aiusage_opencode`, `aiusage_copilot`, `aiusage_deepseek`,
-//!   `aiusage_openrouter`, `aiusage_cursor`
+//!   `aiusage_openrouter`, `aiusage_cursor`, `agents`
 //! - `Media & Controls`  (4): `media`, `audio`, `quicksettings`, `keyboard`
-//! - `Productivity`      (1): `focus`
+//! - `Productivity`      (4): `focus`, `clipboard`, `shelf`, `todo`
 
 // Public API is re-exported for the dock and UI layers. Most of those re-exports are used by
 // other crates / test harnesses only, so silence `dead_code` at the re-export sites below.
 
+pub mod agents;
 pub mod ai_flyout;
 pub mod catalog_ops;
+pub mod clipboard;
 pub mod custom_widgets;
 pub mod diagnostics;
 pub mod focus_break;
 pub mod hover;
+pub mod lyrics;
 pub mod media_ext;
 pub mod registry;
+pub mod shelf;
 pub mod speedtest;
 pub mod telemetry;
+pub mod todo;
 pub mod uia_raw;
 pub mod widget_icons;
 pub mod widget_snapshot;
@@ -29,7 +34,7 @@ pub mod widget_snapshot;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
@@ -364,6 +369,7 @@ pub struct WidgetRuntime {
     weather_fail_count: u32,
     weather_retry_at: Option<Instant>,
     bt_battery: Arc<Mutex<telemetry::BluetoothBatteryCache>>,
+    bt_secondary_levels: Arc<Mutex<HashMap<String, u8>>>,
     wb_in_flight: Arc<std::sync::atomic::AtomicBool>,
     last_wb_poll: Option<Instant>,
     notified_low_bt: HashSet<String>,
@@ -418,6 +424,16 @@ pub struct WidgetRuntime {
     /// 2 s TTL cache for `installed_keyboard_layouts` so `island_detail_spec("keyboard")`
     /// never repeats `GetLocaleInfoW` queries at VSync frequency.
     keyboard_layouts_cache: Option<KeyboardLayoutsCache>,
+    /// Lazy N2 File Shelf state (`None` unless enabled or files added).
+    shelf: Option<Box<shelf::FileShelfState>>,
+    /// Lazy N3 Clipboard History store (`None` unless enabled).
+    clipboard: Option<Box<clipboard::ClipboardStore>>,
+    /// Lazy N8 To-Do & iCal state (`None` unless `todo` enabled or `.ics` URL configured).
+    todo: Option<Box<todo::TodoState>>,
+    /// Lazy N7 AI Coding Agent Monitor (`None` unless enabled; dropping stops its pipe thread).
+    agents: Option<Box<agents::AgentMonitorState>>,
+    /// Lazy N6 Synced Lyrics cache (`None` unless `media_lyrics_enabled` is true).
+    lyrics: Option<Box<lyrics::LyricsCache>>,
 }
 
 impl Default for WidgetRuntime {
@@ -467,6 +483,7 @@ impl Default for WidgetRuntime {
             weather_fail_count: 0,
             weather_retry_at: None,
             bt_battery: Arc::new(Mutex::new(telemetry::BluetoothBatteryCache::default())),
+            bt_secondary_levels: Arc::new(Mutex::new(HashMap::new())),
             wb_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_wb_poll: None,
             notified_low_bt: HashSet::new(),
@@ -501,6 +518,11 @@ impl Default for WidgetRuntime {
             ai_detected_cache: HashMap::new(),
             audio_detail_cache: None,
             keyboard_layouts_cache: None,
+            shelf: None,
+            clipboard: None,
+            todo: None,
+            agents: None,
+            lyrics: None,
         }
     }
 }
@@ -870,11 +892,177 @@ impl WidgetRuntime {
         self.focus_completed = s.sessions_completed as u32;
     }
 
+    /// Lazy subsystem count (0 when all 5 optional subsystems are disabled).
+    pub(crate) fn lazy_subsystems_allocated(&self) -> usize {
+        usize::from(self.shelf.is_some())
+            + usize::from(self.clipboard.is_some())
+            + usize::from(self.todo.is_some())
+            + usize::from(self.agents.is_some())
+            + usize::from(self.lyrics.is_some())
+    }
+
+    /// Lazily instantiates or drops optional subsystems based on `settings`, keeping idle RAM
+    /// and background thread count at zero while disabled.
+    fn sync_lazy_subsystems(&mut self, settings: &DockSettings) {
+        if !settings.shelf_enabled() && !settings.is_widget_enabled("shelf") {
+            self.shelf = None;
+        } else if settings.is_widget_enabled("shelf") && self.shelf.is_none() {
+            self.shelf = Some(Box::new(shelf::FileShelfState::load_default()));
+        }
+
+        if settings.clipboard_history_enabled() || settings.is_widget_enabled("clipboard") {
+            let store = self
+                .clipboard
+                .get_or_insert_with(|| Box::new(clipboard::ClipboardStore::new()));
+            store.poll(settings);
+        } else {
+            self.clipboard = None;
+        }
+
+        if settings.is_widget_enabled("todo") || !settings.ical_feed_url().trim().is_empty() {
+            let todo = self
+                .todo
+                .get_or_insert_with(|| Box::new(todo::TodoState::load_default()));
+            let interval = Duration::from_secs(u64::from(settings.ical_poll_minutes()) * 60);
+            todo.poll_ical_url(settings.ical_feed_url().trim(), interval);
+        } else {
+            self.todo = None;
+        }
+
+        if settings.agent_monitor_enabled() || settings.is_widget_enabled("agents") {
+            let agents = self
+                .agents
+                .get_or_insert_with(|| Box::new(agents::AgentMonitorState::start()));
+            agents.poll_events();
+        } else {
+            self.agents = None;
+        }
+
+        if settings.media_lyrics_enabled() {
+            let _ = self
+                .lyrics
+                .get_or_insert_with(|| Box::new(lyrics::LyricsCache::new()));
+        } else if let Some(mut cache) = self.lyrics.take() {
+            cache.clear();
+        }
+    }
+
+    /// Adds dropped file paths onto the lazy File Shelf (no-op when shelf is disabled).
+    pub fn add_shelf_files(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        settings: &DockSettings,
+    ) -> usize {
+        if paths.is_empty() || (!settings.shelf_enabled() && !settings.is_widget_enabled("shelf")) {
+            return 0;
+        }
+        let shelf = self
+            .shelf
+            .get_or_insert_with(|| Box::new(shelf::FileShelfState::load_default()));
+        let added = shelf.add_files(paths, settings.shelf_max_items());
+        if added > 0 {
+            let _ = shelf.save_default();
+        }
+        added
+    }
+
+    /// Highest-priority pending AI coding agent approval request, if monitoring is active.
+    pub fn pending_agent_approval(&self) -> Option<agents::AgentApprovalRequest> {
+        self.agents
+            .as_ref()
+            .and_then(|agents| agents.pending_approval().cloned())
+    }
+
+    /// Dispatches an approval decision (`"allow"`, `"deny"`, `"always"`) to the agent monitor.
+    pub fn respond_agent_approval(&mut self, request_id: &str, decision: &str) -> bool {
+        self.agents
+            .as_mut()
+            .is_some_and(|agents| agents.respond_approval(request_id, decision))
+    }
+
+    /// Polls for any due or snooze-expired local to-do reminder without allocating when disabled.
+    pub fn poll_todo_reminder(&mut self, settings: &DockSettings) -> Option<todo::TodoTask> {
+        if !settings.todo_reminders_enabled() {
+            return None;
+        }
+        let todo = self.todo.as_mut()?;
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let info = telemetry::local_clock_info();
+        let now_hhmm = format!("{:02}:{:02}", info.hour, info.minute);
+        todo.poll_due_reminder(now_unix, &now_hhmm, true)
+    }
+
+    /// Live 4-bar audio peak waveform for the Dynamic Island media pill.
+    pub fn media_waveform_bars(&self, settings: &DockSettings) -> [u8; 4] {
+        media_ext::sample_audio_waveform_bars(
+            settings.media_waveform_enabled() && self.is_media_playing(),
+        )
+    }
+
+    /// Current synced lyric line at the active media timeline position, if enabled and cached.
+    pub fn current_lyric_line(&mut self, settings: &DockSettings) -> Option<String> {
+        if !settings.media_lyrics_enabled() {
+            if let Some(mut cache) = self.lyrics.take() {
+                cache.clear();
+            }
+            return None;
+        }
+        let snap = self.media_snapshot();
+        if snap.title.trim().is_empty() {
+            return None;
+        }
+        let pos_ms = if self.media_timeline.duration() > 0.0 {
+            (self.media_timeline.position_at(self.now_secs()) * 1000.0)
+                .round()
+                .max(0.0) as u64
+        } else {
+            snap.position_secs.saturating_mul(1000)
+        };
+        let duration_secs = (snap.duration_secs > 0).then_some(snap.duration_secs);
+        let cache = self
+            .lyrics
+            .get_or_insert_with(|| Box::new(lyrics::LyricsCache::new()));
+        let synced = cache.poll_for_track(true, &snap.title, &snap.artist, duration_secs)?;
+        synced.line_at(pos_ms).map(|(_, line)| line.text.clone())
+    }
+
+    /// Cached `(device_name, percent)` pairs for Dynamic Island Bluetooth HUDs.
+    pub fn wireless_battery_summary_pairs(&self) -> Vec<(String, u8)> {
+        self.bt_battery
+            .lock()
+            .ok()
+            .map(|cache| {
+                cache
+                    .devices
+                    .iter()
+                    .map(|dev| (dev.name.clone(), dev.percent.min(100) as u8))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Cached `(volume_pct, muted)` snapshot for Dynamic Island Volume HUDs.
+    pub fn audio_volume_snapshot(&self) -> Option<(u8, bool)> {
+        Some((self.audio_vol.min(100) as u8, self.audio_muted))
+    }
+
+    /// Whether an SMTC media session is currently playing.
+    pub fn is_media_playing(&self) -> bool {
+        self.media_session
+            .lock()
+            .ok()
+            .is_some_and(|snap| snap.playing && !snap.title.is_empty())
+    }
+
     pub fn tick(&mut self, settings: &DockSettings) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
         self.advance_timers(settings, elapsed);
+        self.sync_lazy_subsystems(settings);
 
         // Keep dynamic settings-driven chip widths current even between 1 Hz sensor polls.
         self.clock_width = clock_width_dips(settings);
@@ -964,6 +1152,9 @@ impl WidgetRuntime {
                 let sample = media_ext::timeline_from_snapshot(&guard, self.timeline_epoch);
                 let rate = if guard.playing { 1.0 } else { 0.0 };
                 self.media_timeline.update(sample, rate, now, now);
+            }
+            if settings.media_lyrics_enabled() {
+                let _ = self.current_lyric_line(settings);
             }
         }
         if settings.is_widget_enabled("netspeed") {
@@ -1293,44 +1484,63 @@ impl WidgetRuntime {
         }
         let settings_clone = settings.clone();
         let bt_cache = Arc::clone(&self.bt_battery);
+        let bt_secondary = Arc::clone(&self.bt_secondary_levels);
         let in_flight = Arc::clone(&self.wb_in_flight);
         let spawned = std::thread::Builder::new()
             .name("opentaskbar-wb".to_owned())
             .spawn(move || {
                 let readings = wireless_battery::read_all_with_settings(&settings_clone);
                 if readings.is_empty() {
+                    if let Ok(mut sec) = bt_secondary.lock() {
+                        sec.clear();
+                    }
                     telemetry::refresh_bluetooth_battery(&bt_cache, true);
-                } else if let Ok(mut cache) = bt_cache.lock() {
-                    cache.devices = readings
+                } else {
+                    let mut secondary_map = HashMap::new();
+                    let devices: Vec<BluetoothBatteryDevice> = readings
                         .into_iter()
-                        .map(|reading| BluetoothBatteryDevice {
-                            id: reading.id.clone(),
-                            kind: match reading.source {
-                                wireless_battery::BatterySource::GamepadHid
-                                | wireless_battery::BatterySource::XInput => {
-                                    BluetoothDeviceKind::Gamepad
-                                }
-                                wireless_battery::BatterySource::LogitechHidPlusPlus
-                                | wireless_battery::BatterySource::Keyboard24gHid => {
-                                    BluetoothDeviceKind::Keyboard
-                                }
-                                wireless_battery::BatterySource::RazerHid
-                                | wireless_battery::BatterySource::SteelSeriesHid
-                                | wireless_battery::BatterySource::CompxAtkVxe => {
-                                    BluetoothDeviceKind::Mouse
-                                }
-                                _ => BluetoothDeviceKind::Headphones,
-                            },
-                            name: reading.name,
-                            percent: (reading.level_01 * 100.0).round().clamp(0.0, 100.0) as u32,
-                            source_label: reading.source.label().to_owned(),
-                            charging: reading.is_charging,
-                            stale: reading.stale,
-                            sampled_at: None,
+                        .map(|reading| {
+                            if let Some(sec) = reading.secondary_level {
+                                let spare_pct = (sec * 100.0).round().clamp(0.0, 100.0) as u8;
+                                secondary_map.insert(reading.id.clone(), spare_pct);
+                            }
+                            BluetoothBatteryDevice {
+                                id: reading.id.clone(),
+                                kind: match reading.device_kind {
+                                    wireless_battery::WirelessDeviceKind::Mouse => {
+                                        BluetoothDeviceKind::Mouse
+                                    }
+                                    wireless_battery::WirelessDeviceKind::Keyboard => {
+                                        BluetoothDeviceKind::Keyboard
+                                    }
+                                    wireless_battery::WirelessDeviceKind::Headphones => {
+                                        BluetoothDeviceKind::Headphones
+                                    }
+                                    wireless_battery::WirelessDeviceKind::Gamepad => {
+                                        BluetoothDeviceKind::Gamepad
+                                    }
+                                    wireless_battery::WirelessDeviceKind::Other => {
+                                        BluetoothDeviceKind::Generic
+                                    }
+                                },
+                                name: reading.name,
+                                percent: (reading.level_01 * 100.0).round().clamp(0.0, 100.0)
+                                    as u32,
+                                source_label: reading.source.label().to_owned(),
+                                charging: reading.is_charging,
+                                stale: reading.stale,
+                                sampled_at: None,
+                            }
                         })
                         .collect();
-                    cache.last_fetch = Some(Instant::now());
-                    cache.loading = false;
+                    if let Ok(mut sec) = bt_secondary.lock() {
+                        *sec = secondary_map;
+                    }
+                    if let Ok(mut cache) = bt_cache.lock() {
+                        cache.devices = devices;
+                        cache.last_fetch = Some(Instant::now());
+                        cache.loading = false;
+                    }
                 }
                 in_flight.store(false, std::sync::atomic::Ordering::Release);
             })
@@ -2461,6 +2671,94 @@ impl WidgetRuntime {
                     Vec::new(),
                 )
             }
+            "clipboard" => {
+                let mut spec = self.clipboard.as_ref().map_or_else(
+                    || {
+                        make_spec(
+                            "No History".to_owned(),
+                            if settings.clipboard_history_enabled() {
+                                "Copy text to capture locally".to_owned()
+                            } else {
+                                "Clipboard history paused".to_owned()
+                            },
+                            vec![row("Ready", "Waiting for text copies", None)],
+                            Vec::new(),
+                        )
+                    },
+                    |store| store.build_island_detail(),
+                );
+                spec.widget_id = canonical;
+                spec.title = title;
+                spec.has_full_flyout = has_full_flyout;
+                spec
+            }
+            "shelf" => {
+                let mut spec = self.shelf.as_ref().map_or_else(
+                    || {
+                        make_spec(
+                            "Shelf Empty".to_owned(),
+                            "Drop files or notes here".to_owned(),
+                            vec![row("Tip", "Drag files onto the Island or paste text", None)],
+                            vec![Self::island_detail_action(
+                                "paste_text",
+                                "Add Clipboard",
+                                true,
+                            )],
+                        )
+                    },
+                    |shelf| shelf.build_island_detail(),
+                );
+                spec.widget_id = canonical;
+                spec.title = title;
+                spec.has_full_flyout = has_full_flyout;
+                spec
+            }
+            "todo" => {
+                let now_unix = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let mut spec = self.todo.as_ref().map_or_else(
+                    || {
+                        make_spec(
+                            "All Clear".to_owned(),
+                            "No pending tasks or events".to_owned(),
+                            vec![row(
+                                "Tip",
+                                "Type \"15:30 Standup\" in the flyout to schedule",
+                                None,
+                            )],
+                            Vec::new(),
+                        )
+                    },
+                    |todo| todo.build_island_detail(now_unix),
+                );
+                spec.widget_id = canonical;
+                spec.title = title;
+                spec.has_full_flyout = has_full_flyout;
+                spec
+            }
+            "agents" => {
+                let mut spec = self.agents.as_ref().map_or_else(
+                    || {
+                        make_spec(
+                            "Monitor Off".to_owned(),
+                            "Enable AI agent monitor to track sessions".to_owned(),
+                            vec![row("Status", "Idle (0 threads)", None)],
+                            vec![Self::island_detail_action(
+                                "install_hook",
+                                "Install Claude Hook",
+                                false,
+                            )],
+                        )
+                    },
+                    |agents| agents.build_island_detail(),
+                );
+                spec.widget_id = canonical;
+                spec.title = title;
+                spec.has_full_flyout = has_full_flyout;
+                spec
+            }
             _ => make_spec(
                 title.clone(),
                 loc::t("WidgetDetails"),
@@ -2691,6 +2989,46 @@ impl WidgetRuntime {
                     self.refresh_ai_full(ai.id);
                 }
                 true
+            }
+            ("clipboard", _) => {
+                if self.clipboard.is_none()
+                    && (settings.clipboard_history_enabled()
+                        || settings.is_widget_enabled("clipboard"))
+                {
+                    self.clipboard = Some(Box::new(clipboard::ClipboardStore::new()));
+                }
+                self.clipboard
+                    .as_mut()
+                    .is_some_and(|store| store.handle_flyout_action(action_id))
+            }
+            ("shelf", _) => {
+                let shelf = self
+                    .shelf
+                    .get_or_insert_with(|| Box::new(shelf::FileShelfState::load_default()));
+                let changed = shelf.handle_flyout_action(action_id);
+                if changed {
+                    let _ = shelf.save_default();
+                }
+                changed
+            }
+            ("todo", _) => {
+                let todo = self
+                    .todo
+                    .get_or_insert_with(|| Box::new(todo::TodoState::load_default()));
+                let changed = todo.handle_flyout_action(action_id, None);
+                if changed {
+                    let _ = todo.save_default();
+                }
+                changed
+            }
+            ("agents", _) => {
+                if let Some(agents) = self.agents.as_mut() {
+                    agents.handle_flyout_action(action_id)
+                } else if action_id == "install_hook" {
+                    agents::install_claude_code_hook().is_ok()
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -3276,6 +3614,101 @@ impl WidgetRuntime {
                 top: loc::t("GroupsShort"),
                 bottom: loc::t_fmt("GroupCount", &[&settings.app_groups.len().to_string()]),
             },
+            "clipboard" => {
+                let count = self.clipboard.as_ref().map_or(0, |c| c.entries().len());
+                let bottom = match count {
+                    0 => "Empty".to_owned(),
+                    1 => "1 clip".to_owned(),
+                    n => format!("{n} clips"),
+                };
+                WidgetChipSpec::Simple {
+                    icon: widget_icons::resolve_widget_icon(
+                        id,
+                        settings,
+                        WidgetIcon::Glyph(0xE77F),
+                    ),
+                    icon_color: pal.widget_blue,
+                    top: loc::t("WidgetClipboard"),
+                    bottom,
+                }
+            }
+            "shelf" => {
+                let count = self.shelf.as_ref().map_or(0, |s| s.count());
+                let bottom = match count {
+                    0 => "Empty".to_owned(),
+                    1 => "1 item".to_owned(),
+                    n => format!("{n} items"),
+                };
+                WidgetChipSpec::Simple {
+                    icon: widget_icons::resolve_widget_icon(
+                        id,
+                        settings,
+                        WidgetIcon::Glyph(0xE8B7),
+                    ),
+                    icon_color: pal.widget_accent,
+                    top: loc::t("WidgetFileShelf"),
+                    bottom,
+                }
+            }
+            "todo" => {
+                let now_unix = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let bottom = self.todo.as_ref().map_or_else(
+                    || "All Clear".to_owned(),
+                    |todo| {
+                        if let Some(ev) = todo.next_event(now_unix) {
+                            format!(
+                                "{} · {}",
+                                todo::format_countdown(ev.start_unix, ev.end_unix, now_unix),
+                                ev.summary
+                            )
+                        } else {
+                            let open = todo.tasks().iter().filter(|t| !t.done).count();
+                            match open {
+                                0 => "All Clear".to_owned(),
+                                1 => "1 task".to_owned(),
+                                n => format!("{n} tasks"),
+                            }
+                        }
+                    },
+                );
+                WidgetChipSpec::Simple {
+                    icon: widget_icons::resolve_widget_icon(
+                        id,
+                        settings,
+                        WidgetIcon::Glyph(0xE73A),
+                    ),
+                    icon_color: pal.widget_accent,
+                    top: loc::t("WidgetTodo"),
+                    bottom,
+                }
+            }
+            "agents" => {
+                let has_pending = self
+                    .agents
+                    .as_ref()
+                    .is_some_and(|a| a.pending_approval().is_some());
+                let bottom = self
+                    .agents
+                    .as_ref()
+                    .map_or_else(|| "Idle".to_owned(), |a| a.summary_badge());
+                WidgetChipSpec::Simple {
+                    icon: widget_icons::resolve_widget_icon(
+                        id,
+                        settings,
+                        WidgetIcon::Glyph(0xE99A),
+                    ),
+                    icon_color: if has_pending {
+                        pal.warning
+                    } else {
+                        pal.widget_accent
+                    },
+                    top: loc::t("WidgetAiAgents"),
+                    bottom,
+                }
+            }
             _ => WidgetChipSpec::Keyboard {
                 code: id.chars().take(3).collect::<String>().to_uppercase(),
             },
@@ -3602,9 +4035,8 @@ impl WidgetRuntime {
                 DirectClickOutcome::Handled
             }
             "clock" | "audio" | "weather" | "dayprogress" | "stats" | "netspeed"
-            | "bluetoothbattery" | "storage" | "keyboard" | "aiusage_all" | "stacks" | "groups" => {
-                DirectClickOutcome::OpenFlyout
-            }
+            | "bluetoothbattery" | "storage" | "keyboard" | "aiusage_all" | "stacks" | "groups"
+            | "clipboard" | "shelf" | "todo" | "agents" => DirectClickOutcome::OpenFlyout,
             _ => DirectClickOutcome::Handled,
         }
     }
@@ -4730,6 +5162,12 @@ impl WidgetRuntime {
                     let interval = setting_i64(cfg, "WirelessBatteryPollSeconds", 60) as u64;
                     let listen_only = setting_bool(cfg, "WirelessBatteryListenOnly", false);
                     let last_fetch = self.bt_battery.lock().ok().and_then(|g| g.last_fetch);
+                    let secondary_levels = self
+                        .bt_secondary_levels
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .unwrap_or_default();
                     let mut blocks: Vec<FlyoutBlock> = devices
                         .iter()
                         .enumerate()
@@ -4743,13 +5181,18 @@ impl WidgetRuntime {
                                     && last_fetch
                                         .is_some_and(|t| t.elapsed().as_secs() > interval * 2));
                             let pct_str = format_percent(d.percent);
-                            let subtitle = if stale {
+                            let mut subtitle = if stale {
                                 loc::t_fmt("WirelessBatteryStale", &[&d.percent.to_string()])
                             } else if charging {
                                 loc::t("WirelessBatteryCharging")
                             } else {
                                 format!("{} · {pct_str}", d.source_label)
                             };
+                            if let Some(&spare) = secondary_levels.get(&d.id) {
+                                let spare_text =
+                                    loc::t_fmt("WirelessBatterySpareDock", &[&spare.to_string()]);
+                                subtitle = format!("{subtitle} · {spare_text}");
+                            }
                             FlyoutBlock::ActionRow {
                                 id: 100 + i as u32,
                                 title: format!("{shown}{}", if charging { " ⚡" } else { "" }),
@@ -5206,6 +5649,143 @@ impl WidgetRuntime {
                     _ => LiveOutcome::Update(self.live_spec("countdown", settings, is_dark)),
                 });
             }
+            // `MediaWidget` live flyout: seek anchor + per-app mixer + N6 lyrics & source switch.
+            "media" => {
+                telemetry::refresh_media_session(&self.media_session, true);
+                let build = |runtime: &mut Self| {
+                    let snap = runtime.media_snapshot();
+                    let details =
+                        media_ext::get_details(&snap, runtime.audio_vol, runtime.audio_muted);
+                    let sessions = media_ext::list_app_sessions();
+                    let mut spec = media_ext::build_media_flyout(&details, &sessions, settings);
+                    if settings.media_lyrics_enabled() && !snap.title.trim().is_empty() {
+                        let pos_ms = if runtime.media_timeline.duration() > 0.0 {
+                            (runtime.media_timeline.position_at(runtime.now_secs()) * 1000.0)
+                                .round()
+                                .max(0.0) as u64
+                        } else {
+                            snap.position_secs.saturating_mul(1000)
+                        };
+                        let dur = (snap.duration_secs > 0).then_some(snap.duration_secs);
+                        let cache = runtime
+                            .lyrics
+                            .get_or_insert_with(|| Box::new(lyrics::LyricsCache::new()));
+                        if let Some(synced) =
+                            cache.poll_for_track(true, &snap.title, &snap.artist, dur)
+                        {
+                            let window = synced.window_around(pos_ms, 1, 1);
+                            if !window.is_empty() {
+                                let pal = design::palette(is_dark);
+                                spec.blocks.push(FlyoutBlock::Separator);
+                                for (line_idx, line, is_current) in window {
+                                    spec.blocks.push(FlyoutBlock::GlyphActionRow {
+                                        id: 1000 + line_idx as u32,
+                                        glyph: if is_current { 0xE768 } else { 0xE8D2 },
+                                        glyph_color: if is_current {
+                                            pal.widget_accent
+                                        } else {
+                                            pal.text_secondary
+                                        },
+                                        title: line.text.clone(),
+                                        subtitle: None,
+                                        badge: Some(media_ext::format_time(line.time_ms / 1000)),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    spec.blocks.push(FlyoutBlock::Separator);
+                    spec.blocks.push(FlyoutBlock::ButtonBar(vec![
+                        (5, "Switch Source".to_owned(), false),
+                        (
+                            4,
+                            loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]),
+                            false,
+                        ),
+                    ]));
+                    spec
+                };
+                let init = build(self);
+                show_live!("media", init, |ev| match ev {
+                    LiveEvent::Click(btn @ 1..=3) => {
+                        let vk = match btn {
+                            1 => VK_MEDIA_PREV_TRACK,
+                            2 => VK_MEDIA_PLAY_PAUSE,
+                            _ => VK_MEDIA_NEXT_TRACK,
+                        };
+                        telemetry::send_media_vk(vk);
+                        telemetry::refresh_media_session(&self.media_session, true);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(4) => {
+                        pins::launch("ms-settings:sound".to_owned());
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(5) => {
+                        media_ext::cycle_media_session();
+                        telemetry::refresh_media_session(&self.media_session, true);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(60) => {
+                        toggle_audio_mute();
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Click(id) if id >= 1000 => {
+                        let snap = self.media_snapshot();
+                        let dur = (snap.duration_secs > 0).then_some(snap.duration_secs);
+                        let line_idx = (id - 1000) as usize;
+                        let target_ms = self.lyrics.as_mut().and_then(|cache| {
+                            cache
+                                .poll_for_track(true, &snap.title, &snap.artist, dur)
+                                .and_then(|synced| synced.lines.get(line_idx))
+                                .map(|line| line.time_ms)
+                        });
+                        if let Some(ms) = target_ms {
+                            let target_secs = ms / 1000;
+                            if telemetry::media_seek(target_secs) {
+                                let now = self.now_secs();
+                                confirm_seek(&mut self.media_timeline, target_secs as f64, now);
+                            }
+                            telemetry::refresh_media_session(&self.media_session, true);
+                        }
+                        LiveOutcome::Update(build(self))
+                    }
+                    // C2 LiveEvent::Seek — C4 `telemetry::media_seek(secs)`.
+                    LiveEvent::Seek { id: 50, ratio } => {
+                        let dur = self
+                            .media_session
+                            .lock()
+                            .ok()
+                            .map_or(0, |g| g.duration_secs);
+                        let target = media_ext::seek_position(ratio, dur);
+                        if telemetry::media_seek(target) {
+                            // Anchor locally at once; a stale SMTC echo of the old position
+                            // must not rewind the slider until the provider catches up.
+                            let now = self.now_secs();
+                            confirm_seek(&mut self.media_timeline, target as f64, now);
+                        }
+                        telemetry::refresh_media_session(&self.media_session, true);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Slider { id: 51, ratio } => {
+                        set_audio_volume((ratio * 100.0).round() as u32);
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        LiveOutcome::Update(build(self))
+                    }
+                    // Per-app mixer rows (ids 120..=131) from `media_ext::list_app_sessions`.
+                    LiveEvent::Click(id) if (120..132).contains(&id) && id % 2 == 0 => {
+                        toggle_app_mute(((id - 120) / 2) as usize);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Slider { id, ratio } if (121..132).contains(&id) && id % 2 == 1 => {
+                        set_app_vol(((id - 121) / 2) as usize, ratio);
+                        LiveOutcome::Update(build(self))
+                    }
+                    LiveEvent::Update => LiveOutcome::Update(build(self)),
+                    _ => LiveOutcome::Close,
+                });
+            }
             "quicksettings" => {
                 let mut settings_changed = false;
                 let build_qs_spec = |runtime: &Self, settings: &DockSettings| {
@@ -5239,7 +5819,7 @@ impl WidgetRuntime {
                         AppTheme::Light => loc::t("Light"),
                     };
                     let on_off = |on: bool| loc::t(if on { "QuickOn" } else { "QuickOff" });
-                    FlyoutSpec {
+                    let mut spec = FlyoutSpec {
                         title: loc::t("WidgetQuickSettings"),
                         subtitle: runtime.radio_loading.then(|| loc::t("QuickLoading")),
                         width_dips: 312.0,
@@ -5315,7 +5895,25 @@ impl WidgetRuntime {
                                 (9, loc::t("WidgetShowDesktop"), false),
                             ]),
                         ],
+                    };
+                    if settings.quick_power_actions_enabled() {
+                        spec.blocks.push(FlyoutBlock::Separator);
+                        spec.blocks.push(FlyoutBlock::ButtonBar(vec![
+                            (20, loc::t("QuickActionLock"), false),
+                            (21, loc::t("QuickActionSleep"), false),
+                        ]));
+                        let mut capture_buttons = Vec::new();
+                        if settings.quick_screenshot_enabled() {
+                            capture_buttons.push((22, loc::t("QuickActionScreenshot"), false));
+                        }
+                        if settings.smart_ocr_enabled() {
+                            capture_buttons.push((23, loc::t("QuickActionOcr"), false));
+                        }
+                        if !capture_buttons.is_empty() {
+                            spec.blocks.push(FlyoutBlock::ButtonBar(capture_buttons));
+                        }
                     }
+                    spec
                 };
                 let init = build_qs_spec(self, settings);
                 show_live!("quicksettings", init, |ev| match ev {
@@ -5380,6 +5978,38 @@ impl WidgetRuntime {
                     }
                     LiveEvent::Click(9) => {
                         opentaskbar_shell::taskbar::show_desktop();
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(20) => {
+                        let _ = crate::platform::privacy_dots::lock_workstation();
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(21) => {
+                        let _ = crate::platform::privacy_dots::sleep_system();
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(22) => {
+                        crate::platform::smart_tools::capture_region_screenshot_async(
+                            None,
+                            |res| {
+                                if let Ok(done) = res {
+                                    let _ = toast::show_info_toast(&done.summary);
+                                }
+                            },
+                        );
+                        LiveOutcome::Close
+                    }
+                    LiveEvent::Click(23) => {
+                        crate::platform::smart_tools::capture_and_ocr_async(|res| {
+                            if let Ok(text) = res
+                                && !text.trim().is_empty()
+                            {
+                                let _ = toast::show_info_toast(&format!(
+                                    "OCR copied ({} chars)",
+                                    text.chars().count()
+                                ));
+                            }
+                        });
                         LiveOutcome::Close
                     }
                     _ => LiveOutcome::Close,
@@ -5449,6 +6079,156 @@ impl WidgetRuntime {
                     }
                 }
             }
+            "clipboard" => {
+                let store = self
+                    .clipboard
+                    .get_or_insert_with(|| Box::new(clipboard::ClipboardStore::new()));
+                if settings.clipboard_history_enabled() || settings.is_widget_enabled("clipboard") {
+                    store.poll(settings);
+                }
+                let init = store.build_flyout(is_dark);
+                flyout::show_flyout_live_with_options(
+                    "clipboard",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    border,
+                    options,
+                    |ev| match ev {
+                        LiveEvent::Click(click_id) => {
+                            if let Some(store) = self.clipboard.as_mut()
+                                && let Some(action) = store.flyout_action_id_for_click(click_id)
+                            {
+                                let _ = store.handle_flyout_action(&action);
+                            }
+                            let spec = self.clipboard.as_ref().map_or_else(
+                                || clipboard::ClipboardStore::new().build_flyout(is_dark),
+                                |store| store.build_flyout(is_dark),
+                            );
+                            LiveOutcome::Update(spec)
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
+            }
+            "shelf" => {
+                let shelf = self
+                    .shelf
+                    .get_or_insert_with(|| Box::new(shelf::FileShelfState::load_default()));
+                let init = shelf.build_flyout(is_dark);
+                flyout::show_flyout_live_with_options(
+                    "shelf",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    border,
+                    options,
+                    |ev| match ev {
+                        LiveEvent::Click(click_id) => {
+                            if let Some(shelf) = self.shelf.as_mut()
+                                && let Some(action) = shelf.flyout_action_id_for_click(click_id)
+                                && shelf.handle_flyout_action(&action)
+                            {
+                                let _ = shelf.save_default();
+                            }
+                            let spec = self.shelf.as_ref().map_or_else(
+                                || shelf::FileShelfState::default().build_flyout(is_dark),
+                                |shelf| shelf.build_flyout(is_dark),
+                            );
+                            LiveOutcome::Update(spec)
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
+            }
+            "todo" => {
+                let now_unix = || {
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                };
+                let todo = self
+                    .todo
+                    .get_or_insert_with(|| Box::new(todo::TodoState::load_default()));
+                let init = todo.build_flyout(now_unix(), is_dark);
+                flyout::show_flyout_live_with_options(
+                    "todo",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    border,
+                    options,
+                    |ev| match ev {
+                        LiveEvent::Click(click_id) => {
+                            if let Some(todo) = self.todo.as_mut()
+                                && let Some(action) = todo.flyout_action_id_for_click(click_id)
+                                && todo.handle_flyout_action(&action, None)
+                            {
+                                let _ = todo.save_default();
+                            }
+                            let spec = self.todo.as_ref().map_or_else(
+                                || todo::TodoState::default().build_flyout(now_unix(), is_dark),
+                                |todo| todo.build_flyout(now_unix(), is_dark),
+                            );
+                            LiveOutcome::Update(spec)
+                        }
+                        LiveEvent::TextCommit {
+                            id: todo::FLYOUT_ADD_INPUT_ID,
+                            text,
+                        } => {
+                            if let Some(todo) = self.todo.as_mut()
+                                && todo.handle_flyout_action("add", Some(&text))
+                            {
+                                let _ = todo.save_default();
+                            }
+                            let spec = self.todo.as_ref().map_or_else(
+                                || todo::TodoState::default().build_flyout(now_unix(), is_dark),
+                                |todo| todo.build_flyout(now_unix(), is_dark),
+                            );
+                            LiveOutcome::Update(spec)
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
+            }
+            "agents" => {
+                let agents = self
+                    .agents
+                    .get_or_insert_with(|| Box::new(agents::AgentMonitorState::start()));
+                agents.poll_events();
+                let init = agents.build_flyout(is_dark);
+                flyout::show_flyout_live_with_options(
+                    "agents",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    border,
+                    options,
+                    |ev| match ev {
+                        LiveEvent::Click(click_id) => {
+                            if let Some(agents) = self.agents.as_mut() {
+                                agents.poll_events();
+                                let _ = agents.handle_flyout_click(click_id);
+                            }
+                            let spec = self.agents.as_ref().map_or_else(
+                                || agents::AgentMonitorState::disabled().build_flyout(is_dark),
+                                |agents| agents.build_flyout(is_dark),
+                            );
+                            LiveOutcome::Update(spec)
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
+            }
             _ => {}
         }
         false
@@ -5461,7 +6241,10 @@ mod tests {
 
     #[test]
     fn all_22_widgets_registered_with_valid_categories() {
-        assert_eq!(catalog().len(), 22);
+        assert_eq!(
+            catalog().len(),
+            opentaskbar_core::settings::CATALOG_WIDGET_COUNT
+        );
         let mut seen = std::collections::HashSet::new();
         for w in catalog() {
             assert!(seen.insert(w.id), "duplicate widget id {}", w.id);
@@ -5821,9 +6604,16 @@ mod tests {
         assert_eq!(
             catalog()
                 .iter()
-                .filter(|w| w.category == "AI Quotas")
+                .filter(|w| w.id.starts_with("aiusage_"))
                 .count(),
             7
+        );
+        assert_eq!(
+            catalog()
+                .iter()
+                .filter(|w| w.category == "AI Quotas")
+                .count(),
+            8
         );
         assert!(canonical_widget_id("btbattery") == "bluetoothbattery");
     }
@@ -6091,7 +6881,10 @@ mod tests {
         let mut runtime = WidgetRuntime::default();
         let settings = DockSettings::default();
         let builtins: Vec<&str> = catalog().iter().map(|w| w.id).collect();
-        assert_eq!(builtins.len(), 22);
+        assert_eq!(
+            builtins.len(),
+            opentaskbar_core::settings::CATALOG_WIDGET_COUNT
+        );
         for id in builtins {
             let spec = runtime.island_detail_spec(id, &settings);
             assert_eq!(spec.widget_id, id);
@@ -6119,5 +6912,28 @@ mod tests {
         let prev_cd = runtime.countdown_remaining_secs;
         assert!(runtime.handle_island_detail_action("countdown", "add_1m", &settings));
         assert_eq!(runtime.countdown_remaining_secs, prev_cd + 60);
+    }
+
+    #[test]
+    fn lazy_subsystems_stay_unallocated_until_enabled_and_drop_when_disabled() {
+        let mut runtime = WidgetRuntime::default();
+        let mut settings = DockSettings::default();
+        assert_eq!(runtime.lazy_subsystems_allocated(), 0);
+        runtime.tick(&settings);
+        assert_eq!(runtime.lazy_subsystems_allocated(), 0);
+
+        settings.set_clipboard_history_enabled(true);
+        runtime.tick(&settings);
+        assert_eq!(runtime.lazy_subsystems_allocated(), 1);
+        settings.set_clipboard_history_enabled(false);
+        runtime.tick(&settings);
+        assert_eq!(runtime.lazy_subsystems_allocated(), 0);
+
+        settings.set_media_lyrics_enabled(true);
+        runtime.tick(&settings);
+        assert_eq!(runtime.lazy_subsystems_allocated(), 1);
+        settings.set_media_lyrics_enabled(false);
+        runtime.tick(&settings);
+        assert_eq!(runtime.lazy_subsystems_allocated(), 0);
     }
 }

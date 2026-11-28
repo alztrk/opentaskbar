@@ -207,9 +207,12 @@ pub const WIDGET_ALIASES: &[(&str, &str)] = &[
     ("deepseek", "aiusage_deepseek"),
     ("openrouter", "aiusage_openrouter"),
     ("cursor", "aiusage_cursor"),
+    ("fileshelf", "shelf"),
+    ("tasks", "todo"),
+    ("aiagents", "agents"),
 ];
 
-/// Every built-in widget descriptor in one table: 22 catalog cards, two
+/// Every built-in widget descriptor in one table: 26 catalog cards, two
 /// dock-only helpers, one shell action and one virtual aggregate.
 pub const BUILTINS: &[WidgetDescriptor] = &[
     // Time & Weather
@@ -459,6 +462,50 @@ pub const BUILTINS: &[WidgetDescriptor] = &[
         HardwareNeed::None,
         ShrinkPriority::Normal,
     ),
+    catalog_wd(
+        "clipboard",
+        "Clipboard",
+        "WidgetClipboard",
+        "Productivity",
+        76.0,
+        true,
+        true,
+        HardwareNeed::None,
+        ShrinkPriority::Normal,
+    ),
+    catalog_wd(
+        "shelf",
+        "File Shelf",
+        "WidgetFileShelf",
+        "Productivity",
+        76.0,
+        true,
+        true,
+        HardwareNeed::None,
+        ShrinkPriority::Normal,
+    ),
+    catalog_wd(
+        "todo",
+        "Tasks & Calendar",
+        "WidgetTodo",
+        "Productivity",
+        96.0,
+        true,
+        true,
+        HardwareNeed::None,
+        ShrinkPriority::Normal,
+    ),
+    catalog_wd(
+        "agents",
+        "AI Agent Monitor",
+        "WidgetAiAgents",
+        "AI Quotas",
+        96.0,
+        true,
+        true,
+        HardwareNeed::None,
+        ShrinkPriority::Normal,
+    ),
     // Dock-only helpers (no Settings card, but a real dock chip).
     dock_wd(
         "stacks",
@@ -503,7 +550,7 @@ pub static WIDGET_CATEGORIES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     out
 });
 
-/// The 22 widgets shown in the Settings catalog.
+/// The 26 widgets shown in the Settings catalog.
 pub fn catalog_widgets() -> impl Iterator<Item = &'static WidgetDescriptor> {
     BUILTINS
         .iter()

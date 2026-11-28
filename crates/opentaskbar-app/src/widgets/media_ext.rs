@@ -7,12 +7,18 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender};
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::core::GUID;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
@@ -893,6 +899,149 @@ pub fn set_app_mute(session_id: &str, muted: bool) -> bool {
     diagnostics::set_app_mute(session_id, muted)
 }
 
+// ---------------------------------------------------------------------------
+// N6: Lightweight 4-bar audio peak waveform & SMTC media session switcher.
+// ---------------------------------------------------------------------------
+
+static WAVEFORM_EPOCH: OnceLock<Instant> = OnceLock::new();
+static SELECTED_SMTC_INDEX: AtomicUsize = AtomicUsize::new(0);
+static SELECTED_SMTC_APP_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn selected_app_id_lock() -> &'static Mutex<Option<String>> {
+    SELECTED_SMTC_APP_ID.get_or_init(|| Mutex::new(None))
+}
+
+/// Returns the SMTC `SourceAppUserModelId` last chosen by [`cycle_media_session`], if any.
+pub fn selected_media_source_id() -> Option<String> {
+    selected_app_id_lock()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// Pure envelope mapper turning a normalized `[0.0, 1.0]` peak level and elapsed phase seconds
+/// into 4 balanced bar heights (`0..=100`).
+pub(crate) fn waveform_bars_from_peak(peak: f32, phase_secs: f32) -> [u8; 4] {
+    if !peak.is_finite() || peak <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    const FREQS: [f32; 4] = [5.2, 6.7, 4.4, 7.3];
+    const PHASES: [f32; 4] = [0.0, 1.1, 2.3, 3.5];
+    const WEIGHTS: [f32; 4] = [0.78, 1.0, 0.88, 0.72];
+
+    let level = peak.clamp(0.0, 1.0).powf(0.65);
+    let mut bars = [0u8; 4];
+    for i in 0..4 {
+        let wave = 0.72 + 0.28 * (phase_secs * FREQS[i] + PHASES[i]).sin();
+        let height = (level * 100.0 * WEIGHTS[i] * wave).round();
+        bars[i] = height.clamp(0.0, 100.0) as u8;
+    }
+    bars
+}
+
+/// Samples the default render endpoint's master audio peak via `IAudioMeterInformation::GetPeakValue()`
+/// and maps it into 4 balanced bar heights (`0..=100`).
+///
+/// Returns `[0, 0, 0, 0]` immediately with zero COM calls when `!playing`.
+pub fn sample_audio_waveform_bars(playing: bool) -> [u8; 4] {
+    if !playing {
+        return [0, 0, 0, 0];
+    }
+    let peak = read_master_output_peak().unwrap_or(0.0);
+    let phase = WAVEFORM_EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs_f32();
+    waveform_bars_from_peak(peak, phase)
+}
+
+fn read_master_output_peak() -> Option<f32> {
+    let _com = ComInit::new();
+    // SAFETY: local COM interfaces are dropped before `_com` uninitializes the apartment.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .ok()?;
+        let meter: IAudioMeterInformation = device.Activate(CLSCTX_ALL, None).ok()?;
+        let peak = meter.GetPeakValue().ok()?;
+        Some(peak)
+    }
+}
+
+/// Cycles to the next active/paused Windows SMTC media session (e.g. Spotify, Chrome/YouTube,
+/// Apple Music) so clicking album art switches the active media source cleanly.
+pub fn cycle_media_session() -> bool {
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSessionManager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+    };
+
+    let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() else {
+        return false;
+    };
+    let Ok(manager) = op.join() else {
+        return false;
+    };
+    let Ok(sessions) = manager.GetSessions() else {
+        return false;
+    };
+    let Ok(count) = sessions.Size() else {
+        return false;
+    };
+
+    let mut candidates = Vec::new();
+    for i in 0..count {
+        let Ok(session) = sessions.GetAt(i) else {
+            continue;
+        };
+        let is_active_or_paused = session
+            .GetPlaybackInfo()
+            .ok()
+            .and_then(|info| info.PlaybackStatus().ok())
+            .is_some_and(|st| {
+                st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing
+                    || st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused
+            });
+        if !is_active_or_paused {
+            continue;
+        }
+        let source_id = session
+            .SourceAppUserModelId()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if !source_id.is_empty() {
+            candidates.push(source_id);
+        }
+    }
+
+    if candidates.is_empty() {
+        if let Ok(mut guard) = selected_app_id_lock().lock() {
+            *guard = None;
+        }
+        SELECTED_SMTC_INDEX.store(0, Ordering::Relaxed);
+        return false;
+    }
+
+    let current_id = selected_media_source_id();
+    let next_idx = if let Some(cur) = current_id
+        && let Some(pos) = candidates
+            .iter()
+            .position(|id| id.eq_ignore_ascii_case(&cur))
+    {
+        (pos + 1) % candidates.len()
+    } else {
+        (SELECTED_SMTC_INDEX.load(Ordering::Relaxed) + 1) % candidates.len()
+    };
+
+    SELECTED_SMTC_INDEX.store(next_idx, Ordering::Relaxed);
+    if let Ok(mut guard) = selected_app_id_lock().lock() {
+        *guard = Some(candidates[next_idx].clone());
+    }
+    candidates.len() > 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1285,5 +1434,16 @@ mod tests {
         assert_eq!(mapped.session_id, "4242:spotify");
         assert_eq!(mapped.volume, 73);
         assert!(!mapped.muted);
+    }
+
+    #[test]
+    fn waveform_bars_are_zero_when_not_playing_and_bounded_when_playing() {
+        assert_eq!(sample_audio_waveform_bars(false), [0, 0, 0, 0]);
+        assert_eq!(waveform_bars_from_peak(0.0, 1.5), [0, 0, 0, 0]);
+        assert_eq!(waveform_bars_from_peak(f32::NAN, 1.5), [0, 0, 0, 0]);
+        let bars = waveform_bars_from_peak(0.65, 2.0);
+        assert!(bars.iter().all(|&b| b > 0 && b <= 100));
+        let max_bars = waveform_bars_from_peak(1.0, 0.25);
+        assert!(max_bars.iter().all(|&b| b <= 100));
     }
 }

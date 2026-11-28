@@ -8,7 +8,7 @@ use opentaskbar_core::settings::DockSettings;
 
 use super::registry::canonical_widget_id;
 
-/// The complete 22-widget catalog, in category order.
+/// The complete 26-widget catalog, in category order.
 pub fn catalog() -> Vec<&'static super::registry::WidgetDescriptor> {
     super::registry::catalog_widgets().collect()
 }
@@ -93,7 +93,49 @@ pub fn setting_value(settings: &DockSettings, key: &str) -> Option<serde_json::V
             | "customwidgetconsent"
             | "customwidgeticons"
             | "audiooutputdevice"
-            | "widgetaliases" => return None,
+            | "widgetaliases"
+            | "dynamicislandidlemode"
+            | "dynamicislandcloseddisplay"
+            | "dynamicislandhoverexpand"
+            | "dynamicislandhoverdelayms"
+            | "dynamicislandautoclosesecs"
+            | "dynamicislandfollowmouse"
+            | "dynamicislandscale"
+            | "hudvolumeenabled"
+            | "hudbrightnessenabled"
+            | "hudcapslockenabled"
+            | "hudkeyboardlangenabled"
+            | "hudpowerenabled"
+            | "hudnetworkenabled"
+            | "hudbluetoothenabled"
+            | "huddurationms"
+            | "islandnotificationsenabled"
+            | "islandnotificationsdurationms"
+            | "islandnotificationsrespectfocus"
+            | "islandnotificationsmutedapps"
+            | "shelfenabled"
+            | "shelfmaxitems"
+            | "clipboardhistoryenabled"
+            | "clipboardmaxitems"
+            | "clipboardignoresensitive"
+            | "smartocrenabled"
+            | "quickscreenshotenabled"
+            | "mediawaveformenabled"
+            | "medialyricsenabled"
+            | "medialyricspillenabled"
+            | "agentmonitorenabled"
+            | "agentapprovalbanners"
+            | "todoremindersenabled"
+            | "todoicalurl"
+            | "todoicalpollminutes"
+            | "privacyindicatorsenabled"
+            | "quickpoweractionsenabled"
+            | "wirelessmultibrandenabled"
+            | "wirelessdisabledvendors"
+            | "islandtogglehotkey"
+            | "ocrhotkey"
+            | "screenshothotkey"
+            | "clipboardhotkey" => return None,
             // Hot typed fields accessed by widget chip/flyout/layout renderers.
             "weatherunit" => {
                 let name = match settings.weather_unit {
