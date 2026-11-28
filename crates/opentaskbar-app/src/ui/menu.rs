@@ -4,14 +4,15 @@
 //! with hardware-accelerated Direct2D rounded hover pills, DirectWrite grayscale anti-aliasing,
 //! `Segoe UI Variable Text`, and `Segoe Fluent Icons`.
 
-use crate::platform::win32_helpers::set_window_long_ptr;
+use crate::design::d2d::d2d_color_channels as rgba_f;
+use crate::platform::win32_helpers::{pt_in_rect, set_dwm_u32, set_window_long_ptr};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use windows::Win32::Foundation::HWND as WinHwnd;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -32,7 +33,7 @@ use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE,
 };
 use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -444,10 +445,6 @@ struct MenuSession {
 
 use opentaskbar_core::wide;
 
-fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
-    x >= r.left && x < r.right && y >= r.top && y < r.bottom
-}
-
 /// Translates a pane-local row rect into screen coordinates using the pane's
 /// own stored rect — no `GetWindowRect`/`WindowFromPoint` round trip needed.
 fn screen_row_rect(pane_rect: &RECT, row_rect: &RECT) -> RECT {
@@ -581,15 +578,6 @@ fn menu_close_action(msg: u32) -> MenuCloseAction {
         MenuCloseAction::EndSession
     } else {
         MenuCloseAction::None
-    }
-}
-
-fn rgba_f(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: f32::from(r) / 255.0,
-        g: f32::from(g) / 255.0,
-        b: f32::from(b) / 255.0,
-        a,
     }
 }
 
@@ -1064,22 +1052,8 @@ fn create_pane_window(
         // Apply Windows 11 native rounded corners (with DWM border disabled so only
         // SpatialGlassHost's crisp rim or our rounded Direct2D hairline renders)
         // to get clean OS drop shadow elevation.
-        unsafe {
-            let corner = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corner as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let border_none = DWMWA_COLOR_NONE;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                (&border_none as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-        }
+        set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+        set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
         let mut host = SpatialGlassHost::attach(hwnd as usize, false, border.glass_config);
         if let Some(ref mut g) = host {
             g.sync_rect(
@@ -1109,36 +1083,10 @@ fn create_pane_window(
             if hwnd.is_null() {
                 return None;
             }
-            let acrylic = unsafe {
-                let dark_val: u32 = u32::from(is_dark);
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-                    (&dark_val as *const u32).cast(),
-                    size_of::<u32>() as u32,
-                );
-                let corner = DWMWCP_ROUND;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                    (&corner as *const u32).cast(),
-                    size_of::<u32>() as u32,
-                );
-                let border_none = DWMWA_COLOR_NONE;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_BORDER_COLOR as u32,
-                    (&border_none as *const u32).cast(),
-                    size_of::<u32>() as u32,
-                );
-                let backdrop = DWMSBT_TRANSIENTWINDOW;
-                DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                    (&backdrop as *const u32).cast(),
-                    size_of::<u32>() as u32,
-                ) == 0
-            };
+            set_dwm_u32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(is_dark));
+            set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+            set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+            let acrylic = set_dwm_u32(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW);
             (
                 acrylic,
                 create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi, fmts),
@@ -1148,29 +1096,9 @@ fn create_pane_window(
             )
         }
     } else {
-        unsafe {
-            let dark_val: u32 = u32::from(is_dark);
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-                (&dark_val as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let corner = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corner as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let border_none = DWMWA_COLOR_NONE;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                (&border_none as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-        }
+        set_dwm_u32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(is_dark));
+        set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+        set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
         (
             false,
             create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi, formats),

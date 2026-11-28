@@ -9,8 +9,10 @@
 //! modal message loop. `super::preview` supplies the shared DWM identity type and
 //! the Aero-Peek teardown used by the rest of the dock.
 
-use crate::platform::win32_helpers::set_window_long_ptr;
-use std::cell::RefCell;
+use crate::design::d2d::{TextAlign, d2d_color as d2d_rgba, d2d_rect, paint_dib_d2d};
+use crate::platform::win32_helpers::{pt_in_rect, set_dwm_u32, set_window_long_ptr};
+use crate::ui::register_popup_class;
+use opentaskbar_core::wide;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -18,39 +20,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use windows::Win32::Foundation::RECT as WinRect;
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory1,
-};
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
-    DWriteCreateFactory, IDWriteFactory,
-};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::HDC as WinHdc;
-use windows::core::HSTRING;
-use windows_numerics::Vector2;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
     DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DwmQueryThumbnailSourceSize, DwmRegisterThumbnail,
-    DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DwmUnregisterThumbnail,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetMonitorInfoW, HMONITOR, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, SRCCOPY,
-    SelectObject,
+    GetMonitorInfoW, HMONITOR, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW,
+    MonitorFromWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -59,12 +37,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HWND_TOPMOST,
-    IDC_ARROW, IDC_HAND, IsWindow, LoadCursorW, MSG, PostMessageW, RegisterClassExW, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow,
-    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW,
+    IDC_HAND, IsWindow, LoadCursorW, MSG, PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
+    SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE,
+    WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Modal picker close signal. Broadcast by the settings process and posted to
@@ -83,7 +60,7 @@ unsafe extern "system" {
 use opentaskbar_shell::tracker::{self, RunningWindow};
 
 use super::preview::{self, PreviewItem};
-use crate::design::{self, Rgb, fonts, gdi_rgb};
+use crate::design::{self, gdi_rgb};
 use crate::platform::win32::{self, MonitorInfo};
 use crate::window_picker::{
     PickerAction, PickerGeometry, PickerKey, center_in_area, geometry_for_area, label, page_count,
@@ -148,16 +125,6 @@ struct PickerState {
     activating: bool,
 }
 
-struct PickerD2d {
-    _factory: ID2D1Factory1,
-    dwrite: IDWriteFactory,
-    target: ID2D1DCRenderTarget,
-}
-
-thread_local! {
-    static PICKER_D2D: RefCell<Option<PickerD2d>> = const { RefCell::new(None) };
-}
-
 /// Global `previews_enabled` gate. The dock updates it at startup and on every
 /// settings reload; `show` refuses to open when previews are disabled, whatever
 /// call site requested it.
@@ -200,45 +167,6 @@ pub fn request_close_all() {
             let _ = PostMessageW(hwnd as HWND, PICKER_CLOSE_MSG, 0, 0);
         }
     }
-}
-
-impl PickerD2d {
-    fn create() -> Option<Self> {
-        unsafe {
-            let factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
-            let props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let target = factory.CreateDCRenderTarget(&props).ok()?;
-            target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            Some(Self {
-                _factory: factory,
-                dwrite,
-                target,
-            })
-        }
-    }
-}
-
-use opentaskbar_core::wide;
-
-fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
-    design::d2d::d2d_color(c, a)
-}
-
-fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
-    x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
 fn state_ptr(hwnd: HWND) -> *mut PickerState {
@@ -323,55 +251,6 @@ fn release_thumbs(state: &mut PickerState) {
     }
 }
 
-/// Registers one live DWM thumbnail in `preview`, letterboxed to preserve aspect
-/// ratio. A failed registration leaves `thumb == 0` so the painter shows the
-/// icon/"Preview unavailable" fallback (`Visibility.Visible` on the fallback).
-fn register_thumbnail(state: &PickerState, card: &mut Card) {
-    let mut thumb: isize = 0;
-    let ok = unsafe { DwmRegisterThumbnail(state.hwnd, card.item.hwnd as HWND, &mut thumb) };
-    if ok != 0 || thumb == 0 {
-        card.thumb = 0;
-        return;
-    }
-    let mut src = SIZE { cx: 0, cy: 0 };
-    let _ = unsafe { DwmQueryThumbnailSourceSize(thumb, &mut src) };
-    let avail_w = (card.preview.right - card.preview.left).max(16);
-    let avail_h = (card.preview.bottom - card.preview.top).max(16);
-    let (dest_w, dest_h) = if src.cx > 0 && src.cy > 0 {
-        let sx = avail_w as f32 / src.cx as f32;
-        let sy = avail_h as f32 / src.cy as f32;
-        let scale = sx.min(sy).min(1.0);
-        (
-            ((src.cx as f32 * scale).round() as i32).max(16),
-            ((src.cy as f32 * scale).round() as i32).max(16),
-        )
-    } else {
-        (avail_w, avail_h)
-    };
-    let dx = card.preview.left + (avail_w - dest_w) / 2;
-    let dy = card.preview.top + (avail_h - dest_h) / 2;
-    let props = DWM_THUMBNAIL_PROPERTIES {
-        dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
-        rcDestination: RECT {
-            left: dx,
-            top: dy,
-            right: dx + dest_w,
-            bottom: dy + dest_h,
-        },
-        rcSource: RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
-        opacity: 255,
-        fVisible: 1,
-        fSourceClientAreaOnly: 0,
-    };
-    let _ = unsafe { DwmUpdateThumbnailProperties(thumb, &props) };
-    card.thumb = thumb;
-}
-
 /// Rebuilds the current page: releases every previous DWM registration, lays out
 /// the row-major grid in physical pixels and registers fresh thumbnails. Called
 /// on page changes and DPI changes (matching `BuildPage` + `QueueThumbnails`).
@@ -412,7 +291,7 @@ fn build_page(state: &mut PickerState) {
             right: rect.right - inner,
             bottom: rect.bottom - caption,
         };
-        let mut card = Card {
+        let card = Card {
             item: PreviewItem {
                 hwnd: window.hwnd,
                 pid: window.pid,
@@ -420,9 +299,8 @@ fn build_page(state: &mut PickerState) {
             },
             rect,
             preview,
-            thumb: 0,
+            thumb: preview::register_dwm_thumbnail(state.hwnd, window.hwnd, preview),
         };
-        register_thumbnail(state, &mut card);
         state.cards.push(card);
     }
 
@@ -455,195 +333,44 @@ fn page_label(page: usize, pages: usize) -> String {
 }
 
 fn paint(state: &PickerState) {
-    let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
-    let screen_dc = unsafe { BeginPaint(state.hwnd, &mut ps) };
-    if screen_dc.is_null() {
-        return;
-    }
     let dip = state.dpi;
     let pal = design::active_palette(state.is_dark);
+    let text_primary = d2d_rgba(pal.text_primary, 1.0);
 
-    let mut client = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    unsafe { GetClientRect(state.hwnd, &mut client) };
-    let cw = (client.right - client.left).max(1);
-    let ch = (client.bottom - client.top).max(1);
-
-    let mem_dc = unsafe { CreateCompatibleDC(screen_dc) };
-    if mem_dc.is_null() {
-        unsafe { EndPaint(state.hwnd, &ps) };
-        return;
-    }
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: cw,
-            biHeight: -ch,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            ..unsafe { std::mem::zeroed() }
-        },
-        ..unsafe { std::mem::zeroed() }
-    };
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mem_bmp = unsafe {
-        CreateDIBSection(
-            mem_dc,
-            &bmi,
-            DIB_RGB_COLORS,
-            &mut bits,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if mem_bmp.is_null() {
-        unsafe {
-            DeleteDC(mem_dc);
-            EndPaint(state.hwnd, &ps);
-        }
-        return;
-    }
-    let old_bmp = unsafe { SelectObject(mem_dc, mem_bmp as _) };
-
-    PICKER_D2D.with(|slot| {
-        let mut guard = slot.borrow_mut();
-        if guard.is_none() {
-            *guard = PickerD2d::create();
-        }
-        let Some(d2d) = guard.as_ref() else {
-            return;
-        };
-        let win_rc = WinRect {
-            left: 0,
-            top: 0,
-            right: cw,
-            bottom: ch,
-        };
-        if unsafe { d2d.target.BindDC(WinHdc(mem_dc as _), &win_rc) }.is_err() {
-            *guard = None;
-            return;
-        }
-        unsafe {
-            d2d.target.BeginDraw();
-            d2d.target.Clear(Some(&d2d_rgba(pal.surface, 1.0)));
-        }
+    paint_dib_d2d(state.hwnd, None, |d2d, cw, _ch| {
+        d2d.clear(d2d_rgba(pal.surface, 1.0));
 
         // Specular top highlight, matching the dock flyouts.
-        if let Ok(brush) = unsafe {
-            d2d.target.CreateSolidColorBrush(
-                &d2d_rgba(pal.specular_top, if state.is_dark { 0.45 } else { 0.8 }),
-                None,
-            )
-        } {
-            let inset = (10.0 * dip).max(1.0);
-            unsafe {
-                d2d.target.DrawLine(
-                    Vector2 { X: inset, Y: 0.5 },
-                    Vector2 {
-                        X: (cw as f32 - inset).max(inset),
-                        Y: 0.5,
-                    },
-                    &brush,
-                    1.0,
-                    None,
-                );
-            }
-        }
-
-        let title_fmt = unsafe {
-            d2d.dwrite
-                .CreateTextFormat(
-                    &HSTRING::from(fonts::ui_family_list().as_str()),
-                    None,
-                    DWRITE_FONT_WEIGHT_MEDIUM,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    (fonts::scaled_size(15.0) * dip).max(9.0),
-                    &HSTRING::from(fonts::ui_locale().as_str()),
-                )
-                .ok()
-                .inspect(|fmt| {
-                    let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                    let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                })
-        };
-        let caption_fmt = unsafe {
-            d2d.dwrite
-                .CreateTextFormat(
-                    &HSTRING::from(fonts::ui_family_list().as_str()),
-                    None,
-                    DWRITE_FONT_WEIGHT_NORMAL,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    (fonts::scaled_size(11.0) * dip).max(9.0),
-                    &HSTRING::from(fonts::ui_locale().as_str()),
-                )
-                .ok()
-                .inspect(|fmt| {
-                    let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                    let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    let trimming = DWRITE_TRIMMING {
-                        granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                        delimiter: 0,
-                        delimiterCount: 0,
-                    };
-                    let sign = d2d.dwrite.CreateEllipsisTrimmingSign(fmt).ok();
-                    let _ = fmt.SetTrimming(&trimming, sign.as_ref());
-                })
-        };
-        let center_fmt = unsafe {
-            d2d.dwrite
-                .CreateTextFormat(
-                    &HSTRING::from(fonts::ui_family_list().as_str()),
-                    None,
-                    DWRITE_FONT_WEIGHT_NORMAL,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    (fonts::scaled_size(11.0) * dip).max(9.0),
-                    &HSTRING::from(fonts::ui_locale().as_str()),
-                )
-                .ok()
-                .inspect(|fmt| {
-                    let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                    let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                })
-        };
+        let inset = (10.0 * dip).max(1.0);
+        d2d.draw_line(
+            inset,
+            0.5,
+            (cw as f32 - inset).max(inset),
+            0.5,
+            d2d_rgba(pal.specular_top, if state.is_dark { 0.45 } else { 0.8 }),
+            1.0,
+        );
 
         // Header title.
-        let header = (HEADER_DIPS * dip).round() as i32;
+        let header = (HEADER_DIPS * dip).round();
         let title = label("WindowPickerTitle", "Windows");
-        if let Some(ref fmt) = title_fmt
-            && let Ok(fg) = unsafe {
-                d2d.target
-                    .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 1.0), None)
-            }
-        {
-            let rc = D2D_RECT_F {
-                left: (crate::window_picker::PICKER_FRAME_PADDING_DIPS * dip).round(),
-                top: 0.0,
-                right: cw as f32 - 12.0 * dip,
-                bottom: header as f32,
-            };
-            let text: Vec<u16> = title.encode_utf16().collect();
-            unsafe {
-                d2d.target.DrawText(
-                    &text,
-                    fmt,
-                    &rc,
-                    &fg,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
-        }
+        d2d.draw_text(
+            &title,
+            d2d_rect(
+                (crate::window_picker::PICKER_FRAME_PADDING_DIPS * dip).round(),
+                0.0,
+                cw as f32 - 12.0 * dip,
+                header,
+            ),
+            15.0 * dip,
+            DWRITE_FONT_WEIGHT_MEDIUM,
+            TextAlign::Left,
+            text_primary,
+            false,
+        );
 
         let corner = CORNER_DIPS * dip;
+        let caption_px = (CAPTION_DIPS * dip).round() as i32;
         for (idx, card) in state.cards.iter().enumerate() {
             let is_selected = idx == state.selected;
             let is_hovered = state.hovered == Some(idx);
@@ -660,196 +387,127 @@ fn paint(state: &PickerState) {
             } else {
                 d2d_rgba(pal.border_rgb, if state.is_dark { 0.65 } else { 0.9 })
             };
-            let rr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: card.rect.left as f32 + 0.5,
-                    top: card.rect.top as f32 + 0.5,
-                    right: card.rect.right as f32 - 0.5,
-                    bottom: card.rect.bottom as f32 - 0.5,
-                },
-                radiusX: corner,
-                radiusY: corner,
-            };
-            if let Ok(bg) = unsafe { d2d.target.CreateSolidColorBrush(&fill, None) } {
-                unsafe { d2d.target.FillRoundedRectangle(&rr, &bg) };
-            }
-            if let Ok(border) = unsafe { d2d.target.CreateSolidColorBrush(&stroke, None) } {
-                unsafe { d2d.target.DrawRoundedRectangle(&rr, &border, 1.0, None) };
-            }
+            d2d.fill_rrect_bordered(
+                card.rect.left as f32,
+                card.rect.top as f32,
+                card.rect.right as f32,
+                card.rect.bottom as f32,
+                corner,
+                fill,
+                stroke,
+                1.0,
+            );
 
             // Preview well (the DWM thumbnail composites directly above it).
-            let well = D2D_RECT_F {
-                left: card.preview.left as f32,
-                top: card.preview.top as f32,
-                right: card.preview.right as f32,
-                bottom: card.preview.bottom as f32,
-            };
-            if let Ok(bg) = unsafe {
-                d2d.target
-                    .CreateSolidColorBrush(&d2d_rgba(pal.surface, 1.0), None)
-            } {
-                unsafe { d2d.target.FillRectangle(&well, &bg) };
-            }
+            d2d.fill_rect(
+                card.preview.left as f32,
+                card.preview.top as f32,
+                card.preview.right as f32,
+                card.preview.bottom as f32,
+                d2d_rgba(pal.surface, 1.0),
+            );
             if card.thumb == 0 {
                 // reference fallback: app icon + "Preview unavailable".
                 let icon_size = 36.0 * dip;
                 let cx = (card.preview.left + card.preview.right) as f32 / 2.0;
                 let cy = card.preview.top as f32 + icon_size * 0.85;
-                let icon = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: cx - icon_size / 2.0,
-                        top: cy - icon_size / 2.0,
-                        right: cx + icon_size / 2.0,
-                        bottom: cy + icon_size / 2.0,
-                    },
-                    radiusX: 6.0 * dip,
-                    radiusY: 6.0 * dip,
-                };
-                if let Ok(bg) = unsafe {
-                    d2d.target
-                        .CreateSolidColorBrush(&d2d_rgba(pal.elevated, 1.0), None)
-                } {
-                    unsafe { d2d.target.FillRoundedRectangle(&icon, &bg) };
-                }
-                if let Ok(border) = unsafe {
-                    d2d.target
-                        .CreateSolidColorBrush(&d2d_rgba(pal.border_rgb, 0.9), None)
-                } {
-                    unsafe { d2d.target.DrawRoundedRectangle(&icon, &border, 1.0, None) };
-                }
-                let bar = D2D_RECT_F {
-                    left: icon.rect.left + 2.0 * dip,
-                    top: icon.rect.top + 2.0 * dip,
-                    right: icon.rect.right - 2.0 * dip,
-                    bottom: icon.rect.top + 8.0 * dip,
-                };
-                if let Ok(bg) = unsafe {
-                    d2d.target
-                        .CreateSolidColorBrush(&d2d_rgba(pal.selected_stroke, 0.8), None)
-                } {
-                    unsafe { d2d.target.FillRectangle(&bar, &bg) };
-                }
-                if let Some(ref fmt) = center_fmt
-                    && let Ok(fg) = unsafe {
-                        d2d.target
-                            .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 0.75), None)
-                    }
-                {
-                    let text: Vec<u16> = label("PreviewUnavailable", "Preview unavailable")
-                        .encode_utf16()
-                        .collect();
-                    let rc = D2D_RECT_F {
-                        left: card.preview.left as f32,
-                        top: cy + icon_size * 0.6,
-                        right: card.preview.right as f32,
-                        bottom: card.preview.bottom as f32,
-                    };
-                    unsafe {
-                        d2d.target.DrawText(
-                            &text,
-                            fmt,
-                            &rc,
-                            &fg,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-                    }
-                }
+                let (il, it, ir, ib) = (
+                    cx - icon_size / 2.0,
+                    cy - icon_size / 2.0,
+                    cx + icon_size / 2.0,
+                    cy + icon_size / 2.0,
+                );
+                d2d.fill_rrect_bordered(
+                    il,
+                    it,
+                    ir,
+                    ib,
+                    6.0 * dip,
+                    d2d_rgba(pal.elevated, 1.0),
+                    d2d_rgba(pal.border_rgb, 0.9),
+                    1.0,
+                );
+                d2d.fill_rect(
+                    il + 2.0 * dip,
+                    it + 2.0 * dip,
+                    ir - 2.0 * dip,
+                    it + 8.0 * dip,
+                    d2d_rgba(pal.selected_stroke, 0.8),
+                );
+                d2d.draw_text(
+                    &label("PreviewUnavailable", "Preview unavailable"),
+                    d2d_rect(
+                        card.preview.left as f32,
+                        cy + icon_size * 0.6,
+                        card.preview.right as f32,
+                        card.preview.bottom as f32,
+                    ),
+                    11.0 * dip,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    TextAlign::Center,
+                    d2d_rgba(pal.text_primary, 0.75),
+                    false,
+                );
             }
 
             // Caption below the preview (`Dock.Bottom` text block).
-            if let Some(ref fmt) = caption_fmt
-                && let Ok(fg) = unsafe {
-                    d2d.target
-                        .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 1.0), None)
-                }
-            {
-                let name = if card.item.title.trim().is_empty() {
-                    label("WindowPickerTitle", "Windows")
-                } else {
-                    card.item.title.clone()
-                };
-                let text: Vec<u16> = name.encode_utf16().collect();
-                let caption_px = (CAPTION_DIPS * dip).round() as i32;
-                let rc = D2D_RECT_F {
-                    left: card.rect.left as f32 + INNER_PAD_DIPS * dip,
-                    top: (card.rect.bottom - caption_px) as f32,
-                    right: card.rect.right as f32 - INNER_PAD_DIPS * dip,
-                    bottom: card.rect.bottom as f32,
-                };
-                unsafe {
-                    d2d.target.DrawText(
-                        &text,
-                        fmt,
-                        &rc,
-                        &fg,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
-            }
+            let name = if card.item.title.trim().is_empty() {
+                title.as_str()
+            } else {
+                card.item.title.as_str()
+            };
+            d2d.draw_text(
+                name,
+                d2d_rect(
+                    card.rect.left as f32 + INNER_PAD_DIPS * dip,
+                    (card.rect.bottom - caption_px) as f32,
+                    card.rect.right as f32 - INNER_PAD_DIPS * dip,
+                    card.rect.bottom as f32,
+                ),
+                11.0 * dip,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                TextAlign::Left,
+                text_primary,
+                false,
+            );
         }
 
-        if state.paging
-            && let Some(ref fmt) = center_fmt
-            && let Ok(fg) = unsafe {
-                d2d.target
-                    .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 1.0), None)
-            }
-        {
+        if state.paging {
             for (rect, text) in [
                 (state.prev_rect, label("WindowPickerPrevious", "<")),
                 (state.next_rect, label("WindowPickerNext", ">")),
             ] {
-                let rc = D2D_RECT_F {
-                    left: rect.left as f32,
-                    top: rect.top as f32,
-                    right: rect.right as f32,
-                    bottom: rect.bottom as f32,
-                };
-                let wide_text: Vec<u16> = text.encode_utf16().collect();
-                unsafe {
-                    d2d.target.DrawText(
-                        &wide_text,
-                        fmt,
-                        &rc,
-                        &fg,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
-            }
-            let rc = D2D_RECT_F {
-                left: state.prev_rect.right as f32,
-                top: state.prev_rect.top as f32,
-                right: state.next_rect.left as f32,
-                bottom: state.prev_rect.bottom as f32,
-            };
-            let text: Vec<u16> = page_label(state.page, state.pages).encode_utf16().collect();
-            unsafe {
-                d2d.target.DrawText(
+                d2d.draw_text(
                     &text,
-                    fmt,
-                    &rc,
-                    &fg,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    DWRITE_MEASURING_MODE_NATURAL,
+                    d2d_rect(
+                        rect.left as f32,
+                        rect.top as f32,
+                        rect.right as f32,
+                        rect.bottom as f32,
+                    ),
+                    11.0 * dip,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    TextAlign::Center,
+                    text_primary,
+                    false,
                 );
             }
-        }
-
-        if unsafe { d2d.target.EndDraw(None, None) }.is_err() {
-            *guard = None;
+            d2d.draw_text(
+                &page_label(state.page, state.pages),
+                d2d_rect(
+                    state.prev_rect.right as f32,
+                    state.prev_rect.top as f32,
+                    state.next_rect.left as f32,
+                    state.prev_rect.bottom as f32,
+                ),
+                11.0 * dip,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                TextAlign::Center,
+                text_primary,
+                false,
+            );
         }
     });
-
-    unsafe {
-        let _ = BitBlt(screen_dc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY);
-        SelectObject(mem_dc, old_bmp);
-        DeleteObject(mem_bmp as _);
-        DeleteDC(mem_dc);
-        EndPaint(state.hwnd, &ps);
-    }
 }
 
 fn close(state: &mut PickerState) {
@@ -1181,19 +839,9 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         height,
     );
 
-    let class_name = wide("OpenTaskBarWindowPicker");
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(picker_wnd_proc),
-        hInstance: hinstance,
-        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
-        lpszClassName: class_name.as_ptr(),
-        ..unsafe { std::mem::zeroed() }
-    };
-    unsafe {
-        RegisterClassExW(&wc);
-    }
+    register_popup_class("OpenTaskBarWindowPicker", picker_wnd_proc, hinstance, 0);
+    let class_name = wide("OpenTaskBarWindowPicker");
     let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -1221,36 +869,14 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
     }
 
     let is_dark = win32::read_system_is_dark();
-    unsafe {
-        let corner = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            (&corner as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let dark: u32 = u32::from(is_dark);
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            (&dark as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let border = gdi_rgb(design::active_palette(is_dark).border_rgb);
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR as u32,
-            (&border as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let exclude_peek: u32 = 1;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_EXCLUDED_FROM_PEEK as u32,
-            (&exclude_peek as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-    }
+    set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+    set_dwm_u32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(is_dark));
+    set_dwm_u32(
+        hwnd,
+        DWMWA_BORDER_COLOR,
+        gdi_rgb(design::active_palette(is_dark).border_rgb),
+    );
+    set_dwm_u32(hwnd, DWMWA_EXCLUDED_FROM_PEEK, 1);
 
     // `monitor` is an index; reference orders by the HMONITOR of the invoking display,
     // so compare window monitors against the resolved monitor's handle.

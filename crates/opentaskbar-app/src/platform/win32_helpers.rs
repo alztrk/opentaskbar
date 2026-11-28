@@ -42,6 +42,51 @@ pub fn os_build_number() -> u32 {
 /// Null-terminated UTF-16 buffer for Win32/WinHTTP APIs.
 pub use opentaskbar_core::wide;
 
+/// Half-open hit test (`[left, right) x [top, bottom)`) for Win32 `RECT`s.
+#[inline]
+pub fn pt_in_rect(r: &windows_sys::Win32::Foundation::RECT, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// Sets a `u32` DWM window attribute on `hwnd`, returning whether `DwmSetWindowAttribute` succeeded.
+pub fn set_dwm_u32(hwnd: windows_sys::Win32::Foundation::HWND, attr: i32, value: u32) -> bool {
+    unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+            hwnd,
+            attr as u32,
+            (&value as *const u32).cast(),
+            size_of::<u32>() as u32,
+        ) == 0
+    }
+}
+
+/// Reads an `HKCU` `REG_DWORD` registry value, returning `None` when missing or not 4 bytes.
+pub fn read_hkcu_dword(subkey: &str, value_name: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    let path = wide(subkey);
+    let name = wide(value_name);
+    let mut key = std::ptr::null_mut();
+    unsafe {
+        if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return None;
+        }
+        let mut value: u32 = 0;
+        let mut len = size_of::<u32>() as u32;
+        let status = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut len,
+        );
+        RegCloseKey(key);
+        (status == 0 && len == size_of::<u32>() as u32).then_some(value)
+    }
+}
+
 /// 32-bit-safe `SetWindowLongPtrW`.
 ///
 /// `windows-sys` aliases `SetWindowLongPtrW` to `SetWindowLongW` on x86, whose

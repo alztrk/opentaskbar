@@ -9,7 +9,8 @@
 //!   `StatusHeader`, `Hero`, `ToggleGrid`, `ProgressBar`, `StatRow`, `ActionRow`, `AppRow`, `ButtonBar`
 //! - Mouse-wheel vertical scrolling + thin scrollbar thumb + toggle-close suppression.
 
-use crate::platform::win32_helpers::set_window_long_ptr;
+use crate::design::d2d::{DcD2d, TextAlign, d2d_color as d2d_rgba, d2d_rect, paint_dib_d2d};
+use crate::platform::win32_helpers::{pt_in_rect, set_dwm_u32, set_window_long_ptr};
 use opentaskbar_core::i18n as loc;
 
 use std::cell::RefCell;
@@ -18,45 +19,23 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::design::fonts;
-use windows::Win32::Foundation::RECT as WinRect;
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget,
-    ID2D1Factory1, ID2D1SolidColorBrush,
-};
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
-    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTypography,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::HDC as WinHdc;
-use windows::core::HSTRING;
-use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
-};
-use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SRCCOPY, SelectObject,
+    DWMWA_WINDOW_CORNER_PREFERENCE,
 };
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::{
     DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DrawTextW, HDC,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -732,6 +711,55 @@ struct HitTarget {
     is_text: bool,
 }
 
+impl HitTarget {
+    const fn click(id: u32, rect: RECT) -> Self {
+        Self::with_menu(id, id, rect)
+    }
+
+    const fn with_menu(id: u32, menu_id: u32, rect: RECT) -> Self {
+        Self {
+            id,
+            rect,
+            menu_id,
+            is_slider: false,
+            is_seek: false,
+            is_text: false,
+        }
+    }
+
+    const fn slider(id: u32, rect: RECT, is_seek: bool) -> Self {
+        Self {
+            id,
+            rect,
+            menu_id: id,
+            is_slider: true,
+            is_seek,
+            is_text: false,
+        }
+    }
+
+    const fn text(id: u32, rect: RECT) -> Self {
+        Self {
+            id,
+            rect,
+            menu_id: id,
+            is_slider: false,
+            is_seek: false,
+            is_text: true,
+        }
+    }
+}
+
+#[inline]
+const fn rect_i32(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+    RECT {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
 struct FlyoutState<'a> {
     hwnd: HWND,
     tag: String,
@@ -784,454 +812,6 @@ struct FlyoutState<'a> {
 
 use opentaskbar_core::wide;
 
-/// Direct2D + DirectWrite anti-aliased renderer cached per UI thread.
-///
-/// Renders into a 32-bit DIB section via `ID2D1DCRenderTarget::BindDC` so every
-/// rounded card, circular thumb, slider track, sparkline, Fluent icon, and text run
-/// gets crisp subpixel anti-aliasing and tabular numerals without rewriting the Win32
-/// popup HWND lifecycle.
-struct FlyoutD2d {
-    _factory: ID2D1Factory1,
-    dwrite: IDWriteFactory,
-    target: ID2D1DCRenderTarget,
-    tabular: Option<IDWriteTypography>,
-    formats: HashMap<(bool, u16, u16, u8, String), IDWriteTextFormat>,
-    /// Decoded cover bitmaps keyed by path. A live-tick repaint must not decode
-    /// the same JPEG from disk (and upload a fresh D2D bitmap) every second.
-    covers: HashMap<String, Option<ID2D1Bitmap>>,
-}
-
-thread_local! {
-    static FLYOUT_D2D: RefCell<Option<FlyoutD2d>> = const { RefCell::new(None) };
-}
-
-fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: f32::from(c.0) / 255.0,
-        g: f32::from(c.1) / 255.0,
-        b: f32::from(c.2) / 255.0,
-        a: a.clamp(0.0, 1.0),
-    }
-}
-
-fn d2d_rect(l: f32, t: f32, r: f32, b: f32) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: l,
-        top: t,
-        right: r,
-        bottom: b,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum TextAlign {
-    Left,
-    Center,
-    Right,
-}
-
-impl TextAlign {
-    const fn code(self) -> u8 {
-        match self {
-            Self::Left => 0,
-            Self::Center => 1,
-            Self::Right => 2,
-        }
-    }
-}
-
-impl FlyoutD2d {
-    fn create() -> Option<Self> {
-        unsafe {
-            let factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
-            let props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let target = factory.CreateDCRenderTarget(&props).ok()?;
-            target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            let tabular = dwrite.CreateTypography().ok().inspect(|typo| {
-                let _ = typo.AddFontFeature(DWRITE_FONT_FEATURE {
-                    nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
-                    parameter: 1,
-                });
-            });
-            Some(Self {
-                _factory: factory,
-                dwrite,
-                target,
-                tabular,
-                formats: HashMap::new(),
-                covers: HashMap::new(),
-            })
-        }
-    }
-
-    fn brush(&self, color: D2D1_COLOR_F) -> Option<ID2D1SolidColorBrush> {
-        unsafe { self.target.CreateSolidColorBrush(&color, None).ok() }
-    }
-
-    fn text_format(
-        &mut self,
-        fluent: bool,
-        size_px: f32,
-        weight: DWRITE_FONT_WEIGHT,
-        align: TextAlign,
-    ) -> Option<IDWriteTextFormat> {
-        let eff_size = if fluent {
-            size_px.max(9.0)
-        } else {
-            fonts::scaled_size(size_px).max(9.0)
-        };
-        let family = if fluent {
-            "Segoe Fluent Icons".to_owned()
-        } else {
-            fonts::ui_family_list()
-        };
-        let key = (
-            fluent,
-            (eff_size * 2.0).round() as u16,
-            weight.0 as u16,
-            align.code(),
-            family.clone(),
-        );
-        if let Some(fmt) = self.formats.get(&key) {
-            return Some(fmt.clone());
-        }
-        let locale = if fluent {
-            "en-US".to_owned()
-        } else {
-            fonts::ui_locale()
-        };
-        unsafe {
-            let fmt = self
-                .dwrite
-                .CreateTextFormat(
-                    &HSTRING::from(family.as_str()),
-                    None,
-                    weight,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    eff_size,
-                    &HSTRING::from(locale.as_str()),
-                )
-                .ok()?;
-            let _ = fmt.SetTextAlignment(match align {
-                TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-                TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-                TextAlign::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
-            });
-            let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            let trimming = DWRITE_TRIMMING {
-                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                delimiter: 0,
-                delimiterCount: 0,
-            };
-            let sign = self.dwrite.CreateEllipsisTrimmingSign(&fmt).ok();
-            let _ = fmt.SetTrimming(&trimming, sign.as_ref());
-            if self.formats.len() > 96 {
-                self.formats.clear();
-            }
-            self.formats.insert(key, fmt.clone());
-            Some(fmt)
-        }
-    }
-
-    fn fill_rrect(&self, l: f32, t: f32, r: f32, b: f32, rad: f32, color: D2D1_COLOR_F) {
-        if r <= l || b <= t {
-            return;
-        }
-        if let Some(brush) = self.brush(color) {
-            let rr = D2D1_ROUNDED_RECT {
-                rect: d2d_rect(l, t, r, b),
-                radiusX: rad,
-                radiusY: rad,
-            };
-            unsafe {
-                self.target.FillRoundedRectangle(&rr, &brush);
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn stroke_rrect(
-        &self,
-        l: f32,
-        t: f32,
-        r: f32,
-        b: f32,
-        rad: f32,
-        color: D2D1_COLOR_F,
-        stroke_w: f32,
-    ) {
-        if stroke_w <= 0.0 || r <= l || b <= t {
-            return;
-        }
-        if let Some(brush) = self.brush(color) {
-            let inset = stroke_w * 0.5;
-            let rr = D2D1_ROUNDED_RECT {
-                rect: d2d_rect(l + inset, t + inset, r - inset, b - inset),
-                radiusX: (rad - inset).max(0.0),
-                radiusY: (rad - inset).max(0.0),
-            };
-            unsafe {
-                self.target
-                    .DrawRoundedRectangle(&rr, &brush, stroke_w, None);
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn fill_rrect_bordered(
-        &self,
-        l: f32,
-        t: f32,
-        r: f32,
-        b: f32,
-        rad: f32,
-        fill: D2D1_COLOR_F,
-        border: D2D1_COLOR_F,
-        stroke_w: f32,
-    ) {
-        self.fill_rrect(l, t, r, b, rad, fill);
-        self.stroke_rrect(l, t, r, b, rad, border, stroke_w);
-    }
-
-    fn fill_circle(&self, cx: f32, cy: f32, rad: f32, color: D2D1_COLOR_F) {
-        if rad <= 0.0 {
-            return;
-        }
-        if let Some(brush) = self.brush(color) {
-            let ell = D2D1_ELLIPSE {
-                point: Vector2 { X: cx, Y: cy },
-                radiusX: rad,
-                radiusY: rad,
-            };
-            unsafe {
-                self.target.FillEllipse(&ell, &brush);
-            }
-        }
-    }
-
-    fn stroke_circle(&self, cx: f32, cy: f32, rad: f32, color: D2D1_COLOR_F, stroke_w: f32) {
-        if rad <= 0.0 || stroke_w <= 0.0 {
-            return;
-        }
-        if let Some(brush) = self.brush(color) {
-            let ell = D2D1_ELLIPSE {
-                point: Vector2 { X: cx, Y: cy },
-                radiusX: rad,
-                radiusY: rad,
-            };
-            unsafe {
-                self.target.DrawEllipse(&ell, &brush, stroke_w, None);
-            }
-        }
-    }
-
-    fn draw_line(&self, x0: f32, y0: f32, x1: f32, y1: f32, color: D2D1_COLOR_F, stroke_w: f32) {
-        if let Some(brush) = self.brush(color) {
-            unsafe {
-                self.target.DrawLine(
-                    Vector2 { X: x0, Y: y0 },
-                    Vector2 { X: x1, Y: y1 },
-                    &brush,
-                    stroke_w,
-                    None,
-                );
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_text(
-        &mut self,
-        text: &str,
-        rect: D2D_RECT_F,
-        size_px: f32,
-        weight: DWRITE_FONT_WEIGHT,
-        align: TextAlign,
-        color: D2D1_COLOR_F,
-        tabular: bool,
-    ) {
-        if text.is_empty() || rect.right <= rect.left || rect.bottom <= rect.top {
-            return;
-        }
-        let Some(fmt) = self.text_format(false, size_px, weight, align) else {
-            return;
-        };
-        let Some(brush) = self.brush(color) else {
-            return;
-        };
-        let wtxt: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            if let Ok(layout) = self.dwrite.CreateTextLayout(
-                &wtxt,
-                &fmt,
-                (rect.right - rect.left).max(1.0),
-                (rect.bottom - rect.top).max(1.0),
-            ) {
-                if tabular && let Some(typo) = &self.tabular {
-                    let _ = layout.SetTypography(
-                        typo,
-                        DWRITE_TEXT_RANGE {
-                            startPosition: 0,
-                            length: wtxt.len() as u32,
-                        },
-                    );
-                }
-                self.target.DrawTextLayout(
-                    Vector2 {
-                        X: rect.left,
-                        Y: rect.top,
-                    },
-                    &layout,
-                    &brush,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                );
-            }
-        }
-    }
-
-    fn draw_glyph(&mut self, glyph: char, rect: D2D_RECT_F, size_px: f32, color: D2D1_COLOR_F) {
-        let Some(fmt) =
-            self.text_format(true, size_px, DWRITE_FONT_WEIGHT_NORMAL, TextAlign::Center)
-        else {
-            return;
-        };
-        let Some(brush) = self.brush(color) else {
-            return;
-        };
-        let mut buf = [0u16; 2];
-        let encoded = glyph.encode_utf16(&mut buf);
-        unsafe {
-            self.target.DrawText(
-                encoded,
-                &fmt,
-                &rect,
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
-    }
-
-    fn draw_bgra_icon(&self, icon: &FlyoutIcon, dst: D2D_RECT_F) {
-        let w = icon.width;
-        let h = icon.height;
-        if w == 0 || h == 0 || icon.bgra.len() < (w as usize) * (h as usize) * 4 {
-            return;
-        }
-        // Direct2D expects premultiplied BGRA for `D2D1_ALPHA_MODE_PREMULTIPLIED`.
-        let mut premul = Vec::with_capacity(icon.bgra.len());
-        for px in icon.bgra.as_chunks::<4>().0 {
-            let a = u16::from(px[3]);
-            premul.push(((u16::from(px[0]) * a + 127) / 255) as u8);
-            premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
-            premul.push(((u16::from(px[2]) * a + 127) / 255) as u8);
-            premul.push(px[3]);
-        }
-        let props = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        unsafe {
-            if let Ok(bitmap) = self.target.CreateBitmap(
-                D2D_SIZE_U {
-                    width: w,
-                    height: h,
-                },
-                Some(premul.as_ptr().cast()),
-                w * 4,
-                &props,
-            ) {
-                self.target.DrawBitmap(
-                    &bitmap,
-                    Some(&dst),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
-            }
-        }
-    }
-
-    /// Decodes one cover image into a target-owned D2D bitmap. Called at most
-    /// once per distinct path; failures are cached as `None` so a missing file
-    /// is not retried on every repaint.
-    fn load_cover_bitmap(&self, path: &str) -> Option<ID2D1Bitmap> {
-        let img = image::open(path).ok()?.to_rgba8();
-        let (w, h) = (img.width(), img.height());
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let mut premul = Vec::with_capacity(w as usize * h as usize * 4);
-        for px in img.as_raw().as_chunks::<4>().0 {
-            let a = u16::from(px[3]);
-            premul.push(((u16::from(px[2]) * a + 127) / 255) as u8);
-            premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
-            premul.push(((u16::from(px[0]) * a + 127) / 255) as u8);
-            premul.push(px[3]);
-        }
-        let props = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        // SAFETY: `premul` outlives the call; D2D copies all pixel data into the bitmap.
-        unsafe {
-            self.target
-                .CreateBitmap(
-                    D2D_SIZE_U {
-                        width: w,
-                        height: h,
-                    },
-                    Some(premul.as_ptr().cast()),
-                    w * 4,
-                    &props,
-                )
-                .ok()
-        }
-    }
-
-    fn draw_cover_image(&mut self, path: &str, dst: D2D_RECT_F) {
-        if !self.covers.contains_key(path) {
-            let bitmap = self.load_cover_bitmap(path);
-            self.covers.insert(path.to_owned(), bitmap);
-        }
-        let Some(Some(bitmap)) = self.covers.get(path) else {
-            return;
-        };
-        unsafe {
-            self.target.DrawBitmap(
-                bitmap,
-                Some(&dst),
-                1.0,
-                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                None,
-            );
-        }
-    }
-}
-
 /// Null-terminated, empty-safe wrapper around `user32!DrawTextW` (kept for unit test coverage).
 #[cfg(test)]
 unsafe fn draw_gdi_text(hdc: HDC, text: &str, rc: &mut RECT, format: u32) {
@@ -1260,8 +840,51 @@ fn blend_rgb(from: u32, to: u32, t: f32) -> u32 {
     rgb(channel(0) as u8, channel(8) as u8, channel(16) as u8)
 }
 
-fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
-    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+/// Shared slider track + filled bar + halo + circular thumb painter (`AudioSliderSection` & `SeekSlider`).
+#[allow(clippy::too_many_arguments)]
+fn draw_slider_track(
+    d2d: &DcD2d,
+    left: f32,
+    width: f32,
+    mid_y: f32,
+    ratio: f32,
+    hot: bool,
+    dpi: f32,
+    track_col: D2D1_COLOR_F,
+    fill_col: D2D1_COLOR_F,
+    ring_col: D2D1_COLOR_F,
+    thumb_core: D2D1_COLOR_F,
+    thumb_halo: D2D1_COLOR_F,
+) {
+    let sf = |v: f32| v * dpi;
+    let tr_h = sf(5.0).max(4.0);
+    let tr_r = tr_h * 0.5;
+    d2d.fill_rrect(
+        left,
+        mid_y - tr_r,
+        left + width,
+        mid_y + tr_r,
+        tr_r,
+        track_col,
+    );
+    let fill_w = width * ratio.clamp(0.0, 1.0);
+    if fill_w > sf(2.0) {
+        d2d.fill_rrect(
+            left,
+            mid_y - tr_r,
+            left + fill_w,
+            mid_y + tr_r,
+            tr_r,
+            fill_col,
+        );
+    }
+    let thumb_r = if hot { sf(6.5) } else { sf(5.5) };
+    let tx = (left + fill_w).clamp(left + thumb_r, left + width - thumb_r);
+    if hot {
+        d2d.fill_circle(tx, mid_y, thumb_r + sf(3.5), thumb_halo);
+    }
+    d2d.fill_circle(tx, mid_y, thumb_r, thumb_core);
+    d2d.stroke_circle(tx, mid_y, thumb_r, ring_col, sf(1.6).max(1.2));
 }
 
 /// Background-app row: `[app | pin | close]`. The two actions are 30 DIP square pills
@@ -1357,19 +980,7 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                     (*next_month_id, right - btn_w * 2 - gap, right - btn_w - gap),
                     (*next_year_id, right - btn_w, right),
                 ] {
-                    targets.push(HitTarget {
-                        id,
-                        menu_id: id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left: bl,
-                            top: y,
-                            right: br,
-                            bottom: y + nav_h,
-                        },
-                    });
+                    targets.push(HitTarget::click(id, rect_i32(bl, y, br, y + nav_h)));
                 }
                 y += nav_h + s(8.0);
                 // Weekday labels row
@@ -1378,24 +989,17 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 let cell_w = content_w / 7;
                 let cell_h = s(32.0);
                 for cell in 0..42i32 {
-                    let row = cell / 7;
-                    let col = cell % 7;
-                    let cx = pad + col * cell_w;
-                    let cy = y + row * cell_h;
-                    let id = day_id_base + cell as u32;
-                    targets.push(HitTarget {
-                        id,
-                        menu_id: id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left: cx + s(2.0),
-                            top: cy + s(2.0),
-                            right: cx + cell_w - s(2.0),
-                            bottom: cy + cell_h - s(2.0),
-                        },
-                    });
+                    let cx = pad + (cell % 7) * cell_w;
+                    let cy = y + (cell / 7) * cell_h;
+                    targets.push(HitTarget::click(
+                        day_id_base + cell as u32,
+                        rect_i32(
+                            cx + s(2.0),
+                            cy + s(2.0),
+                            cx + cell_w - s(2.0),
+                            cy + cell_h - s(2.0),
+                        ),
+                    ));
                 }
                 y += 6 * cell_h + s(6.0);
             }
@@ -1404,33 +1008,21 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
             } => {
                 let dev_top = y + s(22.0);
                 let mute_w = s(32.0);
-                targets.push(HitTarget {
-                    id: *mute_id,
-                    menu_id: *mute_id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: pad + content_w - mute_w,
-                        top: dev_top,
-                        right: pad + content_w,
-                        bottom: dev_top + mute_w,
-                    },
-                });
+                targets.push(HitTarget::click(
+                    *mute_id,
+                    rect_i32(
+                        pad + content_w - mute_w,
+                        dev_top,
+                        pad + content_w,
+                        dev_top + mute_w,
+                    ),
+                ));
                 let slider_top = dev_top + mute_w + s(8.0);
-                targets.push(HitTarget {
-                    id: *slider_id,
-                    menu_id: *slider_id,
-                    is_slider: true,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: pad,
-                        top: slider_top,
-                        right: pad + content_w,
-                        bottom: slider_top + s(20.0),
-                    },
-                });
+                targets.push(HitTarget::slider(
+                    *slider_id,
+                    rect_i32(pad, slider_top, pad + content_w, slider_top + s(20.0)),
+                    false,
+                ));
                 y = slider_top + s(24.0);
             }
             FlyoutBlock::MetricTiles(tiles) => {
@@ -1441,38 +1033,20 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
             }
             FlyoutBlock::BadgeRow { id, .. } => {
                 let h = s(38.0);
-                targets.push(HitTarget {
-                    id: *id,
-                    menu_id: *id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: pad,
-                        top: y,
-                        right: pad + content_w,
-                        bottom: y + h,
-                    },
-                });
+                targets.push(HitTarget::click(
+                    *id,
+                    rect_i32(pad, y, pad + content_w, y + h),
+                ));
                 y += h + s(4.0);
             }
             FlyoutBlock::StatusHeader { action_id, .. } => {
                 let h = s(28.0);
                 if let Some(id) = *action_id {
                     let bw = s(64.0);
-                    targets.push(HitTarget {
+                    targets.push(HitTarget::click(
                         id,
-                        menu_id: id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left: pad + content_w - bw,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + h,
-                        },
-                    });
+                        rect_i32(pad + content_w - bw, y, pad + content_w, y + h),
+                    ));
                 }
                 y += h + s(6.0);
             }
@@ -1482,23 +1056,12 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 let gap = s(8.0);
                 let tw = ((content_w - gap) / 2).max(s(80.0));
                 for (i, (id, _, _, _)) in tiles.iter().enumerate() {
-                    let col = (i % 2) as i32;
-                    let row = (i / 2) as i32;
-                    let left = pad + col * (tw + gap);
-                    let top = y + row * (tile_h + gap);
-                    targets.push(HitTarget {
-                        id: *id,
-                        menu_id: *id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left,
-                            top,
-                            right: left + tw,
-                            bottom: top + tile_h,
-                        },
-                    });
+                    let left = pad + (i % 2) as i32 * (tw + gap);
+                    let top = y + (i / 2) as i32 * (tile_h + gap);
+                    targets.push(HitTarget::click(
+                        *id,
+                        rect_i32(left, top, left + tw, top + tile_h),
+                    ));
                 }
                 y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
             }
@@ -1508,69 +1071,40 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 let gap = s(8.0);
                 let tw = ((content_w - gap) / 2).max(s(80.0));
                 for (i, (id, _, _, _, _)) in tiles.iter().enumerate() {
-                    let col = (i % 2) as i32;
-                    let row = (i / 2) as i32;
-                    let left = pad + col * (tw + gap);
-                    let top = y + row * (tile_h + gap);
-                    targets.push(HitTarget {
-                        id: *id,
-                        menu_id: *id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left,
-                            top,
-                            right: left + tw,
-                            bottom: top + tile_h,
-                        },
-                    });
+                    let left = pad + (i % 2) as i32 * (tw + gap);
+                    let top = y + (i / 2) as i32 * (tile_h + gap);
+                    targets.push(HitTarget::click(
+                        *id,
+                        rect_i32(left, top, left + tw, top + tile_h),
+                    ));
                 }
                 y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
             }
             FlyoutBlock::GlyphStatRow { .. } => y += s(30.0),
             FlyoutBlock::GlyphActionRow { id, subtitle, .. } => {
                 let h = if subtitle.is_some() { s(44.0) } else { s(38.0) };
-                targets.push(HitTarget {
-                    id: *id,
-                    menu_id: *id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: pad,
-                        top: y,
-                        right: pad + content_w,
-                        bottom: y + h,
-                    },
-                });
+                targets.push(HitTarget::click(
+                    *id,
+                    rect_i32(pad, y, pad + content_w, y + h),
+                ));
                 y += h + s(5.0);
             }
             FlyoutBlock::StatRow { .. } => y += s(24.0),
             FlyoutBlock::ProgressBar {
                 label, value_text, ..
             } => {
-                if label.is_empty() && value_text.is_empty() {
-                    y += s(16.0);
+                y += if label.is_empty() && value_text.is_empty() {
+                    s(16.0)
                 } else {
-                    y += s(34.0);
-                }
+                    s(34.0)
+                };
             }
             FlyoutBlock::ActionRow { id, subtitle, .. } => {
                 let h = if subtitle.is_some() { s(42.0) } else { s(34.0) };
-                targets.push(HitTarget {
-                    id: *id,
-                    menu_id: *id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: pad,
-                        top: y,
-                        right: pad + content_w,
-                        bottom: y + h,
-                    },
-                });
+                targets.push(HitTarget::click(
+                    *id,
+                    rect_i32(pad, y, pad + content_w, y + h),
+                ));
                 y += h + s(4.0);
             }
             FlyoutBlock::AppRow {
@@ -1585,14 +1119,7 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                     .zip(rects)
                 {
                     if let Some(id) = id {
-                        targets.push(HitTarget {
-                            id,
-                            rect,
-                            menu_id: *menu_id,
-                            is_slider: false,
-                            is_seek: false,
-                            is_text: false,
-                        });
+                        targets.push(HitTarget::with_menu(id, *menu_id, rect));
                     }
                 }
                 y += s(42.0) + s(3.0);
@@ -1604,64 +1131,30 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 let bw = ((content_w - gap * (count - 1)) / count).max(s(40.0));
                 for (i, (id, _, _)) in buttons.iter().enumerate() {
                     let left = pad + (i as i32) * (bw + gap);
-                    targets.push(HitTarget {
-                        id: *id,
-                        menu_id: *id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left,
-                            top: y,
-                            right: left + bw,
-                            bottom: y + h,
-                        },
-                    });
+                    targets.push(HitTarget::click(*id, rect_i32(left, y, left + bw, y + h)));
                 }
                 y += h + s(6.0);
             }
             // ---- C2 blocks ----
             FlyoutBlock::SeekSlider { id, .. } => {
                 let track_top = y + s(20.0);
-                targets.push(HitTarget {
-                    id: *id,
-                    menu_id: *id,
-                    is_slider: true,
-                    is_seek: true,
-                    is_text: false,
-                    rect: RECT {
-                        left: pad,
-                        top: track_top,
-                        right: pad + content_w,
-                        bottom: track_top + s(18.0),
-                    },
-                });
+                targets.push(HitTarget::slider(
+                    *id,
+                    rect_i32(pad, track_top, pad + content_w, track_top + s(18.0)),
+                    true,
+                ));
                 y += s(44.0);
             }
             FlyoutBlock::TextInput { id, .. } => {
                 let box_top = y + s(18.0);
-                targets.push(HitTarget {
-                    id: *id,
-                    menu_id: *id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: true,
-                    rect: RECT {
-                        left: pad,
-                        top: box_top,
-                        right: pad + content_w,
-                        bottom: box_top + s(32.0),
-                    },
-                });
+                targets.push(HitTarget::text(
+                    *id,
+                    rect_i32(pad, box_top, pad + content_w, box_top + s(32.0)),
+                ));
                 y += s(56.0);
             }
-            FlyoutBlock::Chart { series, .. } => {
-                let _ = series;
-                y += s(80.0);
-            }
-            FlyoutBlock::Image { size_dips, .. } => {
-                y += s(image_size_dips(*size_dips)) + s(8.0);
-            }
+            FlyoutBlock::Chart { .. } => y += s(80.0),
+            FlyoutBlock::Image { size_dips, .. } => y += s(image_size_dips(*size_dips)) + s(8.0),
             FlyoutBlock::IconBar { buttons } => {
                 if !buttons.is_empty() {
                     let cols = buttons.len().min(4) as i32;
@@ -1669,23 +1162,12 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                     let bw = ((content_w - gap * (cols - 1)) / cols).max(s(44.0));
                     let bh = s(48.0);
                     for (i, (id, _, _, _)) in buttons.iter().enumerate() {
-                        let col = (i as i32) % cols;
-                        let row = (i as i32) / cols;
-                        let left = pad + col * (bw + gap);
-                        let top = y + row * (bh + gap);
-                        targets.push(HitTarget {
-                            id: *id,
-                            menu_id: *id,
-                            is_slider: false,
-                            is_seek: false,
-                            is_text: false,
-                            rect: RECT {
-                                left,
-                                top,
-                                right: left + bw,
-                                bottom: top + bh,
-                            },
-                        });
+                        let left = pad + (i as i32 % cols) * (bw + gap);
+                        let top = y + (i as i32 / cols) * (bh + gap);
+                        targets.push(HitTarget::click(
+                            *id,
+                            rect_i32(left, top, left + bw, top + bh),
+                        ));
                     }
                     let rows = buttons.len().div_ceil(cols as usize) as i32;
                     y += rows * bh + (rows - 1).max(0) * gap + s(6.0);
@@ -2119,22 +1601,8 @@ fn show_flyout_impl<'a>(
         // Apply Windows 11 native rounded corners (with DWM border disabled so only
         // SpatialGlassHost's crisp rim renders) to get clean OS drop shadow elevation
         // and match the 8 DIP glass capsule cleanly with zero exposed corner gap.
-        unsafe {
-            let corner = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corner as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let border_none = DWMWA_COLOR_NONE;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                (&border_none as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-        }
+        set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+        set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
         // Active theme packs tint the glass body and rim; stock themes stay neutral.
         let (tint, rim) = design::theme::theme_surface_tint("MenuMaterial", "DockBorderMaterial");
         let glass_config = border.glass_config.with_theme_tint(tint, rim);
@@ -2155,57 +1623,27 @@ fn show_flyout_impl<'a>(
         if host.is_some() && fg.is_some() {
             (host, fg)
         } else {
-            unsafe {
-                let corner = DWMWCP_ROUND;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                    (&corner as *const u32).cast(),
-                    size_of::<u32>() as u32,
-                );
-                let backdrop: u32 = crate::design::DWMSBT_TRANSIENTWINDOW;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                    (&backdrop as *const u32).cast(),
-                    size_of::<u32>() as u32,
-                );
-            }
+            set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
+            set_dwm_u32(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                crate::design::DWMSBT_TRANSIENTWINDOW,
+            );
             (None, None)
         }
     } else {
         unsafe {
             let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
-            let dark_val: u32 = u32::from(is_dark);
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-                (&dark_val as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let corner = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corner as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
         }
+        set_dwm_u32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(is_dark));
+        set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
         (None, None)
     };
     if dcomp_fg.is_none() {
         // Without the DComp glass host `paint` draws one crisp rounded border that
         // follows the `DWMWCP_ROUND` corners; suppress DWM's own frame so the
         // popup never shows a doubled outline.
-        let border_c = DWMWA_COLOR_NONE;
-        unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                (&border_c as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-        }
+        set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
     }
 
     let hover_anchor = NEXT_HOVER_ANCHOR.with(|slot| slot.borrow_mut().take());
@@ -2584,11 +2022,6 @@ impl FlyoutState<'_> {
     }
 
     fn paint(&mut self) {
-        let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
-        let screen_hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
-        if screen_hdc.is_null() {
-            return;
-        }
         let dpi = self.dpi;
         let sf = |v: f32| v * dpi;
         let s = |v: f32| (v * dpi).round() as i32;
@@ -2597,48 +2030,51 @@ impl FlyoutState<'_> {
         let right_pad = pad;
         let card_r = sf(10.0);
         let pill_r = sf(8.0);
-        let mut client = RECT::default();
-        unsafe { GetClientRect(self.hwnd, &mut client) };
-        let w = client.right.max(1);
-        let h = client.bottom.max(1);
-        let wf = w as f32;
-        let use_spatial_glass = self.dcomp_fg.is_some() && self.border.glass_config.enabled;
-        if let Some(ref mut glass) = self.spatial_glass {
-            glass.sync_rect(0.0, 0.0, wf, h as f32, sf(8.0).round(), dpi, 0.0, 0.0);
-        }
-        let content_w = (w - pad - right_pad).max(s(120.0));
-        let content_wf = content_w as f32;
+        let is_dark = self.is_dark;
+        let border = self.border;
+        let use_spatial_glass = self.dcomp_fg.is_some() && border.glass_config.enabled;
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
+        let hovered_id = self.hovered_id;
+        let dragging_slider = self.dragging_slider;
+        let editing_state = &self.editing;
+        let keyboard_index = self.keyboard_index;
+        let targets = &self.targets;
+        let spec = &self.spec;
+        let content_top_px = self.content_top_px;
+        let viewport_h_px = self.viewport_h_px;
+        let content_h_px = self.content_h_px;
+        let scroll_y = self.scroll_y;
+        let max_s = self.max_scroll();
+        let spatial_glass = &mut self.spatial_glass;
+        let _ = self.shadow_rings;
 
-        let pal = design::active_palette_with_border(self.is_dark, Some(self.border.rgb));
+        let pal = design::active_palette_with_border(is_dark, Some(border.rgb));
         // Theme packs / editor tokens tint glass cards and hovers with the live palette;
         // the stock theme keeps the neutral white veils below.
         let themed = design::theme::has_active_theme_customization();
-        let border_w = (self.border.width_dips * dpi).clamp(1.0, 2.0);
+        let border_w = (border.width_dips * dpi).clamp(1.0, 2.0);
         let surface_c = if use_spatial_glass {
-            // Faint contrast tint so dark glass keeps text legible over bright wallpapers;
-            // themed packs tint it with their own surface colour.
             if themed {
-                d2d_rgba(pal.surface, if self.is_dark { 0.24 } else { 0.12 })
+                d2d_rgba(pal.surface, if is_dark { 0.24 } else { 0.12 })
             } else {
-                d2d_rgba((30, 33, 40), if self.is_dark { 0.18 } else { 0.0 })
+                d2d_rgba((30, 33, 40), if is_dark { 0.18 } else { 0.0 })
             }
-        } else if self.border.glass_mode {
+        } else if border.glass_mode {
             let tint = if themed {
                 pal.surface
-            } else if self.is_dark {
+            } else if is_dark {
                 (0x1c_u8, 0x1f_u8, 0x26_u8)
             } else {
                 (0xf6_u8, 0xf8_u8, 0xfc_u8)
             };
-            d2d_rgba(tint, self.border.glass_tint_alpha.clamp(0.18, 0.48))
+            d2d_rgba(tint, border.glass_tint_alpha.clamp(0.18, 0.48))
         } else {
             d2d_rgba(pal.surface, 1.0)
         };
-        let card_bg = if self.border.glass_mode {
+        let card_bg = if border.glass_mode {
             if themed {
-                d2d_rgba(pal.elevated, if self.is_dark { 0.42 } else { 0.62 })
-            } else if self.is_dark {
+                d2d_rgba(pal.elevated, if is_dark { 0.42 } else { 0.62 })
+            } else if is_dark {
                 d2d_rgba((0xff, 0xff, 0xff), 0.08)
             } else {
                 d2d_rgba((0xff, 0xff, 0xff), 0.56)
@@ -2646,10 +2082,10 @@ impl FlyoutState<'_> {
         } else {
             d2d_rgba(pal.elevated, 1.0)
         };
-        let hover_bg = if self.border.glass_mode {
+        let hover_bg = if border.glass_mode {
             if themed {
-                d2d_rgba(pal.hover, if self.is_dark { 0.62 } else { 0.80 })
-            } else if self.is_dark {
+                d2d_rgba(pal.hover, if is_dark { 0.62 } else { 0.80 })
+            } else if is_dark {
                 d2d_rgba((0xff, 0xff, 0xff), 0.14)
             } else {
                 d2d_rgba((0xff, 0xff, 0xff), 0.76)
@@ -2657,35 +2093,35 @@ impl FlyoutState<'_> {
         } else {
             d2d_rgba(pal.hover, 1.0)
         };
-        let border_col = d2d_rgba(pal.border_rgb, if self.is_dark { 0.85 } else { 1.0 });
-        let subtle_border = d2d_rgba(pal.border_rgb, if self.is_dark { 0.55 } else { 0.85 });
+        let border_col = d2d_rgba(pal.border_rgb, if is_dark { 0.85 } else { 1.0 });
+        let subtle_border = d2d_rgba(pal.border_rgb, if is_dark { 0.55 } else { 0.85 });
         let accent = d2d_rgba(pal.widget_accent, 1.0);
         let accent_blue = d2d_rgba(pal.widget_blue, 1.0);
         let sel_fill = d2d_rgba(pal.selected_fill, 1.0);
         let sel_stroke = d2d_rgba(pal.selected_stroke, 1.0);
         let sel_fg = d2d_rgba(pal.selected_fg, 1.0);
         let primary_fill = if themed {
-            d2d_rgba(pal.accent, if self.is_dark { 0.30 } else { 1.0 })
-        } else if self.is_dark {
+            d2d_rgba(pal.accent, if is_dark { 0.30 } else { 1.0 })
+        } else if is_dark {
             sel_fill
         } else {
             accent_blue
         };
         let primary_stroke = if themed {
             d2d_rgba(pal.accent, 1.0)
-        } else if self.is_dark {
+        } else if is_dark {
             sel_stroke
         } else {
             accent_blue
         };
-        let primary_fg = if self.is_dark {
+        let primary_fg = if is_dark {
             d2d_rgba(pal.text_primary, 1.0)
         } else {
             d2d_rgba((0xff, 0xff, 0xff), 1.0)
         };
         let text_fg = d2d_rgba(pal.text_primary, 1.0);
         let muted_fg = d2d_rgba(pal.text_secondary, 1.0);
-        let dim_fg = if self.is_dark {
+        let dim_fg = if is_dark {
             d2d_rgba((0x5c, 0x62, 0x70), 1.0)
         } else {
             d2d_rgba((0xae, 0xb4, 0xbe), 1.0)
@@ -2693,11 +2129,11 @@ impl FlyoutState<'_> {
         let danger_bg = d2d_rgba(pal.danger_hover_bg, 1.0);
         let danger_stroke = d2d_rgba(pal.danger, 0.72);
         let danger_fg = d2d_rgba(pal.danger_fg, 1.0);
-        let sep_col = d2d_rgba(pal.sep_rgb, if self.is_dark { 0.85 } else { 1.0 });
+        let sep_col = d2d_rgba(pal.sep_rgb, if is_dark { 0.85 } else { 1.0 });
         let scroll_col = d2d_rgba(pal.text_secondary, 0.45);
         let track_col = if themed {
             d2d_rgba(pal.border_rgb, 1.0)
-        } else if self.is_dark {
+        } else if is_dark {
             d2d_rgba((0x34, 0x39, 0x45), 1.0)
         } else {
             d2d_rgba((0xdc, 0xe1, 0xe8), 1.0)
@@ -2705,72 +2141,18 @@ impl FlyoutState<'_> {
         let thumb_core = d2d_rgba((0xff, 0xff, 0xff), 1.0);
         let thumb_halo = d2d_rgba(pal.widget_accent, 0.22);
 
-        let mem_dc = unsafe { CreateCompatibleDC(screen_hdc) };
-        if mem_dc.is_null() {
-            unsafe { EndPaint(self.hwnd, &ps) };
-            return;
-        }
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w,
-                biHeight: -h,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB,
-                ..unsafe { std::mem::zeroed() }
-            },
-            ..unsafe { std::mem::zeroed() }
-        };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mem_bmp = unsafe {
-            CreateDIBSection(
-                mem_dc,
-                &bmi,
-                DIB_RGB_COLORS,
-                &mut bits,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if mem_bmp.is_null() {
-            unsafe {
-                DeleteDC(mem_dc);
-                EndPaint(self.hwnd, &ps);
-            }
-            return;
-        }
-        let old_bmp = unsafe { SelectObject(mem_dc, mem_bmp as _) };
-
-        let _ = self.shadow_rings;
-        FLYOUT_D2D.with(|slot| {
-            let mut guard = slot.borrow_mut();
-            if guard.is_none() {
-                *guard = FlyoutD2d::create();
-            }
-            let Some(d2d) = guard.as_mut() else {
-                return;
-            };
-            let win_rc = WinRect {
-                left: 0,
-                top: 0,
-                right: w,
-                bottom: h,
-            };
-            if unsafe { d2d.target.BindDC(WinHdc(mem_dc as _), &win_rc) }.is_err() {
-                *guard = None;
-                return;
-            }
-            unsafe {
-                d2d.target.BeginDraw();
-                if use_spatial_glass {
-                    d2d.target.Clear(Some(&d2d_rgba((0, 0, 0), 0.0)));
-                } else {
-                    d2d.target.Clear(Some(&surface_c));
-                }
+        paint_dib_d2d(self.hwnd, self.dcomp_fg.as_mut(), |d2d, w, h| {
+            let wf = w as f32;
+            let content_w = (w - pad - right_pad).max(s(120.0));
+            let content_wf = content_w as f32;
+            if let Some(glass) = spatial_glass {
+                glass.sync_rect(0.0, 0.0, wf, h as f32, sf(8.0).round(), dpi, 0.0, 0.0);
             }
             if use_spatial_glass {
+                d2d.clear(d2d_rgba((0, 0, 0), 0.0));
                 d2d.fill_rrect(0.0, 0.0, wf, h as f32, sf(8.0), surface_c);
+            } else {
+                d2d.clear(surface_c);
             }
 
             // Crisp top specular highlight along the upper flyout rim.
@@ -2779,14 +2161,14 @@ impl FlyoutState<'_> {
                 0.5,
                 (wf - sf(12.0)).max(sf(12.0)),
                 0.5,
-                d2d_rgba(pal.specular_top, if self.is_dark { 0.22 } else { 0.5 }),
+                d2d_rgba(pal.specular_top, if is_dark { 0.22 } else { 0.5 }),
                 1.0,
             );
 
             // Header title + optional subtitle.
-            if !self.spec.title.is_empty() {
+            if !spec.title.is_empty() {
                 d2d.draw_text(
-                    &self.spec.title,
+                    &spec.title,
                     d2d_rect(pad_f, pad_f, wf - pad_f, pad_f + sf(22.0)),
                     sf(14.5),
                     DWRITE_FONT_WEIGHT_SEMI_BOLD,
@@ -2794,14 +2176,14 @@ impl FlyoutState<'_> {
                     text_fg,
                     false,
                 );
-                let action_label = self.spec.blocks.iter().find_map(|block| match block {
+                let action_label = spec.blocks.iter().find_map(|block| match block {
                     FlyoutBlock::AppRow {
                         pin_id,
                         close_id,
                         pinned,
                         ..
                     } => {
-                        let active = self.hovered_id.or(focused_id);
+                        let active = hovered_id.or(focused_id);
                         if active == Some(*pin_id) {
                             Some(loc::t(if *pinned {
                                 "UnpinTrayIcon"
@@ -2816,7 +2198,7 @@ impl FlyoutState<'_> {
                     }
                     _ => None,
                 });
-                if let Some(sub) = action_label.as_deref().or(self.spec.subtitle.as_deref()) {
+                if let Some(sub) = action_label.as_deref().or(spec.subtitle.as_deref()) {
                     d2d.draw_text(
                         sub,
                         d2d_rect(pad_f, pad_f + sf(23.0), wf - pad_f, pad_f + sf(41.0)),
@@ -2830,19 +2212,19 @@ impl FlyoutState<'_> {
             }
 
             unsafe {
-                d2d.target.PushAxisAlignedClip(
+                d2d.target().PushAxisAlignedClip(
                     &d2d_rect(
                         0.0,
-                        self.content_top_px as f32,
+                        content_top_px as f32,
                         wf,
-                        (self.content_top_px + self.viewport_h_px) as f32,
+                        (content_top_px + viewport_h_px) as f32,
                     ),
                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                 );
             }
 
-            let mut y = self.content_top_px - self.scroll_y;
-            for block in &self.spec.blocks {
+            let mut y = content_top_px - scroll_y;
+            for block in &spec.blocks {
                 let yf = y as f32;
                 match block {
                     FlyoutBlock::Hero {
@@ -2926,10 +2308,8 @@ impl FlyoutState<'_> {
                         right_value,
                     } => {
                         let well = sf(44.0);
-                        let well_fill =
-                            d2d_rgba(*glyph_color, if self.is_dark { 0.16 } else { 0.13 });
-                        let well_stroke =
-                            d2d_rgba(*glyph_color, if self.is_dark { 0.34 } else { 0.28 });
+                        let well_fill = d2d_rgba(*glyph_color, if is_dark { 0.16 } else { 0.13 });
+                        let well_stroke = d2d_rgba(*glyph_color, if is_dark { 0.34 } else { 0.28 });
                         d2d.fill_rrect_bordered(
                             pad_f,
                             yf,
@@ -3032,7 +2412,7 @@ impl FlyoutState<'_> {
                         for (id, glyph, double, l, r) in nav_btns {
                             let lf = l as f32;
                             let rf = r as f32;
-                            let hov = self.hovered_id == Some(id);
+                            let hov = hovered_id == Some(id);
                             if hov {
                                 d2d.fill_rrect(lf, yf, rf, yf + nav_hf, sf(7.0), hover_bg);
                             }
@@ -3062,7 +2442,7 @@ impl FlyoutState<'_> {
                         }
                         let tl = (pad + btn_w * 2 + gap * 2) as f32;
                         let tr = (right - btn_w * 2 - gap * 2) as f32;
-                        if self.hovered_id == Some(*title_id) {
+                        if hovered_id == Some(*title_id) {
                             d2d.fill_rrect(tl, yf, tr, yf + nav_hf, sf(7.0), hover_bg);
                         }
                         let title_str = format!("{} {}", telemetry::month_name(*month), year);
@@ -3126,7 +2506,7 @@ impl FlyoutState<'_> {
                             let is_sel =
                                 selected.is_some_and(|sel| sel == (cy, cm, cd)) && !is_today;
                             let id = day_id_base + cell as u32;
-                            let is_hov = self.hovered_id == Some(id);
+                            let is_hov = hovered_id == Some(id);
 
                             let l = (pad + col * cell_w) as f32 + sf(2.0);
                             let t = (y + row * cell_h) as f32 + sf(2.0);
@@ -3263,7 +2643,7 @@ impl FlyoutState<'_> {
                         );
 
                         let mute_l = pad_f + content_wf - mute_wf;
-                        let mute_hov = self.hovered_id == Some(*mute_id);
+                        let mute_hov = hovered_id == Some(*mute_id);
                         let (m_bg, m_bd, m_fg) = if *muted {
                             (danger_bg, danger_stroke, danger_fg)
                         } else if mute_hov {
@@ -3297,46 +2677,21 @@ impl FlyoutState<'_> {
 
                         // Anti-aliased pill slider track + Aurora fill + circular thumb with halo.
                         let slider_top = dev_top + dev_h + s(8.0);
-                        let mid_y = slider_top as f32 + sf(10.0);
-                        let tr_h = sf(5.0).max(4.0);
-                        let tr_r = tr_h * 0.5;
-                        d2d.fill_rrect(
+                        let hot_slider = hovered_id == Some(*slider_id)
+                            || dragging_slider.is_some_and(|(sid, _, _)| sid == *slider_id);
+                        draw_slider_track(
+                            d2d,
                             pad_f,
-                            mid_y - tr_r,
-                            pad_f + content_wf,
-                            mid_y + tr_r,
-                            tr_r,
+                            content_wf,
+                            slider_top as f32 + sf(10.0),
+                            if *muted { 0.0 } else { *ratio },
+                            hot_slider,
+                            dpi,
                             track_col,
-                        );
-                        let r_clamped = if *muted { 0.0 } else { ratio.clamp(0.0, 1.0) };
-                        let fill_w = content_wf * r_clamped;
-                        if fill_w > sf(2.0) {
-                            d2d.fill_rrect(
-                                pad_f,
-                                mid_y - tr_r,
-                                pad_f + fill_w,
-                                mid_y + tr_r,
-                                tr_r,
-                                accent,
-                            );
-                        }
-                        let hot_slider = self.hovered_id == Some(*slider_id)
-                            || self
-                                .dragging_slider
-                                .is_some_and(|(sid, _, _)| sid == *slider_id);
-                        let thumb_r = if hot_slider { sf(6.5) } else { sf(5.5) };
-                        let tx =
-                            (pad_f + fill_w).clamp(pad_f + thumb_r, pad_f + content_wf - thumb_r);
-                        if hot_slider {
-                            d2d.fill_circle(tx, mid_y, thumb_r + sf(3.5), thumb_halo);
-                        }
-                        d2d.fill_circle(tx, mid_y, thumb_r, thumb_core);
-                        d2d.stroke_circle(
-                            tx,
-                            mid_y,
-                            thumb_r,
+                            accent,
                             if *muted { muted_fg } else { accent },
-                            sf(1.6).max(1.2),
+                            thumb_core,
+                            thumb_halo,
                         );
 
                         y = slider_top + s(24.0);
@@ -3402,7 +2757,7 @@ impl FlyoutState<'_> {
                     } => {
                         let h = s(38.0);
                         let hf = h as f32;
-                        let hovered = self.hovered_id == Some(*id);
+                        let hovered = hovered_id == Some(*id);
                         if hovered || *active {
                             d2d.fill_rrect_bordered(
                                 pad_f,
@@ -3507,7 +2862,7 @@ impl FlyoutState<'_> {
                         let right_edge = if let (Some(id), Some(lbl)) = (*action_id, action_label) {
                             let bw = sf(64.0);
                             let bl = pad_f + content_wf - bw;
-                            let hovered = self.hovered_id == Some(id);
+                            let hovered = hovered_id == Some(id);
                             d2d.fill_rrect_bordered(
                                 bl,
                                 yf + sf(2.0),
@@ -3557,7 +2912,7 @@ impl FlyoutState<'_> {
                             let row = (i / 2) as i32;
                             let left = (pad + col * (tw + gap)) as f32;
                             let top = (y + row * (tile_h + gap)) as f32;
-                            let hovered = self.hovered_id == Some(*id);
+                            let hovered = hovered_id == Some(*id);
                             let (fill, bd) = if *active {
                                 (sel_fill, sel_stroke)
                             } else if hovered {
@@ -3618,7 +2973,7 @@ impl FlyoutState<'_> {
                             let row = (i / 2) as i32;
                             let left = (pad + col * (tw + gap)) as f32;
                             let top = (y + row * (tile_h + gap)) as f32;
-                            let hovered = self.hovered_id == Some(*id);
+                            let hovered = hovered_id == Some(*id);
                             let (fill, bd) = if *active {
                                 (sel_fill, sel_stroke)
                             } else if hovered {
@@ -3640,9 +2995,9 @@ impl FlyoutState<'_> {
                             let wl = left + sf(10.0);
                             let wt = top + (tile_hf - well) * 0.5;
                             let well_bg = if *active {
-                                d2d_rgba(pal.widget_blue, if self.is_dark { 0.24 } else { 0.16 })
+                                d2d_rgba(pal.widget_blue, if is_dark { 0.24 } else { 0.16 })
                             } else {
-                                d2d_rgba(pal.text_secondary, if self.is_dark { 0.12 } else { 0.10 })
+                                d2d_rgba(pal.text_secondary, if is_dark { 0.12 } else { 0.10 })
                             };
                             d2d.fill_rrect(wl, wt, wl + well, wt + well, sf(8.0), well_bg);
                             let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E713}');
@@ -3692,7 +3047,7 @@ impl FlyoutState<'_> {
                             pad_f + icon_sz,
                             it + icon_sz,
                             sf(6.0),
-                            d2d_rgba(*glyph_color, if self.is_dark { 0.15 } else { 0.12 }),
+                            d2d_rgba(*glyph_color, if is_dark { 0.15 } else { 0.12 }),
                         );
                         let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E706}');
                         d2d.draw_glyph(
@@ -3738,7 +3093,7 @@ impl FlyoutState<'_> {
                     } => {
                         let h = if subtitle.is_some() { s(44.0) } else { s(38.0) };
                         let hf = h as f32;
-                        let hovered = self.hovered_id == Some(*id);
+                        let hovered = hovered_id == Some(*id);
                         d2d.fill_rrect_bordered(
                             pad_f,
                             yf,
@@ -3758,7 +3113,7 @@ impl FlyoutState<'_> {
                             wl + well,
                             wt + well,
                             sf(7.0),
-                            d2d_rgba(*glyph_color, if self.is_dark { 0.16 } else { 0.13 }),
+                            d2d_rgba(*glyph_color, if is_dark { 0.16 } else { 0.13 }),
                         );
                         let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E8B7}');
                         d2d.draw_glyph(
@@ -3945,7 +3300,7 @@ impl FlyoutState<'_> {
                     } => {
                         let h = if subtitle.is_some() { s(42.0) } else { s(34.0) };
                         let hf = h as f32;
-                        let hovered = self.hovered_id == Some(*id);
+                        let hovered = hovered_id == Some(*id);
                         let (fill, bd) = if hovered {
                             if *destructive {
                                 (danger_bg, danger_stroke)
@@ -3970,8 +3325,10 @@ impl FlyoutState<'_> {
                         if let Some(ic) = icon {
                             let isz = sf(18.0);
                             let iy = yf + (hf - isz) * 0.5;
-                            d2d.draw_bgra_icon(
-                                ic,
+                            d2d.draw_bgra_bitmap(
+                                ic.width,
+                                ic.height,
+                                &ic.bgra,
                                 d2d_rect(pad_f + sf(9.0), iy, pad_f + sf(9.0) + isz, iy + isz),
                             );
                             text_left = pad_f + sf(35.0);
@@ -4028,10 +3385,10 @@ impl FlyoutState<'_> {
                         close_id,
                     } => {
                         let [app, pin, close] = app_row_targets(pad, pad + content_w, y, dpi);
-                        let row_hovered = self.hovered_id == Some(*id)
+                        let row_hovered = hovered_id == Some(*id)
                             || focused_id == Some(*id)
-                            || self.hovered_id == Some(*pin_id)
-                            || (*close_id).is_some_and(|cid| self.hovered_id == Some(cid));
+                            || hovered_id == Some(*pin_id)
+                            || (*close_id).is_some_and(|cid| hovered_id == Some(cid));
                         if row_hovered {
                             // The hover pill bleeds 4 DIP into the side margins so the
                             // icon and the action pills stay aligned with the header.
@@ -4048,8 +3405,10 @@ impl FlyoutState<'_> {
                         let icon_x = app.left as f32;
                         let icon_y = yf + ((app.bottom - y) as f32 - icon_size) * 0.5;
                         if let Some(icon) = icon {
-                            d2d.draw_bgra_icon(
-                                icon,
+                            d2d.draw_bgra_bitmap(
+                                icon.width,
+                                icon.height,
+                                &icon.bgra,
                                 d2d_rect(icon_x, icon_y, icon_x + icon_size, icon_y + icon_size),
                             );
                         } else {
@@ -4087,8 +3446,7 @@ impl FlyoutState<'_> {
                             (*close_id, close, '\u{E711}', false, danger_bg, danger_fg),
                         ] {
                             let Some(btn_id) = btn_id else { continue };
-                            let active =
-                                self.hovered_id == Some(btn_id) || focused_id == Some(btn_id);
+                            let active = hovered_id == Some(btn_id) || focused_id == Some(btn_id);
                             // 30x30 DIP pill: full target width, 6 DIP vertical inset
                             // inside the 42 DIP row. Close uses the danger (red) fill.
                             let inset = sf(6.0);
@@ -4125,10 +3483,10 @@ impl FlyoutState<'_> {
                         let bwf = bw as f32;
                         for (i, (id, label, primary)) in buttons.iter().enumerate() {
                             let left = (pad + (i as i32) * (bw + gap)) as f32;
-                            let hovered = self.hovered_id == Some(*id) || focused_id == Some(*id);
+                            let hovered = hovered_id == Some(*id) || focused_id == Some(*id);
                             let (fill, bd, fg) = if *primary {
                                 (
-                                    if hovered && self.is_dark {
+                                    if hovered && is_dark {
                                         d2d_rgba((0x2b, 0x40, 0x61), 1.0)
                                     } else {
                                         primary_fill
@@ -4198,40 +3556,22 @@ impl FlyoutState<'_> {
                             muted_fg,
                             true,
                         );
-                        let mid_y = yf + sf(29.0);
-                        let tr_h = sf(5.0).max(4.0);
-                        let tr_r = tr_h * 0.5;
-                        d2d.fill_rrect(
+                        let hot = hovered_id == Some(*id)
+                            || dragging_slider.is_some_and(|(sid, _, seek)| sid == *id && seek);
+                        draw_slider_track(
+                            d2d,
                             pad_f,
-                            mid_y - tr_r,
-                            pad_f + content_wf,
-                            mid_y + tr_r,
-                            tr_r,
+                            content_wf,
+                            yf + sf(29.0),
+                            *ratio,
+                            hot,
+                            dpi,
                             track_col,
+                            accent,
+                            accent,
+                            thumb_core,
+                            thumb_halo,
                         );
-                        let fill_w = content_wf * ratio.clamp(0.0, 1.0);
-                        if fill_w > sf(2.0) {
-                            d2d.fill_rrect(
-                                pad_f,
-                                mid_y - tr_r,
-                                pad_f + fill_w,
-                                mid_y + tr_r,
-                                tr_r,
-                                accent,
-                            );
-                        }
-                        let hot = self.hovered_id == Some(*id)
-                            || self
-                                .dragging_slider
-                                .is_some_and(|(sid, _, seek)| sid == *id && seek);
-                        let thumb_r = if hot { sf(6.5) } else { sf(5.5) };
-                        let tx =
-                            (pad_f + fill_w).clamp(pad_f + thumb_r, pad_f + content_wf - thumb_r);
-                        if hot {
-                            d2d.fill_circle(tx, mid_y, thumb_r + sf(3.5), thumb_halo);
-                        }
-                        d2d.fill_circle(tx, mid_y, thumb_r, thumb_core);
-                        d2d.stroke_circle(tx, mid_y, thumb_r, accent, sf(1.6).max(1.2));
                         y += s(44.0);
                     }
                     FlyoutBlock::TextInput {
@@ -4252,8 +3592,8 @@ impl FlyoutState<'_> {
                         );
                         let box_top = yf + sf(18.0);
                         let box_h = sf(32.0);
-                        let editing = self.editing.as_ref().is_some_and(|(eid, _)| eid == id);
-                        let hovered = self.hovered_id == Some(*id);
+                        let editing = editing_state.as_ref().is_some_and(|(eid, _)| eid == id);
+                        let hovered = hovered_id == Some(*id);
                         d2d.fill_rrect_bordered(
                             pad_f,
                             box_top,
@@ -4269,7 +3609,10 @@ impl FlyoutState<'_> {
                             if editing { 1.5 } else { 1.0 },
                         );
                         let shown = if editing {
-                            let buf = self.editing.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
+                            let buf = editing_state
+                                .as_ref()
+                                .map(|(_, b)| b.as_str())
+                                .unwrap_or("");
                             format!("{buf}|")
                         } else {
                             value.clone()
@@ -4434,7 +3777,7 @@ impl FlyoutState<'_> {
                                 let row = (i as i32) / cols;
                                 let left = (pad + col * (bw + gap)) as f32;
                                 let top = (y + row * (bh + gap)) as f32;
-                                let hot = self.hovered_id == Some(*id) || focused_id == Some(*id);
+                                let hot = hovered_id == Some(*id) || focused_id == Some(*id);
                                 let (fill, bd, icon_fg) = if *active {
                                     (sel_fill, sel_stroke, sel_fg)
                                 } else if hot {
@@ -4498,33 +3841,32 @@ impl FlyoutState<'_> {
                     }
                 }
             }
-            if let Some(index) = self.keyboard_index
-                && let Some(t) = self.targets.get(index)
+            if let Some(index) = keyboard_index
+                && let Some(t) = targets.get(index)
             {
                 d2d.stroke_rrect(
                     t.rect.left as f32 + sf(1.0),
-                    (t.rect.top - self.scroll_y) as f32 + sf(1.0),
+                    (t.rect.top - scroll_y) as f32 + sf(1.0),
                     t.rect.right as f32 - sf(1.0),
-                    (t.rect.bottom - self.scroll_y) as f32 - sf(1.0),
+                    (t.rect.bottom - scroll_y) as f32 - sf(1.0),
                     pill_r,
                     accent,
                     1.5,
                 );
             }
             unsafe {
-                d2d.target.PopAxisAlignedClip();
+                d2d.target().PopAxisAlignedClip();
             }
 
             // Thin anti-aliased scrollbar thumb when content overflows.
-            let max_s = self.max_scroll();
-            if max_s > 0 && self.content_h_px > 0 {
-                let track_h = self.viewport_h_px as f32;
+            if max_s > 0 && content_h_px > 0 {
+                let track_h = viewport_h_px as f32;
                 // A work-area-capped viewport can be shorter than the 24 DIP minimum
                 // thumb; `clamp` panics when min > max.
-                let thumb_h = (track_h * track_h / self.content_h_px as f32)
-                    .clamp(sf(24.0).min(track_h), track_h);
-                let ratio = self.scroll_y as f32 / max_s as f32;
-                let thumb_top = self.content_top_px as f32 + (track_h - thumb_h) * ratio;
+                let thumb_h =
+                    (track_h * track_h / content_h_px as f32).clamp(sf(24.0).min(track_h), track_h);
+                let ratio = scroll_y as f32 / max_s as f32;
+                let thumb_top = content_top_px as f32 + (track_h - thumb_h) * ratio;
                 let sb_w = sf(4.0).max(3.0);
                 let sb_left = wf - sf(7.5);
                 d2d.fill_rrect(
@@ -4546,35 +3888,11 @@ impl FlyoutState<'_> {
                     wf,
                     h as f32,
                     sf(8.0),
-                    d2d_rgba(self.border.rgb, 1.0),
-                    (self.border.width_dips * dpi).round(),
+                    d2d_rgba(border.rgb, 1.0),
+                    (border.width_dips * dpi).round(),
                 );
             }
-
-            let end_res = unsafe { d2d.target.EndDraw(None, None) };
-            if end_res.is_err() {
-                *guard = None;
-            }
         });
-
-        if let Some(ref mut fg) = self.dcomp_fg
-            && !bits.is_null()
-        {
-            let byte_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-            let pixels = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), byte_len) };
-            let _ = fg.upload_bgra(w as u32, h as u32, pixels);
-        } else {
-            unsafe {
-                let _ = BitBlt(screen_hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
-            }
-        }
-
-        unsafe {
-            SelectObject(mem_dc, old_bmp);
-            DeleteObject(mem_bmp as _);
-            DeleteDC(mem_dc);
-            EndPaint(self.hwnd, &ps);
-        }
     }
 }
 
