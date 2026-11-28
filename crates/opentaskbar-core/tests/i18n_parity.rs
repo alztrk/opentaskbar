@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1375;
+const EXPECTED_KEY_COUNT: usize = 1416;
 
 const C3_NEW_KEYS: &[&str] = &[
     // Window picker and magnification labels.
@@ -264,7 +264,7 @@ const ENGLISH_IDENTICAL_BUDGET: &[(&str, usize)] = &[
     ("nl-NL", 260),
     ("pl-PL", 232),
     ("pt-BR", 241),
-    ("ru-RU", 23),
+    ("ru-RU", 30),
     ("tr-TR", 21),
     ("uk-UA", 210),
     ("zh-CN", 218),

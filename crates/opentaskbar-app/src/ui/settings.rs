@@ -4,7 +4,7 @@
 //! Includes the full `.otbackup` archive UI, theme editor/gallery, hotkey capture,
 //! dynamic search catalogue and widget panel host (`SettingsWindow` parity).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -15,17 +15,19 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, Application, Bounds, Context, EntityInputHandler, FocusHandle,
     InteractiveElement, KeyBinding, KeyDownEvent, MouseButton, ScrollAnchor, ScrollHandle,
-    SharedString, TitlebarOptions, UTF16Selection, Window, WindowBounds, WindowControlArea,
-    WindowOptions, actions, div, img, prelude::*, px, rgba, size,
+    SharedString, TitlebarOptions, UTF16Selection, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowOptions, actions, div, img, prelude::*, px, rgba, size,
 };
+use opentaskbar_core::dynamic_island;
 use opentaskbar_core::hotkey;
 use opentaskbar_core::i18n::{self as loc, LANGUAGES};
 use opentaskbar_core::paths;
 use opentaskbar_core::settings::{
     self, AiUsageRing, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle,
     DockContentAlignment, DockGapUnit, DockHeightMode, DockPosition, DockSettings, DockSize,
-    DockWidthMode, DynamicIslandVisibilityMode, FisheyeIntensity, MiddleClickAction,
-    StartButtonPlacement, SurfaceBackground, TemperatureUnit, WidgetDensityMode,
+    DockWidthMode, DynamicIslandLayout, DynamicIslandStyle, DynamicIslandVisibilityMode,
+    FisheyeIntensity, MiddleClickAction, StartButtonPlacement, SurfaceBackground, TemperatureUnit,
+    WidgetDensityMode,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Map, Value, json};
@@ -44,25 +46,27 @@ use crate::design::spatial_glass::{
     SpatialGlassConfig, SpatialGlassHost, configure_host_backdrop_window,
 };
 use crate::design::theme::{
-    SurfaceKind, ThemeManager, apply_pack_tokens_to_palette, apply_token_overrides,
+    SurfaceKind, ThemeManager, apply_token_overrides, sync_from_settings, theme_surface_tint,
     token_overrides_from_json,
 };
+use crate::design::tokens::{EDITOR_TOKENS, Rgba as TokenRgba, TokenKind};
+use crate::design::widget_pack::WidgetPackManifest;
 use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec, WidgetIcon};
 use crate::platform::cursor_auth;
-use crate::platform::{
-    country_city, pins, startup_registration, theme_packs, toast, update, win32,
-};
+use crate::platform::theme_packs::{self, ThemePackManifest, ThemePreviewSwatches};
+use crate::platform::{country_city, pins, startup_registration, toast, update, win32};
 use crate::ui::components::{
     ButtonVariant, DropdownOption, DropdownSelectHandler, SearchableDropdownHandlers,
-    SearchableDropdownState, UiTheme, badge, button, card_button, compact_card_button, dim_when,
-    dropdown, icon_action_menu, icon_glyph, icon_glyph_owned, ios_switch, live_slider,
-    searchable_dropdown, section_card, setting_row, setting_row_desc, setting_row_with_id,
-    setting_row_with_id_desc, sidebar_nav_item, stepper,
+    SearchableDropdownState, UiTheme, badge, button, button_with_state, card_button,
+    compact_card_button, dim_when, dropdown, icon_action_menu, icon_glyph, icon_glyph_owned,
+    ios_switch, live_slider, searchable_dropdown, section_card, setting_row, setting_row_desc,
+    setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
 use crate::ui::prompt;
 use crate::ui::settings_search::{self, SettingsSearchEntry};
-use crate::ui::text_input::{TextInput, apply_keystroke, clamp_numeric};
+use crate::ui::text_input::{TextInput, apply_keystroke};
 use crate::widgets;
+use crate::widgets::telemetry::AiAuthSource;
 
 pub const SETTINGS_ARG: &str = "--settings";
 pub const RELOAD_MSG_NAME: &str = "OpenTaskBarReloadSettings";
@@ -92,16 +96,14 @@ fn set_border_thickness(settings: &mut DockSettings, surface: usize, value: f64)
     }
 }
 
-/// Parses `#RRGGBB` / `RRGGBB` into the ARGB `u32` used by GPUI surfaces.
+/// Parses `#RRGGBB` / `RRGGBB` / `#AARRGGBB` / `AARRGGBB` into the `0xRRGGBBAA` `u32`
+/// used by GPUI `rgba()`.
 fn parse_hex_color(value: &str) -> Option<u32> {
     let hex = value.trim().trim_start_matches('#');
-    if hex.len() != 6 {
+    if !matches!(hex.len(), 6 | 8) {
         return None;
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some(((0xffu32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32)
+    TokenRgba::from_hex(value).map(TokenRgba::to_gpui)
 }
 
 /// Settings runs in its own `--settings` process so GPUI memory is released when the window
@@ -109,6 +111,11 @@ fn parse_hex_color(value: &str) -> Option<u32> {
 static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
 
 pub fn spawn_settings_window() {
+    // Single-instance Settings: focus the live window instead of starting a second process.
+    // (The `--settings` process also holds a named mutex, so a racing launch still dedups.)
+    if window_chrome::focus_existing_settings_window() {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         opentaskbar_core::log::error("Cannot open Settings: current_exe failed.");
         return;
@@ -244,6 +251,51 @@ pub(crate) fn category_label(category: &str) -> String {
     }
 }
 
+/// Segoe Fluent Icons: horizontal resize for width, vertical resize for height, and a
+/// spacing bar for gaps, so the Dock layout rows no longer repeat one glyph.
+const DOCK_WIDTH_GLYPH: &str = "\u{E745}";
+const DOCK_HEIGHT_GLYPH: &str = "\u{E746}";
+const DOCK_GAP_GLYPH: &str = "\u{E76F}";
+
+/// Width value stepper only makes sense for explicit pixel/percent sizes.
+fn dock_width_has_value(mode: DockWidthMode) -> bool {
+    matches!(mode, DockWidthMode::Pixels | DockWidthMode::Percent)
+}
+
+/// Height value stepper only makes sense for explicit pixel/percent sizes.
+fn dock_height_has_value(mode: DockHeightMode) -> bool {
+    matches!(mode, DockHeightMode::Pixels | DockHeightMode::Percent)
+}
+
+/// Unit suffix shown on dock size/gap stepper readouts.
+fn unit_suffix(percent: bool) -> &'static str {
+    if percent { "%" } else { " px" }
+}
+
+/// `(min, max, step)` bounds for the dock width stepper, matching `DockSettings::validate`.
+fn dock_width_stepper_bounds(mode: DockWidthMode) -> (i32, i32, i32) {
+    match mode {
+        DockWidthMode::Percent => (10, 100, 1),
+        _ => (100, 5000, 10),
+    }
+}
+
+/// `(min, max, step)` bounds for the dock height stepper, matching `DockSettings::validate`.
+fn dock_height_stepper_bounds(mode: DockHeightMode) -> (i32, i32, i32) {
+    match mode {
+        DockHeightMode::Percent => (2, 25, 1),
+        _ => (24, 400, 2),
+    }
+}
+
+/// `(min, max, step)` bounds for the dock top gap stepper, matching `DockSettings::validate`.
+fn dock_top_gap_stepper_bounds(unit: DockGapUnit) -> (i32, i32, i32) {
+    match unit {
+        DockGapUnit::Percent => (0, 100, 1),
+        DockGapUnit::Pixels => (0, 200, 2),
+    }
+}
+
 /// Glyph table for built-in widgets. Registry metadata does not carry a glyph
 /// field, so the single UI-owned table is the authoritative mapping.
 const WIDGET_GLYPHS: &[(&str, &str)] = &[
@@ -251,7 +303,7 @@ const WIDGET_GLYPHS: &[(&str, &str)] = &[
     ("weather", "\u{E753}"),
     ("dayprogress", "\u{E706}"),
     ("stopwatch", "\u{E916}"),
-    ("countdown", "\u{E917}"),
+    ("countdown", "\u{EA8F}"),
     ("stats", "\u{E9D9}"),
     ("netspeed", "\u{E8AB}"),
     ("battery", "\u{E850}"),
@@ -309,10 +361,10 @@ fn country_flag_path(country: &str) -> Option<SharedString> {
     Some(SharedString::from(fonts::flag_path(locale)))
 }
 
-fn widget_has_inline_settings(id: &str) -> bool {
-    // Single source of truth lives in the widget registry; AI usage widgets no
-    // longer have per-provider account panels.
-    widgets::widget_has_inline_settings(id)
+/// Every widget card in the Settings UI exposes an inline Settings drawer
+/// (widget-specific options, AI auth, density override, Dynamic Island placement, flyout preview).
+fn widget_has_card_drawer(_id: &str) -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +412,535 @@ fn configure_settings_glass_hwnd(window: &Window, is_dark: bool, glass_mode: boo
     let hwnd = win32_handle.hwnd.get() as usize;
     configure_host_backdrop_window(hwnd, is_dark, glass_mode);
     hwnd
+}
+
+/// Outer corner radius (DIP) of the Settings surface: Windows 11 rounds top-level windows
+/// (`DWMWCP_ROUND` = 8 px); Windows 10 has square window corners, so GPUI must not round either.
+fn settings_corner_radius(is_windows_11: bool) -> f32 {
+    if is_windows_11 { 8.0 } else { 0.0 }
+}
+
+/// Exactly one crisp outer border: the Clear Crystal glass host already paints a 1 px optical
+/// rim when Glass is active and its edge glow is not suppressed (OLED glow reduction / 0 glow),
+/// so GPUI only draws its own border when that rim is absent.
+fn settings_root_draws_border(glass_rim_active: bool) -> bool {
+    !glass_rim_active
+}
+
+/// Clamps the fixed 1040×740 dialog so it always fits inside the monitor work area (e.g.
+/// 1080p at 150% leaves only ~1280×672 DIP of work area). `work` is in DIP.
+fn fit_settings_size(work: Option<gpui::Size<gpui::Pixels>>) -> gpui::Size<gpui::Pixels> {
+    const MARGIN: f32 = 16.0;
+    const FLOOR_W: f32 = 360.0;
+    const FLOOR_H: f32 = 320.0;
+    let Some(work) = work else {
+        return size(px(WIN_W), px(WIN_H));
+    };
+    let work_w = f32::from(work.width);
+    let work_h = f32::from(work.height);
+    if !(work_w.is_finite() && work_h.is_finite()) || work_w <= 0.0 || work_h <= 0.0 {
+        return size(px(WIN_W), px(WIN_H));
+    }
+    let w = WIN_W.min((work_w - MARGIN * 2.0).max(FLOOR_W.min(work_w)));
+    let h = WIN_H.min((work_h - MARGIN * 2.0).max(FLOOR_H.min(work_h)));
+    size(px(w.floor()), px(h.floor()))
+}
+
+/// Win32 chrome for the GPUI Settings window: Windows 11 rounded corners without the DWM
+/// accent border, removal of GPUI's phantom non-client skirt, the real OpenTaskbar icon,
+/// screen-space anchor lookup and the cross-process single-instance Settings lookup.
+pub(crate) mod window_chrome {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    use windows_sys::Win32::Foundation::{
+        FARPROC, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    };
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::Shell::{
+        DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, EnumWindows, GWL_STYLE, GetPropW, GetSystemMetrics, GetWindowLongPtrW,
+        GetWindowRect, GetWindowThreadProcessId, HTBORDER, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+        HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL, IMAGE_ICON,
+        IsIconic, IsWindowVisible, IsZoomed, LR_DEFAULTCOLOR, LoadImageW, PostMessageW,
+        RemovePropW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
+        SetPropW, SetWindowPos, ShowWindow, WM_APP, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
+        WM_SETICON, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
+    };
+
+    use crate::design::glass::{GlassBackend, WindowsBackend, WindowsVersion, classify_windows};
+    use crate::platform::win32_helpers::set_window_long_ptr;
+
+    /// Window property that marks the live Settings HWND (cross-process, via a global atom).
+    const SETTINGS_WINDOW_PROP: &str = "OpenTaskbarSettingsWindow";
+    /// Per-session named mutex owned by the running `--settings` process.
+    const SETTINGS_MUTEX_NAME: &str = r"Local\OpenTaskbar.SettingsWindow";
+    /// `SetWindowSubclass` id for the non-client subclass.
+    const NC_SUBCLASS_ID: usize = 0x4F54_4E43; // "OTNC"
+    /// Private message (WM_APP range; GPUI only uses WM_USER-based ids) that re-runs
+    /// WM_NCCALCSIZE from the message loop after the subclass is installed.
+    const WM_APP_REFRAME: u32 = WM_APP + 0x0A11;
+    /// Application icon resource id embedded in `OpenTaskBar.exe` (`1 ICON "OpenTaskBar.ico"`).
+    const APP_ICON_RESOURCE_ID: usize = 1;
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const WCA_ACCENT_POLICY: i32 = 19;
+    const ACCENT_DISABLED: u32 = 0;
+
+    #[repr(C)]
+    struct AccentPolicy {
+        state: u32,
+        flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
+    }
+
+    #[repr(C)]
+    struct WindowCompositionAttributeData {
+        attribute: i32,
+        data: *mut c_void,
+        size: u32,
+    }
+
+    type SetWindowCompositionAttributeFn =
+        unsafe extern "system" fn(HWND, *mut WindowCompositionAttributeData) -> i32;
+
+    // `windows-sys` gates `CreateMutexW` behind `Win32_Security` (not enabled), so bind it
+    // directly; a null `SECURITY_ATTRIBUTES` pointer is all we ever pass.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "CreateMutexW"]
+        fn create_mutex_w(
+            attributes: *const core::ffi::c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> isize;
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// `RtlGetVersion` build >= 22000 (manifest-independent), cached for the process.
+    pub(crate) fn is_windows_11() -> bool {
+        static IS_WIN11: OnceLock<bool> = OnceLock::new();
+        *IS_WIN11.get_or_init(|| {
+            matches!(
+                classify_windows(WindowsBackend.build_number()),
+                WindowsVersion::Windows11OrNewer
+            )
+        })
+    }
+
+    /// GPUI creates non-resizable `WindowKind::Normal` HWNDs with `WS_SYSMENU | WS_MINIMIZEBOX`
+    /// only (neither `WS_POPUP` nor `WS_CAPTION | WS_THICKFRAME`), which causes Windows 11 DWM
+    /// to ignore `DWMWCP_ROUND` and leave sharp 90-degree outer corners. Switching the fixed-size
+    /// borderless dialog to `WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX` (clearing
+    /// `WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME` while preserving `WS_VISIBLE` and
+    /// GPUI's `WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP`) enables native Win11 `DWMWCP_ROUND`
+    /// corner clipping and drop shadow while keeping taskbar, Alt-Tab, minimize, and titlebar
+    /// drag working cleanly just like `menu.rs`.
+    fn ensure_roundable_style(hwnd: HWND) {
+        // SAFETY: reading and updating the style flags of our own live window.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        let updated = (style & !(WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME))
+            | WS_POPUP
+            | WS_SYSMENU
+            | WS_MINIMIZEBOX;
+        if updated != style {
+            set_window_long_ptr(hwnd, GWL_STYLE, updated as isize);
+        }
+    }
+
+    /// Clears GPUI's `ACCENT_ENABLE_TRANSPARENTGRADIENT` (`gradient_color = 0x00000000`),
+    /// which on Windows 11 paints opaque black behind transparent `WS_EX_NOREDIRECTIONBITMAP`
+    /// swapchain pixels outside rounded corners when `HostBackdropBrush` is inactive.
+    fn disable_accent_policy(hwnd: HWND) {
+        let module_name = wide("user32.dll");
+        // SAFETY: `user32.dll` is loaded in this process and `SetWindowCompositionAttribute`
+        // is an ASCII null-terminated export name.
+        let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+        if module.is_null() {
+            return;
+        }
+        let address: FARPROC =
+            unsafe { GetProcAddress(module, c"SetWindowCompositionAttribute".as_ptr().cast()) };
+        let Some(address) = address else {
+            return;
+        };
+        // SAFETY: matches the undocumented `SetWindowCompositionAttribute` Win32 ABI.
+        let function: SetWindowCompositionAttributeFn = unsafe { std::mem::transmute(address) };
+        let mut policy = AccentPolicy {
+            state: ACCENT_DISABLED,
+            flags: 0,
+            gradient_color: 0,
+            animation_id: 0,
+        };
+        let mut data = WindowCompositionAttributeData {
+            attribute: WCA_ACCENT_POLICY,
+            data: (&mut policy as *mut AccentPolicy).cast(),
+            size: size_of::<AccentPolicy>() as u32,
+        };
+        unsafe {
+            let _ = function(hwnd, &mut data);
+        }
+    }
+
+    /// Applies Windows 11 rounded corners, suppresses the DWM border, and extends the glass
+    /// frame across the whole client area so transparent swapchain corners never turn black.
+    fn apply_dwm_chrome(hwnd: HWND) {
+        if !is_windows_11() {
+            return;
+        }
+        let corner = DWMWCP_ROUND;
+        let border = DWMWA_COLOR_NONE;
+        // Sheet-of-glass margins: DWM never paints opaque black behind the anti-aliased
+        // rounded edges, even when the GPUI surface is Solid / True Black.
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        // SAFETY: plain DWM attribute writes on a live HWND with correctly sized values.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const i32).cast(),
+                size_of::<i32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
+    }
+
+    /// GPUI's `WM_NCCALCSIZE` handler insets `frame_thickness` (~8 px) on the left, right and
+    /// bottom even for non-resizable windows, exposing the class' black background brush as a
+    /// sharp skirt around the rounded surface. Returning 0 without touching `rgrc[0]` (when not
+    /// maximized) makes the client area cover the full window rect; `WM_NCHITTEST` suppresses
+    /// `WS_THICKFRAME` resize borders so the dialog stays fixed-size.
+    unsafe extern "system" fn nc_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        match msg {
+            // SAFETY: `hwnd` is a live window on this thread.
+            WM_NCCALCSIZE if wparam != 0 && unsafe { IsZoomed(hwnd) } == 0 => 0,
+            WM_NCHITTEST => {
+                // SAFETY: forwarding to GPUI's window proc first preserves HTCAPTION drag
+                // regions while stripping resize edge hit-tests introduced by WS_THICKFRAME.
+                let hit = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                if matches!(
+                    hit as u32,
+                    HTLEFT
+                        | HTRIGHT
+                        | HTTOP
+                        | HTTOPLEFT
+                        | HTTOPRIGHT
+                        | HTBOTTOM
+                        | HTBOTTOMLEFT
+                        | HTBOTTOMRIGHT
+                        | HTBORDER
+                ) {
+                    HTCLIENT as LRESULT
+                } else {
+                    hit
+                }
+            }
+            WM_APP_REFRAME => {
+                // Runs from the Win32 message loop (outside any GPUI `App` borrow), so the
+                // WM_SIZE this triggers reaches GPUI's resize callback and the viewport grows
+                // to the full window rect. Re-apply DWM attributes right after SWP_FRAMECHANGED
+                // so DWM picks up `DWMWCP_ROUND` against the updated `GWL_STYLE`.
+                // SAFETY: frame-only SetWindowPos on our own live window.
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                apply_dwm_chrome(hwnd);
+                0
+            }
+            WM_NCDESTROY => {
+                let prop = wide(SETTINGS_WINDOW_PROP);
+                // SAFETY: `hwnd` is still valid during WM_NCDESTROY; removing a missing
+                // property / our own subclass is a harmless no-op.
+                unsafe {
+                    RemovePropW(hwnd, prop.as_ptr());
+                    RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), id);
+                    DefSubclassProc(hwnd, msg, wparam, lparam)
+                }
+            }
+            // SAFETY: forwarding to the next handler in the subclass chain.
+            _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    /// Installs the non-client subclass once per HWND (must run on the window's UI thread).
+    fn install_nc_subclass(hwnd: HWND) {
+        let mut ref_data = 0usize;
+        // SAFETY: `hwnd` is a live window owned by the calling (GPUI) thread.
+        unsafe {
+            if GetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, &mut ref_data) != 0 {
+                return;
+            }
+            if SetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0) == 0 {
+                return;
+            }
+            // Re-run WM_NCCALCSIZE once (SWP_FRAMECHANGED) so the full-window client rect takes
+            // effect. It is posted rather than called here: this runs inside GPUI's view
+            // construction / render (the `App` is borrowed), where the synchronous WM_SIZE
+            // could not update GPUI's viewport and the layout would stay at the inset size.
+            PostMessageW(hwnd, WM_APP_REFRAME, 0, 0);
+        }
+    }
+
+    /// Applies the outer window chrome. Safe to call repeatedly (every glass transition):
+    /// `configure_host_backdrop_window` resets the DWM frame margins, so this must run after it.
+    pub(crate) fn apply_window_chrome(hwnd: usize) {
+        if hwnd == 0 {
+            return;
+        }
+        let hwnd = hwnd as HWND;
+        disable_accent_policy(hwnd);
+        if is_windows_11() {
+            ensure_roundable_style(hwnd);
+        }
+        install_nc_subclass(hwnd);
+        // Windows 10: square corners, no DWM border attribute; GPUI uses radius 0.
+        apply_dwm_chrome(hwnd);
+    }
+
+    /// Sets the embedded OpenTaskbar icon (resource id 1) as the window's big and small icon.
+    /// A missing resource is a silent no-op (the GPUI class icon stays).
+    pub(crate) fn apply_app_icon(hwnd: usize) {
+        if hwnd == 0 {
+            return;
+        }
+        let hwnd = hwnd as HWND;
+        // SAFETY: loading an icon resource from our own module and sending it to our window.
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            if module.is_null() {
+                return;
+            }
+            let dpi = GetDpiForWindow(hwnd);
+            let metric = |index| {
+                if dpi > 0 {
+                    GetSystemMetricsForDpi(index, dpi)
+                } else {
+                    GetSystemMetrics(index)
+                }
+            };
+            for (which, cx, cy) in [
+                (ICON_BIG, metric(SM_CXICON), metric(SM_CYICON)),
+                (ICON_SMALL, metric(SM_CXSMICON), metric(SM_CYSMICON)),
+            ] {
+                // MAKEINTRESOURCEW(1). Not LR_SHARED: the shared cache ignores the requested
+                // size, which would hand the big icon to ICON_SMALL.
+                let icon = LoadImageW(
+                    module,
+                    APP_ICON_RESOURCE_ID as *const u16,
+                    IMAGE_ICON,
+                    cx,
+                    cy,
+                    LR_DEFAULTCOLOR,
+                );
+                if icon.is_null() {
+                    continue;
+                }
+                SendMessageW(hwnd, WM_SETICON, which as WPARAM, icon as LPARAM);
+            }
+        }
+    }
+
+    /// Marks `hwnd` as the live Settings window so other processes can find and focus it.
+    pub(crate) fn mark_settings_window(hwnd: usize) {
+        if hwnd == 0 {
+            return;
+        }
+        let prop = wide(SETTINGS_WINDOW_PROP);
+        // SAFETY: the property is removed again in `nc_subclass_proc` on WM_NCDESTROY.
+        unsafe {
+            SetPropW(
+                hwnd as HWND,
+                prop.as_ptr(),
+                std::ptr::dangling_mut::<core::ffi::c_void>(),
+            );
+        }
+    }
+
+    /// Finds a live Settings window owned by another process.
+    fn find_settings_window() -> Option<HWND> {
+        struct Search {
+            prop: Vec<u16>,
+            own_pid: u32,
+            found: HWND,
+        }
+        unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
+            // SAFETY: `lparam` points at the live `Search` for the duration of EnumWindows.
+            unsafe {
+                let search = &mut *(lparam as *mut Search);
+                if GetPropW(hwnd, search.prop.as_ptr()).is_null() {
+                    return 1;
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid == search.own_pid {
+                    return 1;
+                }
+                search.found = hwnd;
+            }
+            0
+        }
+        let mut search = Search {
+            prop: wide(SETTINGS_WINDOW_PROP),
+            // SAFETY: trivial process id query.
+            own_pid: unsafe { GetCurrentProcessId() },
+            found: std::ptr::null_mut(),
+        };
+        // SAFETY: the callback only touches `search`, which outlives the enumeration.
+        unsafe {
+            EnumWindows(Some(visit), &mut search as *mut Search as LPARAM);
+        }
+        (!search.found.is_null()).then_some(search.found)
+    }
+
+    /// Restores (if minimized) and focuses an existing Settings window. Returns `true` when one
+    /// was found, in which case no second Settings process/window must be created.
+    pub(crate) fn focus_existing_settings_window() -> bool {
+        let Some(hwnd) = find_settings_window() else {
+            return false;
+        };
+        // SAFETY: plain show/focus calls on a window that was alive during enumeration;
+        // a window that closed in between makes these calls fail harmlessly.
+        unsafe {
+            if IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+        true
+    }
+
+    /// Per-session ownership of the Settings window, held for the `--settings` process lifetime.
+    pub(crate) struct SettingsInstanceLock {
+        _handle: isize,
+    }
+
+    /// Acquires the Settings single-instance lock. `None` means another `--settings` process
+    /// already owns it; that process' window has then been focused (it may still be starting,
+    /// so the lookup is retried briefly).
+    pub(crate) fn acquire_settings_instance() -> Option<SettingsInstanceLock> {
+        let name = wide(SETTINGS_MUTEX_NAME);
+        // SAFETY: named mutex with a NUL-terminated name; the handle stays open (and owned) for
+        // the rest of the process, released by the OS on exit.
+        let (handle, already_exists) = unsafe {
+            let handle = create_mutex_w(std::ptr::null(), 0, name.as_ptr());
+            (handle, GetLastError() == ERROR_ALREADY_EXISTS)
+        };
+        if handle == 0 {
+            // Cannot coordinate: fall back to the window lookup only.
+            return if focus_existing_settings_window() {
+                None
+            } else {
+                Some(SettingsInstanceLock { _handle: 0 })
+            };
+        }
+        if !already_exists {
+            return Some(SettingsInstanceLock { _handle: handle });
+        }
+        for _ in 0..30 {
+            if focus_existing_settings_window() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Keep the handle open: closing it would let a racing third launch believe it owns
+        // Settings. It is released when this (exiting) process ends.
+        None
+    }
+
+    /// Returns `(center_x, anchor_y)` in screen pixels for the given HWND so flyout previews
+    /// open centered over the Settings window on its current monitor.
+    pub(crate) fn window_flyout_anchor(hwnd: usize) -> Option<(i32, i32)> {
+        if hwnd == 0 {
+            return None;
+        }
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        // SAFETY: querying the live window rectangle into a stack-allocated `RECT`.
+        if unsafe { GetWindowRect(hwnd as HWND, &mut rect) } == 0 {
+            return None;
+        }
+        let cx = (rect.left + rect.right) / 2;
+        let anchor_y = rect.top + ((rect.bottom - rect.top) * 3) / 4;
+        Some((cx, anchor_y))
+    }
+
+    /// Primary monitor work area in DIP, derived from GPUI's logical display bounds and the
+    /// physical monitor/work rectangles (so taskbars and docks are excluded).
+    pub(crate) fn primary_work_area(
+        display: gpui::Bounds<gpui::Pixels>,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        // SAFETY: querying the primary monitor into a correctly sized MONITORINFO.
+        let ok = unsafe {
+            let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            !monitor.is_null() && GetMonitorInfoW(monitor, &mut info) != 0
+        };
+        if !ok {
+            return None;
+        }
+        let mon_w = (info.rcMonitor.right - info.rcMonitor.left) as f32;
+        let mon_h = (info.rcMonitor.bottom - info.rcMonitor.top) as f32;
+        let dip_w = f32::from(display.size.width);
+        let dip_h = f32::from(display.size.height);
+        if mon_w <= 0.0 || mon_h <= 0.0 || dip_w <= 0.0 || dip_h <= 0.0 {
+            return None;
+        }
+        let sx = dip_w / mon_w;
+        let sy = dip_h / mon_h;
+        let left =
+            f32::from(display.origin.x) + (info.rcWork.left - info.rcMonitor.left) as f32 * sx;
+        let top = f32::from(display.origin.y) + (info.rcWork.top - info.rcMonitor.top) as f32 * sy;
+        let width = (info.rcWork.right - info.rcWork.left) as f32 * sx;
+        let height = (info.rcWork.bottom - info.rcWork.top) as f32 * sy;
+        Some(gpui::Bounds {
+            origin: gpui::point(gpui::px(left), gpui::px(top)),
+            size: gpui::size(gpui::px(width), gpui::px(height)),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +1169,14 @@ struct BackupPreview {
     settings: Option<DockSettings>,
     theme_files: usize,
     pinned_apps: usize,
+}
+
+struct ThemeCardSpec {
+    id: Option<String>,
+    title: String,
+    is_built_in: bool,
+    swatches: ThemePreviewSwatches,
+    preserve_original_icons: bool,
 }
 
 fn inspect_backup(bytes: &[u8]) -> BackupPreview {
@@ -871,6 +1460,163 @@ fn gradient_stop_at(position: f64, len: usize) -> usize {
     ((position * len as f64).round() as usize).min(len.saturating_sub(1))
 }
 
+/// Fallback city shown when no weather city is configured, spelled the way the UI language
+/// writes it ("İstanbul" in Turkish).
+fn weather_fallback_city_for(language: &str) -> &'static str {
+    if language.starts_with("tr") {
+        "İstanbul"
+    } else {
+        "Istanbul"
+    }
+}
+
+fn weather_fallback_city() -> &'static str {
+    weather_fallback_city_for(loc::language())
+}
+
+/// Short clock-format label for widget summaries, derived from the existing
+/// `ClockFormat24Hour` / `ClockFormat12Hour` strings by dropping their "(14:32)" example.
+fn short_clock_format_label(full: &str) -> &str {
+    full.split(" (").next().unwrap_or(full).trim()
+}
+
+/// True when the clock's date line already carries the weekday (e.g. "Cum 27 Kas"),
+/// so a separate weekday line would repeat it.
+fn clock_weekday_is_redundant(date: &str, weekday: &str) -> bool {
+    let weekday = weekday.trim();
+    !weekday.is_empty() && date.split_whitespace().any(|word| word == weekday)
+}
+
+/// Circular progress ring drawn via GPUI `canvas` + `PathBuilder`, matching DComp's arc meters.
+fn progress_ring(
+    size_px: f32,
+    stroke_px: f32,
+    ratio: f32,
+    track_color: u32,
+    fill_color: u32,
+) -> impl IntoElement {
+    let clamped = ratio.clamp(0.0, 1.0);
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5;
+            let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
+            let rad = ((f32::from(bounds.size.width).min(f32::from(bounds.size.height))
+                - stroke_px)
+                * 0.5)
+                .max(1.0);
+            let arc = |start: f32, end: f32| {
+                let mut pb = gpui::PathBuilder::stroke(px(stroke_px));
+                pb.move_to(gpui::point(
+                    px(cx + start.cos() * rad),
+                    px(cy + start.sin() * rad),
+                ));
+                pb.arc_to(
+                    gpui::point(px(rad), px(rad)),
+                    px(0.0),
+                    (end - start).abs() > std::f32::consts::PI,
+                    true,
+                    gpui::point(px(cx + end.cos() * rad), px(cy + end.sin() * rad)),
+                );
+                pb.build()
+            };
+            let top = -std::f32::consts::FRAC_PI_2;
+            let bot = std::f32::consts::FRAC_PI_2;
+            if let Ok(path) = arc(top, bot) {
+                window.paint_path(path, rgba(track_color));
+            }
+            if let Ok(path) = arc(bot, top + std::f32::consts::TAU) {
+                window.paint_path(path, rgba(track_color));
+            }
+            if clamped >= 0.995 {
+                if let Ok(path) = arc(top, bot) {
+                    window.paint_path(path, rgba(fill_color));
+                }
+                if let Ok(path) = arc(bot, top + std::f32::consts::TAU) {
+                    window.paint_path(path, rgba(fill_color));
+                }
+            } else if clamped > 0.005 {
+                let end = top + clamped * std::f32::consts::TAU;
+                if let Ok(path) = arc(top, end) {
+                    window.paint_path(path, rgba(fill_color));
+                }
+            }
+        },
+    )
+    .size(px(size_px))
+    .flex_shrink_0()
+}
+
+/// Crisp tinted monogram badge for AI Usage preview cards.
+fn ai_brand_badge(provider_id: &str, brand_color: (u8, u8, u8), is_dark: bool) -> gpui::Div {
+    let monogram = match provider_id {
+        "aiusage_claude" => "C",
+        "aiusage_codex" => "Cx",
+        "aiusage_cursor" => "Cu",
+        "aiusage_opencode" => "OC",
+        "aiusage_copilot" => "Co",
+        "aiusage_deepseek" => "DS",
+        "aiusage_openrouter" => "OR",
+        _ => "AI",
+    };
+    let tint = if !is_dark && brand_color == (0xf3, 0xf4, 0xf6) {
+        (0x3f, 0x3f, 0x46)
+    } else {
+        brand_color
+    };
+    div()
+        .size(px(20.0))
+        .rounded(px(6.0))
+        .bg(rgba(crate::design::gpui_rgba(tint, 0x26)))
+        .border_1()
+        .border_color(rgba(crate::design::gpui_rgba(tint, 0x7a)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .child(
+            div()
+                .text_size(px(fonts::scaled_size(9.5)))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgba(crate::design::gpui_rgba(tint, 0xff)))
+                .child(monogram),
+        )
+}
+
+/// Reads a widget density override using its canonical PascalCase key (`"Clock"`, `"Weather"`,
+/// `"SystemStats"`), falling back to any legacy casing stored before canonicalization.
+fn read_density_override(settings: &DockSettings, canonical_id: &str) -> WidgetDensityMode {
+    settings
+        .widget_density_overrides
+        .get(canonical_id)
+        .copied()
+        .or_else(|| {
+            settings
+                .widget_density_overrides
+                .iter()
+                .find(|(k, _)| settings::canonical_widget_setting_id(k) == canonical_id)
+                .map(|(_, &v)| v)
+        })
+        .unwrap_or(WidgetDensityMode::Auto)
+}
+
+/// Persists a widget density override under its canonical PascalCase key, removing any stale
+/// legacy-cased entry and omitting `Auto` entries so the map stays clean.
+fn write_density_override(
+    settings: &mut DockSettings,
+    canonical_id: &str,
+    mode: WidgetDensityMode,
+) {
+    settings
+        .widget_density_overrides
+        .retain(|k, _| settings::canonical_widget_setting_id(k) != canonical_id);
+    if mode != WidgetDensityMode::Auto {
+        settings
+            .widget_density_overrides
+            .insert(canonical_id.to_owned(), mode);
+    }
+}
+
 /// Translates a persisted dimension option while keeping its stored value untouched.
 fn option_label(value: &str) -> String {
     match value {
@@ -1006,17 +1752,70 @@ fn brush_to_json(spec: &BrushSpec) -> Value {
     }
 }
 
-/// Persists tokens under `ThemeTokens` **and** applies them to the live palette.
-///
-/// Editor overrides win, then the active theme pack's tokens are painted on top of the
-/// base palette (WS-5). Without the second call a saved token changed JSON but the
-/// visible colours stayed stale.
+/// Persists manual token overrides under `extra["ThemeTokens"]` and applies them to the
+/// highest `overrides` layer without disturbing the active theme-pack layer.
 fn persist_theme_tokens(settings: &mut DockSettings, map: Map<String, Value>) {
     apply_token_overrides(token_overrides_from_json(&map));
-    apply_pack_tokens_to_palette(token_overrides_from_json(&map));
-    settings
-        .extra
-        .insert("ThemeTokens".to_owned(), Value::Object(map));
+    if map.is_empty() {
+        settings.extra.remove("ThemeTokens");
+    } else {
+        settings
+            .extra
+            .insert("ThemeTokens".to_owned(), Value::Object(map));
+    }
+}
+
+/// Maps an editor token key into one of the `THEME_TOKEN_CATEGORIES` indices so the
+/// Theme Studio advanced token inspector filters all 51+ `EDITOR_TOKENS` accurately.
+fn token_category_index(key: &str) -> usize {
+    let lower = key.to_ascii_lowercase();
+    if lower.contains("text") || lower.contains("font") {
+        1 // ThemeCategoryText
+    } else if lower.contains("accent")
+        || lower.contains("indicator")
+        || lower.contains("notification")
+        || lower.contains("logo")
+        || lower.contains("blue")
+        || lower.contains("green")
+        || lower.contains("warning")
+        || lower.contains("danger")
+    {
+        2 // ThemeCategoryAccents
+    } else if lower.contains("border") || lower.contains("stroke") || lower.contains("divider") {
+        3 // ThemeCategoryBorders
+    } else if lower.starts_with("widget") || lower.starts_with("dockwidget") {
+        4 // Widgets
+    } else if lower.contains("shadow")
+        || lower.contains("glow")
+        || lower.contains("highlight")
+        || lower.contains("sheen")
+        || lower.contains("bevel")
+        || lower.contains("scrim")
+    {
+        5 // ThemeCategoryEffects
+    } else if lower.contains("material")
+        || lower.contains("surface")
+        || lower.contains("background")
+        || lower.contains("sidebar")
+        || lower.contains("control")
+        || lower.contains("tile")
+    {
+        0 // SectionSurfaces
+    } else {
+        6 // ThemeSectionAdvanced
+    }
+}
+
+/// Filters `EDITOR_TOKENS` to those belonging to `category_index` in `THEME_TOKEN_CATEGORIES`.
+fn editor_tokens_for_category(category_index: usize) -> Vec<&'static str> {
+    EDITOR_TOKENS
+        .iter()
+        .filter(|tok| {
+            matches!(tok.kind, TokenKind::Brush | TokenKind::Color)
+                && token_category_index(tok.key) == category_index
+        })
+        .map(|tok| tok.key)
+        .collect()
 }
 
 /// Resolves the country for a persisted `"City, Country"` string, falling back
@@ -1057,6 +1856,13 @@ fn notify_docks_reload() {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveTextField {
+    Search,
+    CustomThemeName,
+    AiSecret(&'static str),
+}
+
 struct SettingsView {
     page: SettingsPage,
     focus: FocusHandle,
@@ -1065,6 +1871,19 @@ struct SettingsView {
     search_text: String,
     search_selection: Range<usize>,
     search_focus: FocusHandle,
+    /// Custom theme name input inside Theme Studio (routed through `EntityInputHandler`).
+    custom_theme_name: String,
+    custom_theme_name_selection: Range<usize>,
+    custom_theme_name_focus: FocusHandle,
+    /// Collapsible advanced token inspector in Theme Studio.
+    advanced_tokens_open: bool,
+    /// Per-provider API key/token input buffers & focus handles (masked in UI, never persisted
+    /// to settings.json — written only to Windows DPAPI and immediately cleared).
+    ai_secret_buffers: HashMap<&'static str, String>,
+    ai_secret_selections: HashMap<&'static str, Range<usize>>,
+    ai_secret_focus: HashMap<&'static str, FocusHandle>,
+    ai_test_status: HashMap<&'static str, (bool, String)>,
+    ai_testing: HashSet<&'static str>,
     settings: DockSettings,
     widget_runtime: widgets::WidgetRuntime,
     widget_filter: &'static str,
@@ -1080,7 +1899,7 @@ struct SettingsView {
     /// Fresh anchor created for each search jump; attached to `highlight_row` during render
     /// and consumed once `ScrollAnchor::scroll_to` has been scheduled.
     scroll_anchor: Option<ScrollAnchor>,
-    save_failed: bool,
+    save_error: Option<String>,
     /// Cached installed Windows font families for the in-app searchable font dropdown.
     installed_fonts: Vec<String>,
     font_picker: SearchableDropdownState,
@@ -1089,8 +1908,10 @@ struct SettingsView {
     theme_status: String,
     weather_suggestions: Vec<widgets::telemetry::GeoLocationMatch>,
     weather_search_status: String,
-    /// A burst of slider/toggle events collapses into one disk write + dock broadcast.
+    /// True trailing-edge debounce: every edit bumps `save_generation` and only the latest
+    /// timer flushes to disk + broadcasts reload.
     save_pending: bool,
+    save_generation: u64,
     update_status: String,
     update_release: Option<update::Release>,
     // Search (reference SettingsWindow.Search.cs parity)
@@ -1101,7 +1922,6 @@ struct SettingsView {
     // Settings features
     backup_status: String,
     backup_preview: Option<BackupPreview>,
-    hotkey_capture: Option<&'static str>,
     weather_country: String,
     /// City list for the selected country, refreshed from `country_city`.
     weather_cities: Vec<String>,
@@ -1115,7 +1935,6 @@ struct SettingsView {
     weather_auto_applied: bool,
     theme_category: usize,
     token_name: String,
-    token_value: String,
     token_apply_status: String,
     // Shared Figma-style color & gradient brush picker modal state.
     brush_picker_open: bool,
@@ -1130,6 +1949,7 @@ struct SettingsView {
     brush_hex: String,
     /// Clear Crystal optical glass host (`topmost = false`) underneath GPUI's DComp swapchain.
     spatial_glass: Option<SpatialGlassHost>,
+    last_glass_hwnd_state: Option<(bool, bool)>,
     ai_status: String,
 }
 
@@ -1148,6 +1968,8 @@ enum BrushPickerTarget {
 impl SettingsView {
     fn new(settings: DockSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         fonts::apply_settings(&settings);
+        let _ = theme_packs::install_bundled();
+        sync_from_settings(&settings);
         let focus = cx.focus_handle();
         focus.focus(window);
         let mut widget_runtime = widgets::WidgetRuntime::default();
@@ -1157,26 +1979,37 @@ impl SettingsView {
             AppTheme::Light => false,
             AppTheme::System => win32::read_system_is_dark(),
         };
+        let (tint_rgb, rim_rgb) = theme_surface_tint("SettingsBackground", "AccentBrush");
         let glass_cfg = SpatialGlassConfig::from_settings(
             &settings,
             settings.settings_background,
             settings.settings_opacity,
             is_dark,
             false,
-        );
+        )
+        .with_theme_tint(tint_rgb, rim_rgb);
         let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+        // Rounded Win11 chrome / no phantom NC skirt (after the backdrop margins are set),
+        // the real app icon and the cross-process single-instance marker.
+        window_chrome::apply_window_chrome(hwnd);
+        window_chrome::apply_app_icon(hwnd);
+        window_chrome::mark_settings_window(hwnd);
+        let initial_glass_hwnd_state = Some((is_dark, glass_cfg.enabled));
         let mut spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
         if let Some(ref mut g) = spatial_glass {
             let dpi = win32::dpi_scale(hwnd);
             let vp = window.viewport_size();
-            let w_px = (f32::from(vp.width) * dpi).max(WIN_W * dpi);
-            let h_px = (f32::from(vp.height) * dpi).max(WIN_H * dpi);
-            g.sync_rect(0.0, 0.0, w_px, h_px, (8.0 * dpi).round(), dpi, 0.0, 0.0);
+            // The window may be clamped below WIN_W×WIN_H to fit the work area: use the
+            // real viewport so the glass rim matches the visible window edge.
+            let w_px = (f32::from(vp.width) * dpi).max(2.0);
+            let h_px = (f32::from(vp.height) * dpi).max(2.0);
+            let radius_px = (settings_corner_radius(window_chrome::is_windows_11()) * dpi).round();
+            g.sync_rect(0.0, 0.0, w_px, h_px, radius_px, dpi, 0.0, 0.0);
         }
         let installed_fonts = fonts::installed_fonts().to_vec();
         let saved_city = settings.weather_city.clone();
         let weather_city = if saved_city.trim().is_empty() {
-            "Istanbul".to_owned()
+            weather_fallback_city().to_owned()
         } else {
             saved_city.clone()
         };
@@ -1187,18 +2020,38 @@ impl SettingsView {
             .iter()
             .position(|c| c.eq_ignore_ascii_case(city_name))
             .unwrap_or(0);
-        // Apply saved editor tokens to the live palette on startup, then paint the
-        // active theme pack on top (WS-5 palette hook).
-        crate::design::theme::apply_saved_token_overrides(&settings);
-        let accent = crate::design::palette(is_dark).accent;
+        let accent = crate::design::active_palette(is_dark).accent;
         let brush_color = crate::design::tokens::Rgba::from_rgb(accent.0, accent.1, accent.2);
         let (startup_enabled, startup_error) = startup_registration::read();
+        let mut ai_secret_focus = HashMap::new();
+        for meta in widgets::telemetry::AI_PROVIDERS {
+            ai_secret_focus.insert(meta.id, cx.focus_handle());
+        }
+        let initial_theme_name = if !settings.theme_pack.trim().is_empty()
+            && !theme_packs::is_built_in(&settings.theme_pack)
+        {
+            theme_packs::ThemePack::load(&Self::themes_root().join(&settings.theme_pack))
+                .map(|p| p.display_name().to_owned())
+                .unwrap_or_else(|_| settings.theme_pack.clone())
+        } else {
+            String::new()
+        };
+        let initial_theme_name_len = initial_theme_name.encode_utf16().count();
         let mut view = Self {
             page: SettingsPage::Dock,
             focus,
             search_text: String::new(),
             search_selection: 0..0,
             search_focus: cx.focus_handle(),
+            custom_theme_name: initial_theme_name,
+            custom_theme_name_selection: initial_theme_name_len..initial_theme_name_len,
+            custom_theme_name_focus: cx.focus_handle(),
+            advanced_tokens_open: false,
+            ai_secret_buffers: HashMap::new(),
+            ai_secret_selections: HashMap::new(),
+            ai_secret_focus,
+            ai_test_status: HashMap::new(),
+            ai_testing: HashSet::new(),
             settings,
             widget_runtime,
             widget_filter: "All",
@@ -1209,7 +2062,7 @@ impl SettingsView {
             scroll_handle: ScrollHandle::new(),
             highlight_row: None,
             scroll_anchor: None,
-            save_failed: false,
+            save_error: None,
             installed_fonts,
             font_picker: SearchableDropdownState::new(),
             font_picker_focus: cx.focus_handle(),
@@ -1218,6 +2071,7 @@ impl SettingsView {
             weather_suggestions: Vec::new(),
             weather_search_status: String::new(),
             save_pending: false,
+            save_generation: 0,
             update_status: String::new(),
             update_release: None,
             widget_panel: None,
@@ -1225,7 +2079,6 @@ impl SettingsView {
             flyout_preview: true,
             backup_status: String::new(),
             backup_preview: None,
-            hotkey_capture: None,
             weather_country,
             weather_cities,
             weather_city_index,
@@ -1235,8 +2088,7 @@ impl SettingsView {
             city_picker_focus: cx.focus_handle(),
             weather_auto_applied: false,
             theme_category: 0,
-            token_name: String::new(),
-            token_value: String::new(),
+            token_name: "AccentBrush".to_owned(),
             token_apply_status: loc::t("TokenApplyHint"),
             brush_picker_open: false,
             brush_picker_target: BrushPickerTarget::ThemeToken,
@@ -1250,6 +2102,7 @@ impl SettingsView {
             brush_selected_stop: 0,
             brush_hex: brush_color.hex(),
             spatial_glass,
+            last_glass_hwnd_state: initial_glass_hwnd_state,
             ai_status: loc::t(if cursor_auth::has_session() {
                 "AiCursorSignedIn"
             } else {
@@ -1262,8 +2115,145 @@ impl SettingsView {
         view
     }
 
-    fn search_utf16_len(&self) -> usize {
-        self.search_text.encode_utf16().count()
+    fn focused_text_field(&self, window: &Window) -> ActiveTextField {
+        if self.custom_theme_name_focus.is_focused(window) {
+            return ActiveTextField::CustomThemeName;
+        }
+        for (&provider_id, handle) in &self.ai_secret_focus {
+            if handle.is_focused(window) {
+                return ActiveTextField::AiSecret(provider_id);
+            }
+        }
+        ActiveTextField::Search
+    }
+
+    fn text_field_ref(&self, field: ActiveTextField) -> (&str, Range<usize>) {
+        match field {
+            ActiveTextField::Search => (self.search_text.as_str(), self.search_selection.clone()),
+            ActiveTextField::CustomThemeName => (
+                self.custom_theme_name.as_str(),
+                self.custom_theme_name_selection.clone(),
+            ),
+            ActiveTextField::AiSecret(pid) => {
+                let text = self
+                    .ai_secret_buffers
+                    .get(pid)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let len = text.encode_utf16().count();
+                let sel = self
+                    .ai_secret_selections
+                    .get(pid)
+                    .cloned()
+                    .unwrap_or(len..len);
+                (text, sel)
+            }
+        }
+    }
+
+    fn replace_text_field_range(
+        &mut self,
+        field: ActiveTextField,
+        range: Range<usize>,
+        text: &str,
+    ) {
+        // Strip newlines from single-line inputs (e.g. pasted API keys or theme names).
+        let clean: String = text
+            .chars()
+            .filter(|ch| !matches!(ch, '\r' | '\n'))
+            .collect();
+        let (buf, sel) = match field {
+            ActiveTextField::Search => (&mut self.search_text, &mut self.search_selection),
+            ActiveTextField::CustomThemeName => (
+                &mut self.custom_theme_name,
+                &mut self.custom_theme_name_selection,
+            ),
+            ActiveTextField::AiSecret(pid) => {
+                let buf = self.ai_secret_buffers.entry(pid).or_default();
+                let len = buf.encode_utf16().count();
+                let sel = self.ai_secret_selections.entry(pid).or_insert(len..len);
+                (buf, sel)
+            }
+        };
+        let len = buf.encode_utf16().count();
+        let start = range.start.min(len);
+        let end = range.end.clamp(start, len);
+        let start_byte = Self::byte_index_for_utf16(buf, start);
+        let end_byte = Self::byte_index_for_utf16(buf, end);
+
+        let mut next = String::with_capacity(buf.len() + clean.len());
+        next.push_str(&buf[..start_byte]);
+        next.push_str(&clean);
+        next.push_str(&buf[end_byte..]);
+
+        let cursor = start + clean.encode_utf16().count();
+        *buf = next;
+        *sel = cursor..cursor;
+        if field == ActiveTextField::Search {
+            // Any edit means the user is searching again; the previous jump marker is stale.
+            self.highlight_row = None;
+            self.scroll_anchor = None;
+        }
+    }
+
+    fn handle_text_field_key_down(
+        &mut self,
+        field: ActiveTextField,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = event.keystroke.key.as_str();
+        if event.keystroke.modifiers.control {
+            if key.eq_ignore_ascii_case("v") {
+                if let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    let (_, sel) = self.text_field_ref(field);
+                    self.replace_text_field_range(field, sel, &pasted);
+                    cx.notify();
+                }
+                return true;
+            }
+            if key.eq_ignore_ascii_case("a") {
+                let (text, _) = self.text_field_ref(field);
+                let len = text.encode_utf16().count();
+                match field {
+                    ActiveTextField::Search => self.search_selection = 0..len,
+                    ActiveTextField::CustomThemeName => self.custom_theme_name_selection = 0..len,
+                    ActiveTextField::AiSecret(pid) => {
+                        self.ai_secret_selections.insert(pid, 0..len);
+                    }
+                }
+                cx.notify();
+                return true;
+            }
+        }
+        match key {
+            "backspace" => {
+                let (text, sel) = self.text_field_ref(field);
+                let len = text.encode_utf16().count();
+                let end = sel.end.min(len);
+                if end > sel.start {
+                    self.replace_text_field_range(field, sel.start..end, "");
+                } else if end > 0 {
+                    self.replace_text_field_range(field, end - 1..end, "");
+                }
+                cx.notify();
+                true
+            }
+            "delete" => {
+                let (text, sel) = self.text_field_ref(field);
+                let len = text.encode_utf16().count();
+                let start = sel.start.min(len);
+                let end = sel.end.clamp(start, len);
+                if end > start {
+                    self.replace_text_field_range(field, start..end, "");
+                } else if start < len {
+                    self.replace_text_field_range(field, start..start + 1, "");
+                }
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn byte_index_for_utf16(text: &str, offset: usize) -> usize {
@@ -1275,28 +2265,6 @@ impl SettingsView {
             units += ch.len_utf16();
         }
         text.len()
-    }
-
-    /// Replace a UTF-16 range of the search field and move the caret to the end of the
-    /// inserted text. The platform input handler calls this for typing, IME and paste.
-    fn replace_search_range(&mut self, range: Range<usize>, text: &str) {
-        let len = self.search_utf16_len();
-        let start = range.start.min(len);
-        let end = range.end.clamp(start, len);
-        let start_byte = Self::byte_index_for_utf16(&self.search_text, start);
-        let end_byte = Self::byte_index_for_utf16(&self.search_text, end);
-
-        let mut next = String::with_capacity(self.search_text.len() + text.len());
-        next.push_str(&self.search_text[..start_byte]);
-        next.push_str(text);
-        next.push_str(&self.search_text[end_byte..]);
-
-        let cursor = start + text.encode_utf16().count();
-        self.search_text = next;
-        self.search_selection = cursor..cursor;
-        // Any edit means the user is searching again; the previous jump marker is stale.
-        self.highlight_row = None;
-        self.scroll_anchor = None;
     }
 
     fn clear_search(&mut self) {
@@ -1453,6 +2421,25 @@ impl SettingsView {
         write: impl Fn(&mut DockSettings, i32) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        self.number_stepper_with_suffix(id, t, value, "", min, max, 1, read, write, cx)
+    }
+
+    /// [`Self::number_stepper`] whose readout carries a unit suffix (`px` / `%`) and step increment.
+    #[allow(clippy::too_many_arguments)]
+    fn number_stepper_with_suffix(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        value: i32,
+        suffix: &str,
+        min: i32,
+        max: i32,
+        step: i32,
+        read: impl Fn(&DockSettings) -> i32 + 'static,
+        write: impl Fn(&mut DockSettings, i32) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let step = step.max(1);
         let read = std::rc::Rc::new(read);
         let write = std::rc::Rc::new(write);
         let minus_read = read.clone();
@@ -1463,16 +2450,16 @@ impl SettingsView {
             SharedString::from(format!("{id}-minus")),
             SharedString::from(format!("{id}-plus")),
             t,
-            SharedString::from(value.to_string()),
+            SharedString::from(format!("{value}{suffix}")),
             cx.listener(move |this, _, _, cx| {
-                let next = (minus_read(&this.settings) - 1).max(min);
+                let next = (minus_read(&this.settings) - step).clamp(min, max);
                 if next != minus_read(&this.settings) {
                     minus_write(&mut this.settings, next);
                     this.auto_save(cx);
                 }
             }),
             cx.listener(move |this, _, _, cx| {
-                let next = (plus_read(&this.settings) + 1).min(max);
+                let next = (plus_read(&this.settings) + step).clamp(min, max);
                 if next != plus_read(&this.settings) {
                     plus_write(&mut this.settings, next);
                     this.auto_save(cx);
@@ -1509,14 +2496,25 @@ impl SettingsView {
     /// underneath GPUI's premultiplied DComp swapchain strictly when `settings_background == Glass`.
     fn sync_settings_glass(&mut self, window: &Window) {
         let is_dark = self.resolve_is_dark();
+        let (tint_rgb, rim_rgb) = theme_surface_tint("SettingsBackground", "AccentBrush");
         let glass_cfg = SpatialGlassConfig::from_settings(
             &self.settings,
             self.settings.settings_background,
             self.settings.settings_opacity,
             is_dark,
             false,
-        );
-        let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+        )
+        .with_theme_tint(tint_rgb, rim_rgb);
+        let hwnd = if self.last_glass_hwnd_state != Some((is_dark, glass_cfg.enabled)) {
+            self.last_glass_hwnd_state = Some((is_dark, glass_cfg.enabled));
+            let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+            // `configure_host_backdrop_window` just reset the DWM frame margins: re-apply the
+            // rounded chrome on top (idempotent; the NC subclass is installed only once).
+            window_chrome::apply_window_chrome(hwnd);
+            hwnd
+        } else {
+            Self::window_hwnd(window)
+        };
         if self.spatial_glass.is_none() && glass_cfg.enabled {
             self.spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
         }
@@ -1527,9 +2525,45 @@ impl SettingsView {
                 let vp = window.viewport_size();
                 let w_px = (f32::from(vp.width) * dpi).max(2.0);
                 let h_px = (f32::from(vp.height) * dpi).max(2.0);
-                g.sync_rect(0.0, 0.0, w_px, h_px, (8.0 * dpi).round(), dpi, 0.0, 0.0);
+                let radius_px =
+                    (settings_corner_radius(window_chrome::is_windows_11()) * dpi).round();
+                g.sync_rect(0.0, 0.0, w_px, h_px, radius_px, dpi, 0.0, 0.0);
             }
         }
+    }
+
+    /// Synchronizes `ThemeManager`, Clear Crystal glass tint, and persists the settings change.
+    fn apply_theme_change(
+        &mut self,
+        window: Option<&Window>,
+        immediate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        sync_from_settings(&self.settings);
+        if let Some(win) = window {
+            self.sync_settings_glass(win);
+        }
+        if immediate {
+            self.save_immediately(cx);
+        } else {
+            self.auto_save(cx);
+        }
+    }
+
+    /// Opens the shared Brush Picker modal preloaded with the live color of `token_key`.
+    fn open_token_brush_picker(&mut self, token_key: &str, cx: &mut Context<Self>) {
+        self.token_name = token_key.to_owned();
+        let resolved = ThemeManager::resolve(token_key)
+            .and_then(|val| crate::design::theme::token_rgba(&val))
+            .unwrap_or_else(|| {
+                let accent = crate::design::active_palette(self.is_dark()).accent;
+                TokenRgba::from_rgb(accent.0, accent.1, accent.2)
+            });
+        self.brush_mode = BrushMode::Solid;
+        self.brush_hsv = Hsv::from(resolved);
+        self.brush_alpha = resolved.a;
+        self.brush_hex = resolved.hex();
+        self.open_brush_picker(BrushPickerTarget::ThemeToken, cx);
     }
 
     /// Opens the shared Figma-style Color & Gradient Brush Picker modal.
@@ -1549,7 +2583,7 @@ impl SettingsView {
                 let parsed = existing
                     .and_then(crate::design::brush::parse_hex)
                     .unwrap_or_else(|| {
-                        let rgb = crate::design::palette(self.is_dark()).border_rgb;
+                        let rgb = crate::design::active_palette(self.is_dark()).border_rgb;
                         crate::design::tokens::Rgba::from_rgb(rgb.0, rgb.1, rgb.2)
                     });
                 self.brush_hsv = Hsv::from(parsed);
@@ -1561,11 +2595,14 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn apply_brush_picker_selection(&mut self, cx: &mut Context<Self>) {
+    fn apply_brush_picker_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
         match self.brush_picker_target {
             BrushPickerTarget::BorderSurface(index) => {
                 let color = self.brush_active_color();
-                let hex = format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b);
+                let hex = format!(
+                    "#{:02X}{:02X}{:02X}{:02X}",
+                    color.a, color.r, color.g, color.b
+                );
                 let slot = match index {
                     0 => &mut self.settings.dock_border_color,
                     1 => &mut self.settings.menu_border_color,
@@ -1574,7 +2611,7 @@ impl SettingsView {
                 };
                 *slot = Some(hex);
                 self.brush_picker_open = false;
-                self.auto_save(cx);
+                self.apply_theme_change(Some(window), false, cx);
             }
             BrushPickerTarget::ThemeToken => {
                 let name = self.token_name.trim().to_owned();
@@ -1596,6 +2633,7 @@ impl SettingsView {
                     map.insert(name.clone(), brush_to_json(&brush));
                     persist_theme_tokens(&mut self.settings, map);
                     self.token_apply_status = loc::t_fmt("BrushTokenSaved", &[&name]);
+                    self.sync_settings_glass(window);
                     self.auto_save(cx);
                 }
                 self.brush_picker_open = false;
@@ -1604,7 +2642,7 @@ impl SettingsView {
         }
     }
 
-    fn reset_border_picker_color(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn reset_border_picker_color(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) {
         let slot = match index {
             0 => &mut self.settings.dock_border_color,
             1 => &mut self.settings.menu_border_color,
@@ -1613,7 +2651,7 @@ impl SettingsView {
         };
         *slot = None;
         self.brush_picker_open = false;
-        self.auto_save(cx);
+        self.apply_theme_change(Some(window), false, cx);
     }
 
     fn picker_state(&self, id: &str) -> &SearchableDropdownState {
@@ -1966,17 +3004,17 @@ impl SettingsView {
 
     fn auto_save(&mut self, cx: &mut Context<Self>) {
         self.widget_runtime.tick(&self.settings);
-        if self.save_pending {
-            return;
-        }
         self.save_pending = true;
+        self.save_generation = self.save_generation.wrapping_add(1);
+        let generation = self.save_generation;
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            // Slider drags and toggle bursts can fire dozens of times; persist once at the end.
+            // True trailing-edge debounce: only the final generation after a 250 ms quiet window flushes.
             cx.background_executor()
                 .timer(Duration::from_millis(250))
                 .await;
             let _ = this.update(cx, |view, cx| {
-                if view.save_pending {
+                if view.save_pending && view.save_generation == generation {
                     view.save_pending = false;
                     view.sync_dock_pins();
                     view.save_settings(cx);
@@ -1986,13 +3024,24 @@ impl SettingsView {
         .detach();
     }
 
+    fn save_immediately(&mut self, cx: &mut Context<Self>) {
+        self.widget_runtime.tick(&self.settings);
+        self.save_pending = false;
+        self.save_generation = self.save_generation.wrapping_add(1);
+        self.sync_dock_pins();
+        self.save_settings(cx);
+    }
+
     // ---- WidgetPanelHost -----------------------------------------------------
 
-    fn preview_flyout(&self, id: &str) {
+    fn preview_flyout(&self, id: &str, owner_hwnd: usize) {
         if !self.flyout_preview {
             return;
         }
         use crate::ui::flyout::{FlyoutBlock, FlyoutSpec, show_flyout};
+        let is_dark = self.resolve_is_dark();
+        let (anchor_x, anchor_y) =
+            window_chrome::window_flyout_anchor(owner_hwnd).unwrap_or((0, 0));
         let spec = FlyoutSpec {
             title: loc::t_fmt("FlyoutDemoTitle", &[id]),
             subtitle: Some(loc::t("FlyoutDemoSubtitle")),
@@ -2024,7 +3073,18 @@ impl SettingsView {
         };
         // Own modal message loop: run it off the GPUI thread to avoid nesting loops.
         std::thread::spawn(move || {
-            let _ = show_flyout(0, true, 0, 0, spec);
+            let _ = show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec);
+        });
+    }
+
+    fn preview_widget_flyout(&mut self, id: &str, owner_hwnd: usize) {
+        let is_dark = self.resolve_is_dark();
+        let (anchor_x, anchor_y) =
+            window_chrome::window_flyout_anchor(owner_hwnd).unwrap_or((0, 0));
+        self.widget_runtime.tick(&self.settings);
+        let spec = self.widget_runtime.live_spec(id, &self.settings, is_dark);
+        std::thread::spawn(move || {
+            let _ = crate::ui::flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec);
         });
     }
 
@@ -2041,6 +3101,8 @@ impl SettingsView {
                 .id("widget-panel-host")
                 .absolute()
                 .inset_0()
+                // Keep the scrim inside the rounded window outline.
+                .rounded(px(settings_corner_radius(window_chrome::is_windows_11())))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2097,8 +3159,11 @@ impl SettingsView {
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, _| {
-                                    this.preview_flyout(this.widget_panel.unwrap_or("widget"));
+                                .on_click(cx.listener(|this, _, window, _| {
+                                    this.preview_flyout(
+                                        this.widget_panel.unwrap_or("widget"),
+                                        Self::window_hwnd(window),
+                                    );
                                 }))
                                 .child(
                                     div()
@@ -2365,40 +3430,6 @@ impl SettingsView {
         ]
     }
 
-    fn render_hotkeys(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
-        for (key, label) in [
-            ("LauncherHotkey", "LauncherHotkey"),
-            ("DockHotkey", "DockHotkey"),
-        ] {
-            let value = extra_string(&self.settings, key, "Ctrl+Shift+Space");
-            let capturing = self.hotkey_capture == Some(key);
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E765}"),
-                    loc::t(label),
-                    button(
-                        SharedString::from(format!("btn-capture-{key}")),
-                        t,
-                        if capturing {
-                            loc::t("HotkeyPressKeys")
-                        } else {
-                            value
-                        },
-                        ButtonVariant::Secondary,
-                        cx.listener(move |this, _, _, cx| {
-                            this.hotkey_capture = Some(key);
-                            cx.notify();
-                        }),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
-        rows
-    }
-
     fn render_ai_auth(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         // The badge reflects the encrypted token file, not a stale settings slot.
         let signed_in = cursor_auth::has_session();
@@ -2562,7 +3593,7 @@ impl SettingsView {
                         t,
                         loc::t("ThemePackImport"),
                         ButtonVariant::Secondary,
-                        cx.listener(|this, _, _, cx| {
+                        cx.listener(|this, _, window, cx| {
                             if let Some(path) = prompt::open_file(
                                 &loc::t("FullBackupImport"),
                                 &loc::t("BackupArchiveName"),
@@ -2574,12 +3605,15 @@ impl SettingsView {
                                 {
                                     Ok(settings) => {
                                         this.settings = settings;
+                                        fonts::apply_settings(&this.settings);
+                                        loc::set_language(&this.settings.language);
+                                        sync_from_settings(&this.settings);
+                                        this.sync_settings_glass(window);
                                         this.backup_status = loc::t_fmt(
                                             "BackupImported",
                                             &[path.to_string_lossy().as_ref()],
                                         );
-                                        this.save_settings(cx);
-                                        notify_docks_reload();
+                                        this.save_immediately(cx);
                                     }
                                     Err(err) => {
                                         this.backup_status =
@@ -2629,329 +3663,973 @@ impl SettingsView {
         rows
     }
 
-    fn render_theme_editor(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let category = THEME_TOKEN_CATEGORIES
-            .get(self.theme_category)
-            .copied()
-            .unwrap_or("ThemeSectionAdvanced");
-        let cat_opts: Vec<DropdownOption> = THEME_TOKEN_CATEGORIES
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(loc::t(name)),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.theme_category == i,
-                    on_select: std::rc::Rc::new(move |_win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.theme_category = i;
-                            cx.notify();
-                        });
-                    }),
-                }
-            })
-            .collect();
-        let seg = self.make_dropdown("token-cat", t, cat_opts, cx);
-        let tokens: Map<String, Value> = self
+    fn apply_theme_preset(&mut self, preset_id: &str, window: &Window, cx: &mut Context<Self>) {
+        match preset_id {
+            "liquid_glass" => {
+                self.settings.dock_background = SurfaceBackground::Glass;
+                self.settings.menu_background = SurfaceBackground::Glass;
+                self.settings.widget_background = SurfaceBackground::Glass;
+                self.settings.settings_background = SurfaceBackground::Glass;
+                self.settings.dock_opacity = 0.90;
+                self.settings.menu_opacity = 0.90;
+                self.settings.widget_opacity = 0.90;
+                self.settings.settings_opacity = 0.90;
+                self.settings.glass_blur_sigma = 9.0;
+                self.settings.glass_saturation = 1.32;
+                self.settings.glass_edge_glow = 0.88;
+                self.settings.glass_pointer_light = true;
+                self.settings.oled_reduce_glow_enabled = false;
+            }
+            "frosted_acrylic" => {
+                self.settings.dock_background = SurfaceBackground::Glass;
+                self.settings.menu_background = SurfaceBackground::Glass;
+                self.settings.widget_background = SurfaceBackground::Glass;
+                self.settings.settings_background = SurfaceBackground::Glass;
+                self.settings.dock_opacity = 0.85;
+                self.settings.menu_opacity = 0.85;
+                self.settings.widget_opacity = 0.85;
+                self.settings.settings_opacity = 0.85;
+                self.settings.glass_blur_sigma = 24.0;
+                self.settings.glass_saturation = 1.45;
+                self.settings.glass_edge_glow = 0.48;
+                self.settings.glass_pointer_light = true;
+                self.settings.oled_reduce_glow_enabled = false;
+            }
+            "dark_mica" => {
+                self.settings.dock_background = SurfaceBackground::Glass;
+                self.settings.menu_background = SurfaceBackground::Glass;
+                self.settings.widget_background = SurfaceBackground::Glass;
+                self.settings.settings_background = SurfaceBackground::Glass;
+                self.settings.dock_opacity = 0.95;
+                self.settings.menu_opacity = 0.95;
+                self.settings.widget_opacity = 0.95;
+                self.settings.settings_opacity = 0.95;
+                self.settings.glass_blur_sigma = 32.0;
+                self.settings.glass_saturation = 1.12;
+                self.settings.glass_edge_glow = 0.22;
+                self.settings.glass_pointer_light = false;
+                self.settings.oled_reduce_glow_enabled = false;
+            }
+            "oled_black" => {
+                self.settings.dock_background = SurfaceBackground::TrueBlack;
+                self.settings.menu_background = SurfaceBackground::TrueBlack;
+                self.settings.widget_background = SurfaceBackground::TrueBlack;
+                self.settings.settings_background = SurfaceBackground::TrueBlack;
+                self.settings.dock_opacity = 1.0;
+                self.settings.menu_opacity = 1.0;
+                self.settings.widget_opacity = 1.0;
+                self.settings.settings_opacity = 1.0;
+                self.settings.oled_reduce_glow_enabled = true;
+                self.settings.glass_edge_glow = 0.0;
+                self.settings.glass_pointer_light = false;
+            }
+            "solid_flat" => {
+                self.settings.dock_background = SurfaceBackground::Solid;
+                self.settings.menu_background = SurfaceBackground::Solid;
+                self.settings.widget_background = SurfaceBackground::Solid;
+                self.settings.settings_background = SurfaceBackground::Solid;
+                self.settings.dock_opacity = 1.0;
+                self.settings.menu_opacity = 1.0;
+                self.settings.widget_opacity = 1.0;
+                self.settings.settings_opacity = 1.0;
+                self.settings.dock_border_thickness = 1.0;
+                self.settings.menu_border_thickness = 1.0;
+                self.settings.widget_border_thickness = 1.0;
+                self.settings.settings_border_thickness = 1.0;
+                self.settings.oled_reduce_glow_enabled = false;
+            }
+            "minimal" => {
+                self.settings.dock_background = SurfaceBackground::None;
+                self.settings.widget_background = SurfaceBackground::None;
+                self.settings.dock_opacity = 0.25;
+                self.settings.widget_opacity = 0.25;
+                self.settings.dock_border_thickness = 0.0;
+                self.settings.widget_border_thickness = 0.0;
+                self.settings.oled_reduce_glow_enabled = false;
+            }
+            "vibrant" => {
+                self.settings.dock_background = SurfaceBackground::Glass;
+                self.settings.menu_background = SurfaceBackground::Glass;
+                self.settings.widget_background = SurfaceBackground::Glass;
+                self.settings.settings_background = SurfaceBackground::Glass;
+                self.settings.dock_opacity = 0.82;
+                self.settings.menu_opacity = 0.82;
+                self.settings.widget_opacity = 0.82;
+                self.settings.settings_opacity = 0.82;
+                self.settings.glass_blur_sigma = 14.0;
+                self.settings.glass_saturation = 1.72;
+                self.settings.glass_edge_glow = 1.0;
+                self.settings.glass_pointer_light = true;
+                self.settings.oled_reduce_glow_enabled = false;
+            }
+            "high_contrast" => {
+                self.settings.dock_background = SurfaceBackground::Solid;
+                self.settings.menu_background = SurfaceBackground::Solid;
+                self.settings.widget_background = SurfaceBackground::Solid;
+                self.settings.settings_background = SurfaceBackground::Solid;
+                self.settings.dock_opacity = 1.0;
+                self.settings.menu_opacity = 1.0;
+                self.settings.widget_opacity = 1.0;
+                self.settings.settings_opacity = 1.0;
+                self.settings.dock_border_thickness = 2.0;
+                self.settings.menu_border_thickness = 2.0;
+                self.settings.widget_border_thickness = 2.0;
+                self.settings.settings_border_thickness = 2.0;
+                self.settings.oled_reduce_glow_enabled = false;
+                let mut map = self
+                    .settings
+                    .extra
+                    .get("ThemeTokens")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let is_dark = self.is_dark();
+                map.insert(
+                    "TextPrimary".to_owned(),
+                    json!(if is_dark { "#FFFFFFFF" } else { "#FF000000" }),
+                );
+                map.insert(
+                    "StrokeFocus".to_owned(),
+                    json!(if is_dark { "#FFFFFF00" } else { "#FF0000CC" }),
+                );
+                map.insert(
+                    "DockBorderMaterial".to_owned(),
+                    json!(if is_dark { "#FFFFFFFF" } else { "#FF000000" }),
+                );
+                persist_theme_tokens(&mut self.settings, map);
+            }
+            _ => return,
+        }
+        self.apply_theme_change(Some(window), false, cx);
+    }
+
+    fn apply_accent_swatch(&mut self, hex: &str, window: &Window, cx: &mut Context<Self>) {
+        let mut map = self
             .settings
             .extra
             .get("ThemeTokens")
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let mut rows = vec![
-            setting_row(t, Some("\u{E790}"), loc::t("ThemeTokenCategory"), seg).into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                loc::t("ThemeTokenName"),
-                div()
-                    .id("token-name-input")
-                    .tab_index(0)
-                    .w(px(180.0))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(7.0))
-                    .bg(rgba(t.surface_muted))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .flex()
-                    .items_center()
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        let mut buffer = this.token_name.clone();
-                        if apply_keystroke(
-                            &mut buffer,
-                            &event.keystroke.key,
-                            event.keystroke.key_char.as_deref(),
-                            false,
-                        ) {
-                            this.token_name = buffer;
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .child(if self.token_name.is_empty() {
-                                loc::t("ThemeTokenNamePlaceholder")
-                            } else {
-                                self.token_name.clone()
-                            }),
-                    ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                loc::t("ThemeTokenValueHex"),
-                div()
-                    .id("token-value-input")
-                    .tab_index(0)
-                    .w(px(180.0))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(7.0))
-                    .bg(rgba(t.surface_muted))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .flex()
-                    .items_center()
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        let mut buffer = this.token_value.clone();
-                        if apply_keystroke(
-                            &mut buffer,
-                            &event.keystroke.key,
-                            event.keystroke.key_char.as_deref(),
-                            true,
-                        ) {
-                            this.token_value = buffer;
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .child(if self.token_value.is_empty() {
-                                "38BDF8".to_owned()
-                            } else {
-                                self.token_value.clone()
-                            }),
-                    ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E74E}"),
-                loc::t("ThemeTokenSave"),
-                button(
-                    "btn-save-token",
-                    t,
-                    loc::t("ThemeTokenSaveAction"),
-                    ButtonVariant::Secondary,
-                    cx.listener(|this, _, _, cx| {
-                        let name = this.token_name.trim().to_owned();
-                        let raw = this.token_value.trim().trim_start_matches('#').to_owned();
-                        let mut numeric = u32::from_str_radix(&raw, 16)
-                            .unwrap_or(0x38_BD_F8)
-                            .to_string();
-                        clamp_numeric(&mut numeric, 0.0, u32::MAX as f64);
-                        let value = format!("{:06X}", numeric.parse::<u32>().unwrap_or(0x38_BD_F8));
-                        if !name.is_empty() {
-                            let mut map = this
-                                .settings
-                                .extra
-                                .get("ThemeTokens")
-                                .and_then(Value::as_object)
-                                .cloned()
-                                .unwrap_or_default();
-                            map.insert(name.clone(), json!(format!("#{value}")));
-                            persist_theme_tokens(&mut this.settings, map);
-                            this.token_apply_status =
-                                loc::t_fmt("ThemeTokenApplied", &[&format!("#{value}")]);
-                            this.token_name.clear();
-                            this.token_value.clear();
-                            this.auto_save(cx);
-                        }
-                    }),
-                ),
-            )
-            .into_any_element(),
-        ];
-        rows.push(
-            setting_row(
-                t,
-                Some("\u{E81D}"),
-                loc::t("ThemeTokenStatus"),
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgba(t.text_secondary))
-                    .child(self.token_apply_status.clone()),
-            )
-            .into_any_element(),
-        );
-        let mut saved: Vec<(String, String)> = tokens
-            .iter()
-            .map(|(k, v)| {
-                let text = match v {
-                    Value::String(s) => s.clone(),
-                    _ => v.to_string(),
-                };
-                (k.clone(), text)
-            })
-            .collect();
-        saved.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, value) in saved.into_iter().take(24) {
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E790}"),
-                    format!("{} · {}", loc::t(category), name),
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgba(t.text_secondary))
-                        .child(value),
-                )
-                .into_any_element(),
-            );
+        for key in ["AccentBrush", "WidgetAccent", "StrokeFocus"] {
+            map.insert(key.to_owned(), json!(hex));
+        }
+        persist_theme_tokens(&mut self.settings, map);
+        self.sync_settings_glass(window);
+        self.auto_save(cx);
+    }
+
+    fn save_studio_custom_theme(
+        &mut self,
+        update_existing: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_id = self.settings.theme_pack.trim().to_owned();
+        let target_id =
+            if update_existing && !active_id.is_empty() && !theme_packs::is_built_in(&active_id) {
+                Some(active_id.as_str())
+            } else {
+                None
+            };
+        let raw_name = self.custom_theme_name.trim().to_owned();
+        let display_name = if !raw_name.is_empty() {
+            raw_name
+        } else if let Some(id) = target_id {
+            theme_packs::ThemePack::load(&Self::themes_root().join(id))
+                .map(|p| p.display_name().to_owned())
+                .unwrap_or_else(|_| id.to_owned())
+        } else {
+            loc::t("ThemePackNewDefault")
+        };
+
+        let mut widgets = if !active_id.is_empty() {
+            theme_packs::ThemePack::load(&Self::themes_root().join(&active_id))
+                .ok()
+                .and_then(|pack| pack.widgets)
+                .unwrap_or_default()
+        } else {
+            WidgetPackManifest::default()
+        };
+        widgets.name = Some(format!(
+            "{} {}",
+            display_name,
+            loc::t("ThemeWidgetPackSuffix")
+        ));
+
+        let is_dark = self.is_dark();
+        let theme_layer = if is_dark {
+            &mut widgets.dark
+        } else {
+            &mut widgets.light
+        };
+        if let Some(overrides) = self
+            .settings
+            .extra
+            .get("ThemeTokens")
+            .and_then(Value::as_object)
+        {
+            for (k, v) in overrides {
+                theme_layer.insert(k.clone(), v.clone());
+            }
         }
 
-        // Compact Figma-style Brush Trigger inside the card: clicking opens the shared
-        // floating Color & Gradient Picker modal instead of cramming controls inline.
-        let brush = build_brush(
-            self.brush_mode,
-            self.brush_hsv,
-            self.brush_alpha,
-            self.brush_angle,
-            &self.brush_stops,
-        );
-        let active_color = self.brush_active_color();
-        let mut swatch_preview = div()
-            .w(px(46.0))
-            .h(px(22.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgba(t.border))
-            .overflow_hidden()
-            .flex();
-        match &brush {
-            BrushSpec::Solid(color) => {
-                swatch_preview = swatch_preview.bg(rgba(color.to_gpui()));
+        let manifest = ThemePackManifest {
+            name: Some(display_name.clone()),
+            author: None,
+            description: None,
+            preserve_original_icons: true,
+        };
+        match theme_packs::save_custom_theme(&Self::themes_root(), target_id, &manifest, &widgets) {
+            Ok(saved) => {
+                self.settings.theme_pack = saved.id.clone();
+                self.custom_theme_name = saved.display_name().to_owned();
+                let len = self.custom_theme_name.encode_utf16().count();
+                self.custom_theme_name_selection = len..len;
+                persist_theme_tokens(&mut self.settings, Map::new());
+                self.theme_status = loc::t("ThemeSavedMessage");
+                self.apply_theme_change(Some(window), true, cx);
             }
-            BrushSpec::Gradient(gradient) => {
-                let stops = &gradient.stops;
-                let count = stops.len().max(2);
-                const PREVIEW_STEPS: usize = 12;
-                for seg in 0..PREVIEW_STEPS {
-                    let pos = (seg as f64 + 0.5) / PREVIEW_STEPS as f64;
-                    let scaled = pos * (count - 1) as f64;
-                    let idx = scaled.floor() as usize;
-                    let frac = scaled - idx as f64;
-                    let a = stops.get(idx).copied().unwrap_or_default();
-                    let b = stops.get((idx + 1).min(count - 1)).copied().unwrap_or(a);
-                    swatch_preview = swatch_preview
-                        .child(div().flex_1().h_full().bg(rgba(a.mix(b, frac).to_gpui())));
-                }
+            Err(err) => {
+                self.theme_status = loc::t_fmt("ThemeSaveFailed", &[&err]);
+                cx.notify();
             }
         }
-        let summary_text = match self.brush_mode {
-            BrushMode::Solid => active_color.hex(),
-            BrushMode::Gradient => format!(
-                "{} · {:.0}\u{00B0} ({})",
-                loc::t("Gradient"),
-                self.brush_angle,
-                self.brush_stops.len()
-            ),
+    }
+
+    fn render_theme_studio_preview(&self, t: &UiTheme, is_dark: bool) -> AnyElement {
+        let pal = crate::design::active_palette(is_dark);
+        let backdrop_top = if is_dark { 0x1018_28ff } else { 0xdbeafeff };
+        let backdrop_bot = if is_dark { 0x1e29_3bff } else { 0xe0e7_ffff };
+        let dock_alpha: u8 = match self.settings.dock_background {
+            SurfaceBackground::None => 0x18,
+            SurfaceBackground::TrueBlack | SurfaceBackground::Solid => 0xff,
+            SurfaceBackground::Glass => {
+                ((self.settings.dock_opacity.clamp(0.2, 1.0) * 215.0).round() as u8).max(0x38)
+            }
         };
-        let trigger_hover = t.surface_hover;
-        let brush_trigger = div()
-            .id("btn-open-brush-picker")
-            .h(px(34.0))
+        let dock_bg = match self.settings.dock_background {
+            SurfaceBackground::TrueBlack => 0x0000_00ff,
+            _ => crate::design::gpui_rgba(pal.dock_pill, dock_alpha),
+        };
+        let dock_border = self
+            .settings
+            .dock_border_color
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or_else(|| crate::design::gpui_rgba(pal.border_rgb, 0xcc));
+        let dock_radius = self.settings.dock_corner_radius.unwrap_or(14).clamp(0, 22) as f32;
+        let dock_border_w = self.settings.dock_border_thickness.clamp(0.0, 3.0) as f32;
+
+        div()
+            .w_full()
+            .h(px(120.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgba(t.border))
+            .bg(rgba(backdrop_top))
+            .overflow_hidden()
+            .relative()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .p(px(12.0))
+            .child(
+                // Mini Settings Card preview
+                div()
+                    .w(px(230.0))
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .rounded(px(9.0))
+                    .bg(rgba(t.surface))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.text_primary))
+                                    .child(loc::t("SettingsTitle")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.text_secondary))
+                                    .child(loc::t("ThemeStudioSubtitle")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(px(5.0))
+                            .bg(rgba(t.accent))
+                            .text_size(px(9.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.accent_fg))
+                            .child(loc::t("Apply")),
+                    ),
+            )
+            .child(
+                // Mini Dock pill + widget chip preview
+                div().w_full().flex().justify_center().child(
+                    div()
+                        .h(px(34.0))
+                        .px(px(10.0))
+                        .rounded(px(dock_radius))
+                        .bg(rgba(dock_bg))
+                        .when(dock_border_w > 0.0, |pill| {
+                            pill.border(px(dock_border_w))
+                                .border_color(rgba(dock_border))
+                        })
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(div().size(px(16.0)).rounded(px(4.0)).bg(rgba(t.accent)))
+                        .child(div().size(px(16.0)).rounded(px(4.0)).bg(rgba(backdrop_bot)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .size(px(16.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgba(t.surface_muted)),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(8.0))
+                                        .h(px(2.0))
+                                        .rounded(px(1.0))
+                                        .bg(rgba(t.accent)),
+                                ),
+                        )
+                        .child(div().w(px(1.0)).h(px(16.0)).bg(rgba(t.separator)))
+                        .child(
+                            div()
+                                .px(px(7.0))
+                                .py(px(3.0))
+                                .rounded(px(6.0))
+                                .bg(rgba(t.surface))
+                                .border_1()
+                                .border_color(rgba(t.border))
+                                .text_size(px(9.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgba(t.text_primary))
+                                .child("14:32 · 21°C"),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_theme_studio(
+        &self,
+        t: &UiTheme,
+        is_dark: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut body: Vec<AnyElement> = Vec::new();
+        body.push(
+            self.mark_target(
+                "ThemeStudio",
+                t,
+                div()
+                    .w_full()
+                    .px(px(16.0))
+                    .pt(px(12.0))
+                    .pb(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(fonts::scaled_size(12.0)))
+                            .text_color(rgba(t.text_secondary))
+                            .child(loc::t("ThemeStudioSubtitle")),
+                    )
+                    .child(self.render_theme_studio_preview(t, is_dark)),
+            )
+            .into_any_element(),
+        );
+
+        // 8 One-Click Material & Look Presets
+        let presets: [(&str, &str, &str); 8] = [
+            ("liquid_glass", "ThemePresetLiquidGlass", "\u{EB42}"),
+            ("frosted_acrylic", "ThemePresetFrostedAcrylic", "\u{E706}"),
+            ("dark_mica", "ThemePresetDarkMica", "\u{E708}"),
+            ("oled_black", "ThemePresetOledBlack", "\u{E793}"),
+            ("solid_flat", "ThemePresetSolidFlat", "\u{E81E}"),
+            ("minimal", "ThemePresetMinimal", "\u{E738}"),
+            ("vibrant", "ThemePresetVibrant", "\u{E790}"),
+            ("high_contrast", "ThemePresetHighContrast", "\u{E7A1}"),
+        ];
+        let mut preset_wrap = div().w_full().flex().flex_wrap().gap(px(6.0));
+        for (preset_id, label_key, glyph) in presets {
+            let pid: &'static str = preset_id;
+            let hover_bg = t.surface_hover;
+            let hover_bd = t.accent;
+            preset_wrap = preset_wrap.child(
+                div()
+                    .id(SharedString::from(format!("theme-preset-{preset_id}")))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .bg(rgba(t.surface_muted))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgba(hover_bg)).border_color(rgba(hover_bd)))
+                    .active(|s| s.opacity(0.86))
+                    .on_click(cx.listener(move |this, _, win, cx| {
+                        this.apply_theme_preset(pid, win, cx);
+                    }))
+                    .child(icon_glyph(glyph, 11.5, t.accent))
+                    .child(
+                        div()
+                            .text_size(px(fonts::scaled_size(11.5)))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgba(t.text_primary))
+                            .child(loc::t(label_key)),
+                    ),
+            );
+        }
+        body.push(
+            div()
+                .w_full()
+                .px(px(16.0))
+                .py(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(fonts::scaled_size(12.0)))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgba(t.text_secondary))
+                        .child(loc::t("ThemeMaterialPresets")),
+                )
+                .child(preset_wrap)
+                .into_any_element(),
+        );
+
+        // 10 Curated Accent Swatch Pills
+        let mono_hex = if is_dark { "#FFE4E4E7" } else { "#FF27272A" };
+        let accents: [(&str, &str); 10] = [
+            ("aurora", "#FF38BDF8"),
+            ("mauve", "#FFCBA6F7"),
+            ("nord", "#FF88C0D0"),
+            ("gruvbox", "#FFFABD2F"),
+            ("solarized", "#FF2AA198"),
+            ("tokyo", "#FF7AA2F7"),
+            ("emerald", "#FF10B981"),
+            ("rose", "#FFF43F5E"),
+            ("coral", "#FFF97316"),
+            ("mono", mono_hex),
+        ];
+        let mut swatch_bar = div()
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(7.0));
+        for (slug, hex) in accents {
+            let color_u32 = parse_hex_color(hex).unwrap_or(t.accent);
+            let hex_owned = hex.to_owned();
+            swatch_bar = swatch_bar.child(
+                div()
+                    .id(SharedString::from(format!("studio-accent-{slug}")))
+                    .size(px(24.0))
+                    .rounded(px(12.0))
+                    .bg(rgba(color_u32))
+                    .border_2()
+                    .border_color(rgba(t.border))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.88))
+                    .on_click(cx.listener(move |this, _, win, cx| {
+                        this.apply_accent_swatch(&hex_owned, win, cx);
+                    })),
+            );
+        }
+        body.push(
+            setting_row(t, Some("\u{E790}"), loc::t("ColorSwatchAccent"), swatch_bar)
+                .into_any_element(),
+        );
+
+        // 8 Direct Visual Color Picker Swatch Triggers (2-column grid)
+        let quick_tokens: [(&str, &str); 8] = [
+            ("DockMaterial", "ThemeFieldDockMaterial"),
+            ("AccentBrush", "ThemeFieldAccentBrush"),
+            ("TextPrimary", "ThemeFieldTextPrimary"),
+            ("TextSecondary", "ThemeFieldTextSecondary"),
+            ("DockBorderMaterial", "ThemeFieldDockBorderMaterial"),
+            ("WidgetCard", "ThemeFieldWidgetCard"),
+            ("MenuMaterial", "ThemeFieldMenuMaterial"),
+            ("SettingsBackground", "ThemeFieldSettingsBackground"),
+        ];
+        let mut grid = div().w_full().flex().flex_col().gap(px(8.0));
+        for pair in quick_tokens.chunks(2) {
+            let mut row = div().w_full().flex().gap(px(8.0));
+            for &(token_key, label_key) in pair {
+                let resolved = ThemeManager::resolve(token_key)
+                    .and_then(|v| crate::design::theme::token_rgba(&v))
+                    .unwrap_or_else(|| TokenRgba::from_rgb(0x38, 0xbd, 0xf8));
+                let hover_bg = t.surface_hover;
+                let hover_bd = t.accent;
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("studio-pick-{token_key}")))
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(10.0))
+                        .py(px(7.0))
+                        .rounded(px(8.0))
+                        .bg(rgba(t.surface_muted))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(rgba(hover_bg)).border_color(rgba(hover_bd)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_token_brush_picker(token_key, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .size(px(18.0))
+                                        .rounded(px(5.0))
+                                        .flex_shrink_0()
+                                        .border_1()
+                                        .border_color(rgba(t.border))
+                                        .bg(rgba(resolved.to_gpui())),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(fonts::scaled_size(11.5)))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(rgba(t.text_primary))
+                                        .child(loc::t(label_key)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(fonts::scaled_size(10.5)))
+                                .text_color(rgba(t.text_secondary))
+                                .child(resolved.hex()),
+                        ),
+                );
+            }
+            grid = grid.child(row);
+        }
+        body.push(
+            div()
+                .w_full()
+                .px(px(16.0))
+                .py(px(10.0))
+                .child(grid)
+                .into_any_element(),
+        );
+
+        // Custom Theme Pack Saver Bar (native EntityInputHandler text field + Save / Update / Reset)
+        let name_focused = self.custom_theme_name_focus.is_focused(window);
+        let name_caret = Self::byte_index_for_utf16(
+            &self.custom_theme_name,
+            self.custom_theme_name_selection.start,
+        );
+        let (name_before, name_after) = self.custom_theme_name.split_at(name_caret);
+        let name_display = if self.custom_theme_name.is_empty() {
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(fonts::scaled_size(12.0)))
+                .text_color(rgba(t.text_secondary))
+                .child(loc::t("ThemePackNewDefault"))
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_size(px(fonts::scaled_size(12.0)))
+                        .text_color(rgba(t.text_primary))
+                        .child(name_before.to_owned()),
+                )
+                .when(name_focused, |line| {
+                    line.child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(1.0))
+                            .h(px(13.0))
+                            .bg(rgba(t.accent)),
+                    )
+                })
+                .child(
+                    div()
+                        .text_size(px(fonts::scaled_size(12.0)))
+                        .text_color(rgba(t.text_primary))
+                        .child(name_after.to_owned()),
+                )
+        };
+        let name_input_inner = div()
+            .id("studio-theme-name-input")
+            .track_focus(&self.custom_theme_name_focus)
+            .tab_index(0)
+            .flex_1()
+            .min_w(px(160.0))
+            .h(px(30.0))
             .px(px(10.0))
             .rounded(px(8.0))
             .bg(rgba(t.surface_muted))
             .border_1()
-            .border_color(rgba(t.border))
+            .border_color(rgba(if name_focused { t.accent } else { t.border }))
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .cursor_pointer()
-            .tab_index(0)
-            .hover(move |s| s.bg(rgba(trigger_hover)))
-            .active(|s| s.opacity(0.86))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.open_brush_picker(BrushPickerTarget::ThemeToken, cx);
+            .cursor_text()
+            .on_click(cx.listener(|this, _, win, cx| {
+                this.custom_theme_name_focus.focus(win);
+                cx.notify();
             }))
-            .child(swatch_preview)
-            .child(
-                div()
-                    .text_size(px(fonts::scaled_size(12.0)))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(rgba(t.text_primary))
-                    .child(summary_text),
-            )
-            .child(icon_glyph("\u{E790}", 12.0, t.text_secondary));
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, win, cx| {
+                if !this.custom_theme_name_focus.is_focused(win) {
+                    return;
+                }
+                if this.handle_text_field_key_down(ActiveTextField::CustomThemeName, event, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .child(name_display);
+        let name_input = TextInput::new(
+            name_input_inner,
+            self.custom_theme_name_focus.clone(),
+            cx.entity(),
+        );
 
-        let brush_rows = vec![
-            self.target_row(
+        let is_active_custom = !self.settings.theme_pack.trim().is_empty()
+            && !theme_packs::is_built_in(&self.settings.theme_pack);
+        let mut saver_bar = div()
+            .w_full()
+            .px(px(16.0))
+            .py(px(10.0))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
+            .child(name_input)
+            .child(button(
+                "btn-theme-save-new",
+                t,
+                loc::t("ThemeSaveAsNew"),
+                ButtonVariant::Primary,
+                cx.listener(|this, _, win, cx| this.save_studio_custom_theme(false, win, cx)),
+            ));
+        if is_active_custom {
+            saver_bar = saver_bar.child(button(
+                "btn-theme-update-custom",
+                t,
+                loc::t("ThemeUpdateCustom"),
+                ButtonVariant::Secondary,
+                cx.listener(|this, _, win, cx| this.save_studio_custom_theme(true, win, cx)),
+            ));
+        }
+        saver_bar = saver_bar.child(button(
+            "btn-theme-reset-overrides",
+            t,
+            loc::t("ThemeEditorReset"),
+            ButtonVariant::Secondary,
+            cx.listener(|this, _, win, cx| {
+                persist_theme_tokens(&mut this.settings, Map::new());
+                this.token_apply_status = loc::t("TokenApplyHint");
+                this.apply_theme_change(Some(win), false, cx);
+            }),
+        ));
+        body.push(saver_bar.into_any_element());
+
+        // Collapsible Advanced Token Inspector (preserves ThemeTokens & ThemeBrushPicker targets)
+        let tokens_map: Map<String, Value> = self
+            .settings
+            .extra
+            .get("ThemeTokens")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let force_open = matches!(
+            self.highlight_row.as_deref(),
+            Some("ThemeTokens" | "ThemeBrushPicker")
+        );
+        let show_advanced = self.advanced_tokens_open || force_open;
+
+        body.push(
+            self.mark_target(
+                "ThemeTokens",
+                t,
+                div()
+                    .w_full()
+                    .px(px(16.0))
+                    .py(px(9.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon_glyph("\u{E790}", 13.0, t.accent))
+                            .child(
+                                div()
+                                    .text_size(px(fonts::scaled_size(12.5)))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(rgba(t.text_primary))
+                                    .child(loc::t("ThemeAdvancedTokens")),
+                            )
+                            .when(!tokens_map.is_empty(), |row| {
+                                row.child(badge(t, tokens_map.len().to_string(), true))
+                            }),
+                    )
+                    .child(button(
+                        "btn-toggle-advanced-tokens",
+                        t,
+                        if show_advanced {
+                            loc::t("Close")
+                        } else {
+                            loc::t("Open")
+                        },
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| {
+                            this.advanced_tokens_open = !this.advanced_tokens_open;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .into_any_element(),
+        );
+
+        if show_advanced {
+            let cat_opts: Vec<DropdownOption> = THEME_TOKEN_CATEGORIES
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let entity = cx.entity().downgrade();
+                    DropdownOption {
+                        label: SharedString::from(loc::t(name)),
+                        flag_path: None,
+                        glyph: None,
+                        selected: self.theme_category == i,
+                        on_select: std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                this.open_dropdown = None;
+                                this.theme_category = i;
+                                let keys = editor_tokens_for_category(i);
+                                if let Some(first) = keys.first() {
+                                    this.token_name = (*first).to_owned();
+                                }
+                                cx.notify();
+                            });
+                        }),
+                    }
+                })
+                .collect();
+            let category_keys = editor_tokens_for_category(self.theme_category);
+            let selected_token = if category_keys
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(&self.token_name))
+            {
+                self.token_name.clone()
+            } else {
+                category_keys
+                    .first()
+                    .copied()
+                    .unwrap_or("AccentBrush")
+                    .to_owned()
+            };
+            let token_opts: Vec<DropdownOption> = category_keys
+                .iter()
+                .map(|&key| {
+                    let entity = cx.entity().downgrade();
+                    DropdownOption {
+                        label: SharedString::from(key),
+                        flag_path: None,
+                        glyph: None,
+                        selected: selected_token.eq_ignore_ascii_case(key),
+                        on_select: std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                this.open_dropdown = None;
+                                this.token_name = key.to_owned();
+                                cx.notify();
+                            });
+                        }),
+                    }
+                })
+                .collect();
+
+            let active_token_color = ThemeManager::resolve(&selected_token)
+                .and_then(|val| crate::design::theme::token_rgba(&val))
+                .unwrap_or_else(|| self.brush_active_color());
+            let trigger_hover = t.surface_hover;
+            let pick_token = selected_token.clone();
+            let brush_trigger = div()
+                .id("btn-open-brush-picker")
+                .h(px(32.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(rgba(t.surface_muted))
+                .border_1()
+                .border_color(rgba(t.border))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(rgba(trigger_hover)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_token_brush_picker(&pick_token, cx);
+                }))
+                .child(
+                    div()
+                        .w(px(28.0))
+                        .h(px(18.0))
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .bg(rgba(active_token_color.to_gpui())),
+                )
+                .child(
+                    div()
+                        .text_size(px(fonts::scaled_size(11.5)))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(rgba(t.text_primary))
+                        .child(active_token_color.hex()),
+                )
+                .child(icon_glyph("\u{E790}", 12.0, t.text_secondary));
+
+            body.push(
+                setting_row(
+                    t,
+                    Some("\u{E790}"),
+                    loc::t("ThemeTokenCategory"),
+                    self.make_dropdown("token-cat", t, cat_opts, cx),
+                )
+                .into_any_element(),
+            );
+            body.push(
+                setting_row(
+                    t,
+                    Some("\u{E790}"),
+                    loc::t("ThemeTokenName"),
+                    self.make_dropdown("token-key", t, token_opts, cx),
+                )
+                .into_any_element(),
+            );
+            body.push(self.target_row(
                 "ThemeBrushPicker",
                 t,
                 Some("\u{E790}"),
-                loc::t("ColorPalette"),
+                loc::t("ThemeBrushPicker"),
                 brush_trigger,
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E74E}"),
-                loc::t("BrushSaveToken"),
-                button(
-                    "btn-save-brush",
-                    t,
-                    loc::t("BrushSaveToken"),
-                    ButtonVariant::Primary,
-                    cx.listener(|this, _, _, cx| {
-                        let name = this.token_name.trim().to_owned();
-                        if name.is_empty() {
-                            this.token_apply_status = loc::t("BrushTokenNameRequired");
-                            cx.notify();
-                            return;
-                        }
-                        let brush = build_brush(
-                            this.brush_mode,
-                            this.brush_hsv,
-                            this.brush_alpha,
-                            this.brush_angle,
-                            &this.brush_stops,
-                        );
-                        let mut map = this
-                            .settings
-                            .extra
-                            .get("ThemeTokens")
-                            .and_then(Value::as_object)
-                            .cloned()
-                            .unwrap_or_default();
-                        map.insert(name.clone(), brush_to_json(&brush));
-                        persist_theme_tokens(&mut this.settings, map);
-                        this.token_apply_status = loc::t_fmt("BrushTokenSaved", &[&name]);
-                        this.auto_save(cx);
-                    }),
-                ),
-            )
-            .into_any_element(),
-        ];
+            ));
 
-        vec![
-            section_card(
-                t,
-                format!("{} · {}", loc::t("ThemeEditorTitle"), loc::t(category)),
-                rows,
-            )
-            .into_any_element(),
-            section_card(t, loc::t("ThemeBrushPicker"), brush_rows).into_any_element(),
-        ]
+            let mut saved: Vec<(String, String)> = tokens_map
+                .iter()
+                .map(|(k, v)| {
+                    let text = match v {
+                        Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    };
+                    (k.clone(), text)
+                })
+                .collect();
+            saved.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, value) in saved.into_iter().take(24) {
+                let sw_u32 = parse_hex_color(&value).unwrap_or(t.accent);
+                let remove_key = name.clone();
+                let edit_key = name.clone();
+                body.push(
+                    setting_row(
+                        t,
+                        Some("\u{E790}"),
+                        name.clone(),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("tok-sw-{name}")))
+                                    .px(px(7.0))
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .bg(rgba(t.surface_muted))
+                                    .border_1()
+                                    .border_color(rgba(t.border))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_token_brush_picker(&edit_key, cx);
+                                    }))
+                                    .child(div().size(px(12.0)).rounded(px(3.0)).bg(rgba(sw_u32)))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(rgba(t.text_secondary))
+                                            .child(value),
+                                    ),
+                            )
+                            .child(compact_card_button(
+                                SharedString::from(format!("tok-clear-{name}")),
+                                t,
+                                "×",
+                                false,
+                                cx.listener(move |this, _, win, cx| {
+                                    let mut map = this
+                                        .settings
+                                        .extra
+                                        .get("ThemeTokens")
+                                        .and_then(Value::as_object)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    map.remove(&remove_key);
+                                    persist_theme_tokens(&mut this.settings, map);
+                                    this.sync_settings_glass(win);
+                                    this.auto_save(cx);
+                                }),
+                            )),
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
+
+        section_card(t, loc::t("ThemeStudioTitle"), body).into_any_element()
     }
 
     /// Shared Figma-style floating Color & Gradient Brush Picker modal (used by both
@@ -3562,7 +5240,9 @@ impl SettingsView {
                 t,
                 loc::t("Reset"),
                 ButtonVariant::Secondary,
-                cx.listener(move |this, _, _, cx| this.reset_border_picker_color(index, cx)),
+                cx.listener(move |this, _, window, cx| {
+                    this.reset_border_picker_color(index, window, cx)
+                }),
             ));
         } else {
             footer = footer.child(div());
@@ -3587,7 +5267,9 @@ impl SettingsView {
                     t,
                     loc::t("Apply"),
                     ButtonVariant::Primary,
-                    cx.listener(|this, _, _, cx| this.apply_brush_picker_selection(cx)),
+                    cx.listener(|this, _, window, cx| {
+                        this.apply_brush_picker_selection(window, cx)
+                    }),
                 )),
         );
         modal = modal.child(footer);
@@ -3597,6 +5279,8 @@ impl SettingsView {
                 .id("figma-brush-backdrop")
                 .absolute()
                 .inset_0()
+                // Keep the scrim inside the rounded window outline.
+                .rounded(px(settings_corner_radius(window_chrome::is_windows_11())))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3631,7 +5315,7 @@ impl SettingsView {
                     is_rain: false,
                     temp: temp.to_owned(),
                     place: if self.settings.weather_city.is_empty() {
-                        "Istanbul".to_owned()
+                        weather_fallback_city().to_owned()
                     } else {
                         self.settings.weather_city.clone()
                     },
@@ -3652,7 +5336,7 @@ impl SettingsView {
                 }
                 if self.settings.stats_meters & 2 != 0 {
                     cols.push(SystemStatColumn {
-                        label: loc::t("Memory"),
+                        label: "RAM".to_owned(),
                         value_text: "58%".to_owned(),
                         ratio: 0.58,
                         bar_color: pal.widget_accent,
@@ -3661,7 +5345,7 @@ impl SettingsView {
                 }
                 if self.settings.stats_meters & 16 != 0 {
                     cols.push(SystemStatColumn {
-                        label: loc::t("Gpu"),
+                        label: "GPU".to_owned(),
                         value_text: "38%".to_owned(),
                         ratio: 0.38,
                         bar_color: pal.success,
@@ -3760,33 +5444,37 @@ impl SettingsView {
                 columns: vec![
                     (
                         "1h".to_owned(),
-                        "18%".to_owned(),
+                        widgets::format_percent(18),
                         0.18,
                         pal.success,
                         "42m".to_owned(),
                     ),
                     (
                         "7d".to_owned(),
-                        "49%".to_owned(),
+                        widgets::format_percent(49),
                         0.49,
                         pal.success,
                         "3d".to_owned(),
                     ),
                     (
                         "30d".to_owned(),
-                        "64%".to_owned(),
+                        widgets::format_percent(64),
                         0.64,
                         pal.success,
                         "11d".to_owned(),
                     ),
                 ],
             },
-            "aiusage_copilot" => WidgetChipSpec::AiCopilot {
-                value_text: "36%".to_owned(),
-                meta_text: "14d left".to_owned(),
-                used: 0.36,
-                bar_color: (0x9f, 0x9f, 0xf2),
-            },
+            "aiusage_copilot" => {
+                let is_tr = loc::language().to_ascii_lowercase().starts_with("tr");
+                let days = if is_tr { "14g" } else { "14d" };
+                WidgetChipSpec::AiCopilot {
+                    value_text: widgets::format_percent(36),
+                    meta_text: loc::t_fmt("AiUsageBalanceLeft", &[days]),
+                    used: 0.36,
+                    bar_color: (0x9f, 0x9f, 0xf2),
+                }
+            }
             "aiusage_deepseek" => WidgetChipSpec::AiBalance {
                 provider_id: "aiusage_deepseek",
                 brand_color: (0x4d, 0x6b, 0xfe),
@@ -3851,38 +5539,43 @@ impl SettingsView {
                 time,
                 date,
                 weekday,
-            } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(icon_glyph("\u{E823}", 13.0, t.dock_preview_sub))
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(14.0)))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(time),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(10.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(date),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(weekday),
-                            ),
-                    ),
-            ),
+            } => {
+                let show_weekday = !clock_weekday_is_redundant(&date, &weekday);
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(icon_glyph("\u{E823}", 13.0, t.dock_preview_sub))
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(14.0)))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgba(t.dock_preview_fg))
+                                .child(time),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(10.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(date),
+                                )
+                                .when(show_weekday, |col| {
+                                    col.child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(9.0)))
+                                            .text_color(rgba(t.dock_preview_sub))
+                                            .child(weekday),
+                                    )
+                                }),
+                        ),
+                )
+            }
             WidgetChipSpec::Weather {
                 available,
                 icon_color,
@@ -3905,7 +5598,7 @@ impl SettingsView {
                         .items_center()
                         .gap(px(7.0))
                         .child(icon_glyph(
-                            if is_rain { "\u{E9C4}" } else { "\u{E753}" },
+                            if is_rain { "\u{E9C4}" } else { "\u{E706}" },
                             15.0,
                             crate::design::gpui_rgba(icon_color, 0xff),
                         ))
@@ -3935,10 +5628,13 @@ impl SettingsView {
                                 ),
                         );
                     if let Some(range) = today_range {
-                        row = row.child(vdiv()).child(
+                        // Secondary info: extra breathing room around the divider and muted
+                        // high/low so the current temperature + city stay the focal point.
+                        row = row.child(vdiv().mx(px(4.0))).child(
                             div()
                                 .flex()
                                 .flex_col()
+                                .opacity(0.85)
                                 .child(
                                     div()
                                         .text_size(px(fonts::scaled_size(9.0)))
@@ -3948,8 +5644,8 @@ impl SettingsView {
                                 .child(
                                     div()
                                         .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(rgba(t.dock_preview_sub))
                                         .child(range),
                                 ),
                         );
@@ -3959,43 +5655,43 @@ impl SettingsView {
             }
             WidgetChipSpec::DayProgress {
                 ratio,
-                percent,
+                percent: _,
                 unit,
-            } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .rounded(px(9.0))
-                            .border_2()
-                            .border_color(c_rgba(pal.widget_blue, 0xff))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .size(px((8.0 * ratio.clamp(0.25, 1.0)).round()))
-                                    .rounded(px(4.0))
-                                    .bg(c_rgba(pal.widget_blue, 0xaa)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(12.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(percent),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(10.0)))
-                            .text_color(rgba(t.dock_preview_sub))
-                            .child(unit),
-                    ),
-            ),
+            } => {
+                let pct = format!("{:.0}", (ratio * 100.0).clamp(0.0, 100.0));
+                let pct_text = loc::t_fmt("OpacityPercent", &[&pct]);
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(progress_ring(
+                            20.0,
+                            2.5,
+                            ratio,
+                            crate::design::gpui_rgba(pal.widget_blue, 0x38),
+                            crate::design::gpui_rgba(pal.widget_blue, 0xff),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(12.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(pct_text),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(unit),
+                                ),
+                        ),
+                )
+            }
             WidgetChipSpec::Timed {
                 is_focus,
                 running,
@@ -4005,15 +5701,29 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .child(icon_glyph(
-                        if is_focus { "\u{E7C8}" } else { "\u{E916}" },
-                        13.0,
-                        if running {
+                    .child(if is_focus {
+                        let ring_col = if running {
                             crate::design::gpui_rgba(pal.selected_fg, 0xff)
                         } else {
-                            t.dock_preview_sub
-                        },
-                    ))
+                            crate::design::gpui_rgba(pal.widget_accent, 0xcc)
+                        };
+                        progress_ring(18.0, 2.4, 0.72, track_bg, ring_col).into_any_element()
+                    } else {
+                        icon_glyph(
+                            if id == "countdown" {
+                                "\u{EA8F}"
+                            } else {
+                                "\u{E916}"
+                            },
+                            13.0,
+                            if running {
+                                crate::design::gpui_rgba(pal.selected_fg, 0xff)
+                            } else {
+                                t.dock_preview_sub
+                            },
+                        )
+                        .into_any_element()
+                    })
                     .child(
                         div()
                             .text_size(px(fonts::scaled_size(12.0)))
@@ -4072,6 +5782,7 @@ impl SettingsView {
                                 .gap(px(2.0))
                                 .child(
                                     div()
+                                        .whitespace_nowrap()
                                         .text_size(px(fonts::scaled_size(9.0)))
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .text_color(rgba(t.dock_preview_sub))
@@ -4348,10 +6059,35 @@ impl SettingsView {
                     )),
             ),
             WidgetChipSpec::Storage { drives } => {
-                let (drv, cap) = drives
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| ("C:".to_owned(), "—".to_owned()));
+                let sampled = widgets::sample_drives();
+                let (drv, used_pct, free_text, used_ratio) =
+                    if let Some(d) = sampled.iter().find(|d| d.total_gb > 0.0) {
+                        let used = (d.total_gb - d.free_gb).max(0.0);
+                        let ratio = (used / d.total_gb).clamp(0.0, 1.0) as f32;
+                        let pct = (ratio * 100.0).round() as u32;
+                        let free = if d.total_gb >= 972.8 {
+                            format!(
+                                "{} TB",
+                                widgets::telemetry::culture_number(d.free_gb / 1024.0, 1)
+                            )
+                        } else {
+                            format!("{} GB", widgets::telemetry::culture_number(d.free_gb, 0))
+                        };
+                        (format!("{}:", d.letter), pct, free, ratio)
+                    } else if let Some((drv, cap)) = drives.first() {
+                        let free = cap.split(" / ").next().unwrap_or(cap).to_owned();
+                        (drv.clone(), 55, free, 0.55)
+                    } else {
+                        ("C:".to_owned(), 55, "213 GB".to_owned(), 0.55)
+                    };
+                let pct_text = loc::t_fmt("OpacityPercent", &[&used_pct.to_string()]);
+                let bar_col = if used_pct >= 90 {
+                    pal.danger
+                } else if used_pct >= 75 {
+                    pal.warning
+                } else {
+                    pal.widget_blue
+                };
                 chip(
                     div()
                         .flex()
@@ -4362,19 +6098,27 @@ impl SettingsView {
                             div()
                                 .flex()
                                 .flex_col()
+                                .gap(px(2.0))
                                 .child(
                                     div()
-                                        .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
-                                        .child(drv),
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(10.0)))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgba(t.dock_preview_fg))
+                                                .child(format!("{drv} {pct_text}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(9.0)))
+                                                .text_color(rgba(t.dock_preview_sub))
+                                                .child(free_text),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(cap),
-                                ),
+                                .child(mini_bar(used_ratio, bar_col, 72.0)),
                         ),
                 )
             }
@@ -4421,32 +6165,58 @@ impl SettingsView {
                         t.dock_preview_sub,
                     )),
             ),
-            WidgetChipSpec::Audio { volume, muted } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(icon_glyph(
-                        if muted { "\u{E74F}" } else { "\u{E767}" },
-                        13.0,
-                        if muted {
-                            crate::design::gpui_rgba(pal.danger_fg, 0xff)
-                        } else {
-                            t.dock_preview_fg
-                        },
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(12.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(if muted {
-                                loc::t("MediaMute")
-                            } else {
-                                loc::t_fmt("OpacityPercent", &[&volume.to_string()])
-                            }),
-                    ),
-            ),
+            WidgetChipSpec::Audio { volume, muted } => {
+                let silent = muted || volume == 0;
+                let glyph = if silent {
+                    "\u{E74F}"
+                } else if volume < 50 {
+                    "\u{E993}"
+                } else {
+                    "\u{E995}"
+                };
+                let display_pct = if muted { 0 } else { volume };
+                let ratio = if silent {
+                    0.0
+                } else {
+                    (volume as f32 / 100.0).clamp(0.0, 1.0)
+                };
+                chip(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(icon_glyph(
+                                    glyph,
+                                    13.0,
+                                    if silent {
+                                        t.dock_preview_sub
+                                    } else {
+                                        t.dock_preview_fg
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(12.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(if silent {
+                                            t.dock_preview_sub
+                                        } else {
+                                            t.dock_preview_fg
+                                        }))
+                                        .child(loc::t_fmt(
+                                            "OpacityPercent",
+                                            &[&display_pct.to_string()],
+                                        )),
+                                ),
+                        )
+                        .child(mini_bar(ratio, pal.widget_blue, 52.0)),
+                )
+            }
             WidgetChipSpec::QuickSettings { pills } => {
                 chip(div().flex().items_center().gap(px(4.0)).children(
                     pills.into_iter().enumerate().map(|(i, (glyph, active))| {
@@ -4513,14 +6283,7 @@ impl SettingsView {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(
-                            div()
-                                .size(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(c_rgba(dot_col, 0x33))
-                                .border_1()
-                                .border_color(c_rgba(dot_col, 0xcc)),
-                        )
+                        .child(ai_brand_badge(provider_id, dot_col, is_dark))
                         .child(div().flex().flex_col().gap(px(3.0)).children(
                             rows.into_iter().take(2).map(|(lbl, used, col, reset)| {
                                 div()
@@ -4545,26 +6308,47 @@ impl SettingsView {
                         )),
                 )
             }
-            WidgetChipSpec::AiOpenCode { columns } => {
-                chip(div().flex().items_center().gap(px(7.0)).children(
-                    columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(loc::t_fmt(
-                                        "MetricValue",
-                                        &[&lbl.to_owned(), &val.to_owned()],
-                                    )),
-                            )
-                            .child(mini_bar(used, col, 36.0))
-                    }),
-                ))
-            }
+            WidgetChipSpec::AiOpenCode { columns } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(ai_brand_badge(
+                        "aiusage_opencode",
+                        widgets::ai_provider_color("aiusage_opencode"),
+                        is_dark,
+                    ))
+                    .child(div().flex().items_center().gap(px(7.0)).children(
+                        columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .w(px(40.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap(px(3.0))
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(8.5)))
+                                                .text_color(rgba(t.dock_preview_sub))
+                                                .child(lbl),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(9.0)))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgba(t.dock_preview_fg))
+                                                .child(val),
+                                        ),
+                                )
+                                .child(mini_bar(used, col, 40.0))
+                        }),
+                    )),
+            ),
             WidgetChipSpec::AiCopilot {
                 value_text,
                 meta_text,
@@ -4573,29 +6357,36 @@ impl SettingsView {
             } => chip(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(ai_brand_badge("aiusage_copilot", bar_color, is_dark))
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
+                            .flex_col()
+                            .gap(px(3.0))
                             .child(
                                 div()
-                                    .text_size(px(fonts::scaled_size(11.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(value_text),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(11.0)))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgba(t.dock_preview_fg))
+                                            .child(value_text),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(9.0)))
+                                            .text_color(rgba(t.dock_preview_sub))
+                                            .child(meta_text),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(meta_text),
-                            ),
-                    )
-                    .child(mini_bar(used, bar_color, 88.0)),
+                            .child(mini_bar(used, bar_color, 72.0)),
+                    ),
             ),
             WidgetChipSpec::AiBalance {
                 provider_id,
@@ -4609,14 +6400,7 @@ impl SettingsView {
                         .flex()
                         .items_center()
                         .gap(px(7.0))
-                        .child(
-                            div()
-                                .size(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(c_rgba(dot_col, 0x33))
-                                .border_1()
-                                .border_color(c_rgba(dot_col, 0xcc)),
-                        )
+                        .child(ai_brand_badge(provider_id, dot_col, is_dark))
                         .child(vdiv())
                         .child(
                             div()
@@ -4743,26 +6527,34 @@ impl SettingsView {
     }
 
     fn sync_dock_pins(&mut self) {
-        let saved = settings::load_from(&settings::settings_path());
-        self.settings.user_pinned_apps = saved.user_pinned_apps;
-        self.settings.user_unpinned_apps = saved.user_unpinned_apps;
-        self.settings.user_pinned_background_apps = saved.user_pinned_background_apps;
-        self.settings.pin_order = saved.pin_order;
+        if let Ok(saved) = settings::try_load_from(&settings::settings_path()) {
+            self.settings.user_pinned_apps = saved.user_pinned_apps;
+            self.settings.user_unpinned_apps = saved.user_unpinned_apps;
+            self.settings.user_pinned_background_apps = saved.user_pinned_background_apps;
+            self.settings.pin_order = saved.pin_order;
+        }
     }
 
     /// Flushes a debounced write before the window goes away so a quick close cannot lose changes.
     fn flush_pending_save(&mut self, cx: &mut Context<Self>) {
         if self.save_pending {
             self.save_pending = false;
+            self.save_generation = self.save_generation.wrapping_add(1);
             self.sync_dock_pins();
             self.save_settings(cx);
         }
     }
 
     fn save_settings(&mut self, cx: &mut Context<Self>) {
-        self.save_failed = settings::save_to(&settings::settings_path(), &self.settings).is_err();
-        if !self.save_failed {
-            notify_docks_reload();
+        match settings::save_to(&settings::settings_path(), &self.settings) {
+            Ok(()) => {
+                self.save_error = None;
+                notify_docks_reload();
+            }
+            Err(err) => {
+                opentaskbar_core::log::error(format!("Settings save failed: {err}"));
+                self.save_error = Some(err.to_string());
+            }
         }
         cx.notify();
     }
@@ -4791,11 +6583,10 @@ impl SettingsView {
 
     fn import_theme(&mut self, cx: &mut Context<Self>) {
         let title = loc::t("ThemePackChooseFile");
-        let label = loc::t("ThemePackImport");
-        let Some(path) = prompt::ask_name(0, self.is_dark(), &title, &label, "") else {
+        let filter_name = loc::t("ThemePack");
+        let Some(archive) = prompt::open_file(&title, &filter_name, "*.ottheme;*.zip") else {
             return;
         };
-        let archive = std::path::PathBuf::from(path.trim());
         if !archive.is_file() {
             self.theme_status = loc::t("ThemePackMissing");
             cx.notify();
@@ -4810,26 +6601,38 @@ impl SettingsView {
 
     fn export_theme(&mut self, id: &str, cx: &mut Context<Self>) {
         let title = loc::t("ThemePackSaveFile");
-        let label = loc::t("ThemePackExport");
-        let Some(path) = prompt::ask_name(0, self.is_dark(), &title, &label, "") else {
+        let filter_name = loc::t("ThemePack");
+        let default_name = format!("{id}.ottheme");
+        let Some(path) = prompt::save_file(&title, &default_name, &filter_name, "*.ottheme") else {
             return;
         };
-        self.theme_status = match theme_packs::export_theme(
-            &Self::themes_root(),
-            id,
-            std::path::Path::new(path.trim()),
-        ) {
+        self.theme_status = match theme_packs::export_theme(&Self::themes_root(), id, &path) {
             Ok(()) => loc::t("ThemePackExported"),
             Err(error) => error,
         };
         cx.notify();
     }
 
-    fn delete_theme(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.theme_status = match theme_packs::delete_theme(&Self::themes_root(), id) {
-            Ok(()) => loc::t("ThemePackDeleted"),
-            Err(error) => error,
-        };
+    fn delete_theme(&mut self, id: &str, window: Option<&Window>, cx: &mut Context<Self>) {
+        if theme_packs::is_built_in(id) {
+            return;
+        }
+        let was_active = self.settings.theme_pack.eq_ignore_ascii_case(id);
+        match theme_packs::delete_theme(&Self::themes_root(), id) {
+            Ok(()) => {
+                self.theme_status = loc::t("ThemePackDeleted");
+                if was_active {
+                    self.settings.theme_pack.clear();
+                    self.custom_theme_name.clear();
+                    self.custom_theme_name_selection = 0..0;
+                    self.apply_theme_change(window, true, cx);
+                    return;
+                }
+            }
+            Err(error) => {
+                self.theme_status = error;
+            }
+        }
         cx.notify();
     }
 
@@ -5030,10 +6833,17 @@ impl SettingsView {
             return;
         };
         let text = text.trim().to_owned();
-        if !text.is_empty() && parse_hex_color(&text).is_none() {
+        if text.is_empty() {
+            self.settings.dynamic_island_background_color = None;
+            self.auto_save(cx);
             return;
         }
-        self.settings.dynamic_island_background_color = (!text.is_empty()).then_some(text);
+        let Some(parsed) = TokenRgba::from_hex(&text).filter(|_| parse_hex_color(&text).is_some())
+        else {
+            return;
+        };
+        let normalized = format!("#{:02X}{:02X}{:02X}", parsed.r, parsed.g, parsed.b);
+        self.settings.dynamic_island_background_color = Some(normalized);
         self.auto_save(cx);
     }
 
@@ -5124,7 +6934,7 @@ impl SettingsView {
                 },
                 move |i| {
                     let entity = cx.entity().downgrade();
-                    std::rc::Rc::new(move |_win, app| {
+                    std::rc::Rc::new(move |win, app| {
                         let _ = entity.update(app, |this, cx| {
                             let next = (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
                             let (old, target) = match kind {
@@ -5146,6 +6956,9 @@ impl SettingsView {
                             let changed = (old - next).abs() > 0.001;
                             *target = next;
                             let _ = ThemeManager::set_surface(kind, background, next);
+                            if kind == SurfaceKind::Settings {
+                                this.sync_settings_glass(win);
+                            }
                             if changed {
                                 this.auto_save(cx);
                             } else {
@@ -5456,9 +7269,9 @@ impl SettingsView {
             "dock-width-mode",
             t,
             vec![
-                (loc::t("Auto"), DockWidthMode::Auto),
-                (loc::t("Pixels"), DockWidthMode::Pixels),
-                (loc::t("Percent"), DockWidthMode::Percent),
+                (loc::t("UnitAuto"), DockWidthMode::Auto),
+                (loc::t("UnitPixels"), DockWidthMode::Pixels),
+                (loc::t("UnitPercent"), DockWidthMode::Percent),
                 (loc::t("DockWidthFill"), DockWidthMode::Fill),
             ],
             self.settings.dock_width_mode,
@@ -5472,9 +7285,9 @@ impl SettingsView {
             "dock-height-mode",
             t,
             vec![
-                (loc::t("Auto"), DockHeightMode::Auto),
-                (loc::t("Pixels"), DockHeightMode::Pixels),
-                (loc::t("Percent"), DockHeightMode::Percent),
+                (loc::t("UnitAuto"), DockHeightMode::Auto),
+                (loc::t("UnitPixels"), DockHeightMode::Pixels),
+                (loc::t("UnitPercent"), DockHeightMode::Percent),
                 (loc::t("DockHeightFill"), DockHeightMode::Fill),
             ],
             self.settings.dock_height_mode,
@@ -5488,8 +7301,8 @@ impl SettingsView {
             "dock-top-gap-unit",
             t,
             vec![
-                (loc::t("Pixels"), DockGapUnit::Pixels),
-                (loc::t("Percent"), DockGapUnit::Percent),
+                (loc::t("UnitPixels"), DockGapUnit::Pixels),
+                (loc::t("UnitPercent"), DockGapUnit::Percent),
             ],
             self.settings.dock_top_gap_unit,
             |this, value, cx| {
@@ -5503,15 +7316,19 @@ impl SettingsView {
             DockWidthMode::Percent => loc::t("DockWidthPercent"),
             _ => loc::t("DockWidthMode"),
         };
-        let width_value = self.number_stepper(
+        let (width_min, width_max, width_step) =
+            dock_width_stepper_bounds(self.settings.dock_width_mode);
+        let width_value = self.number_stepper_with_suffix(
             "dock-width-value",
             t,
             match self.settings.dock_width_mode {
                 DockWidthMode::Percent => self.settings.dock_width_percent,
                 _ => self.settings.dock_width_pixels,
             },
-            0,
-            100,
+            unit_suffix(self.settings.dock_width_mode == DockWidthMode::Percent),
+            width_min,
+            width_max,
+            width_step,
             |s| {
                 if s.dock_width_mode == DockWidthMode::Percent {
                     s.dock_width_percent
@@ -5529,19 +7346,23 @@ impl SettingsView {
             cx,
         );
         let height_value_label = match self.settings.dock_height_mode {
-            DockHeightMode::Pixels => loc::t("Pixels"),
-            DockHeightMode::Percent => loc::t("Percent"),
+            DockHeightMode::Pixels => loc::t("DockHeightPixels"),
+            DockHeightMode::Percent => loc::t("DockHeightPercent"),
             _ => loc::t("DockHeightMode"),
         };
-        let height_value = self.number_stepper(
+        let (height_min, height_max, height_step) =
+            dock_height_stepper_bounds(self.settings.dock_height_mode);
+        let height_value = self.number_stepper_with_suffix(
             "dock-height-value",
             t,
             match self.settings.dock_height_mode {
                 DockHeightMode::Percent => self.settings.dock_height_percent,
                 _ => self.settings.dock_height_pixels,
             },
-            0,
-            100,
+            unit_suffix(self.settings.dock_height_mode == DockHeightMode::Percent),
+            height_min,
+            height_max,
+            height_step,
             |s| {
                 if s.dock_height_mode == DockHeightMode::Percent {
                     s.dock_height_percent
@@ -5558,15 +7379,19 @@ impl SettingsView {
             },
             cx,
         );
-        let top_gap_value = self.number_stepper(
+        let (top_gap_min, top_gap_max, top_gap_step) =
+            dock_top_gap_stepper_bounds(self.settings.dock_top_gap_unit);
+        let top_gap_value = self.number_stepper_with_suffix(
             "dock-top-gap-value",
             t,
             match self.settings.dock_top_gap_unit {
                 DockGapUnit::Percent => self.settings.dock_top_gap_percent,
                 DockGapUnit::Pixels => self.settings.dock_top_gap_pixels,
             },
-            0,
-            100,
+            unit_suffix(self.settings.dock_top_gap_unit == DockGapUnit::Percent),
+            top_gap_min,
+            top_gap_max,
+            top_gap_step,
             |s| {
                 if s.dock_top_gap_unit == DockGapUnit::Percent {
                     s.dock_top_gap_percent
@@ -5584,216 +7409,220 @@ impl SettingsView {
             cx,
         );
 
-        let out = vec![
-            section_card(
+        // Auto/Fill sizes are computed by the dock, so their numeric steppers are hidden.
+        let mut layout_rows = vec![
+            self.target_row(
+                "DockAlignment",
                 t,
-                loc::t("SectionDockLayout"),
-                vec![
-                    self.target_row(
-                        "DockAlignment",
-                        t,
-                        Some("\u{E8E3}"),
-                        loc::t("DockAlignment"),
-                        align_dd,
-                    ),
-                    self.target_row(
-                        "ContentAlignment",
-                        t,
-                        Some("\u{E8E3}"),
-                        loc::t("ContentAlignment"),
-                        content_align,
-                    ),
-                    self.target_row(
-                        "DockWidthMode",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("DockWidthMode"),
-                        width_mode,
-                    ),
-                    self.target_row(
-                        "DockWidthValue",
-                        t,
-                        Some("\u{E740}"),
-                        width_value_label,
-                        width_value,
-                    ),
-                    self.target_row(
-                        "DockHeightMode",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("DockHeightMode"),
-                        height_mode,
-                    ),
-                    self.target_row(
-                        "DockHeightValue",
-                        t,
-                        Some("\u{E740}"),
-                        height_value_label,
-                        height_value,
-                    ),
-                    self.target_row(
-                        "DockTopGap",
-                        t,
-                        Some("\u{E96F}"),
-                        loc::t("DockTopGap"),
-                        top_gap_unit,
-                    ),
-                    self.target_row(
-                        "DockTopGapValue",
-                        t,
-                        Some("\u{E96F}"),
-                        loc::t("DockTopGap"),
-                        top_gap_value,
-                    ),
-                    self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
-                    self.target_row(
-                        "StartPlacement",
-                        t,
-                        Some("\u{E7C5}"),
-                        loc::t("StartButtonPlacement"),
-                        start_placement_dd,
-                    ),
-                    self.target_row(
-                        "StartWidgetIndex",
-                        t,
-                        Some("\u{E9A6}"),
-                        loc::t("StartWidgetIndex"),
-                        stepper(
-                            "start-widget-index-minus",
-                            "start-widget-index-plus",
-                            t,
-                            self.settings.start_widget_index.to_string(),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.start_widget_index =
-                                    (this.settings.start_widget_index - 1).max(0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.start_widget_index =
-                                    (this.settings.start_widget_index + 1).min(32);
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    ),
-                    self.target_row(
-                        "DockScale",
-                        t,
-                        Some("\u{E8A3}"),
-                        loc::t("DockScale"),
-                        live_slider(
-                            "sc",
-                            t,
-                            ((self.settings.dock_scale as f32) - 0.75) / 0.75,
-                            16,
-                            loc::t_fmt("OpacityPercent", &[&scale_pct.to_string()]),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
-                                        if (this.settings.dock_scale - next).abs() > 0.001 {
-                                            this.settings.dock_scale = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "DockBottomGap",
-                        t,
-                        Some("\u{E96F}"),
-                        loc::t("DockBottomGap"),
-                        live_slider(
-                            "gap",
-                            t,
-                            self.settings.dock_bottom_gap_pixels as f32 / 32.0,
-                            17,
-                            loc::t_fmt(
-                                "PixelsValue",
-                                &[&self.settings.dock_bottom_gap_pixels.to_string()],
-                            ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = ((i as i32) * 2).clamp(0, 32);
-                                        if this.settings.dock_bottom_gap_pixels != next {
-                                            this.settings.dock_bottom_gap_pixels = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "DockIconPadding",
-                        t,
-                        Some("\u{E96E}"),
-                        loc::t("DockIconPadding"),
-                        live_slider(
-                            "pad",
-                            t,
-                            self.settings.dock_icon_padding as f32 / 12.0,
-                            13,
-                            loc::t_fmt(
-                                "PixelsValue",
-                                &[&self.settings.dock_icon_padding.to_string()],
-                            ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (i as i32).clamp(0, 12);
-                                        if this.settings.dock_icon_padding != next {
-                                            this.settings.dock_icon_padding = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "LayoutFullWidth",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("LayoutFullWidth"),
-                        ios_switch(
-                            "sw-fullw",
-                            t,
-                            self.settings.full_width,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.full_width = !this.settings.full_width;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E72C}"),
-                        width_label,
-                        button(
-                            "btn-reset-width",
-                            t,
-                            loc::t("Reset"),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_custom_width_dips = None;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
+                Some("\u{E8E3}"),
+                loc::t("DockAlignment"),
+                align_dd,
+            ),
+            self.target_row(
+                "ContentAlignment",
+                t,
+                Some("\u{E8E3}"),
+                loc::t("ContentAlignment"),
+                content_align,
+            ),
+            self.target_row(
+                "DockWidthMode",
+                t,
+                Some(DOCK_WIDTH_GLYPH),
+                loc::t("DockWidthMode"),
+                width_mode,
+            ),
+        ];
+        if dock_width_has_value(self.settings.dock_width_mode) {
+            layout_rows.push(self.target_row(
+                "DockWidthValue",
+                t,
+                Some(DOCK_WIDTH_GLYPH),
+                width_value_label,
+                width_value,
+            ));
+        }
+        layout_rows.push(self.target_row(
+            "DockHeightMode",
+            t,
+            Some(DOCK_HEIGHT_GLYPH),
+            loc::t("DockHeightMode"),
+            height_mode,
+        ));
+        if dock_height_has_value(self.settings.dock_height_mode) {
+            layout_rows.push(self.target_row(
+                "DockHeightValue",
+                t,
+                Some(DOCK_HEIGHT_GLYPH),
+                height_value_label,
+                height_value,
+            ));
+        }
+        layout_rows.extend([
+            self.target_row(
+                "DockTopGap",
+                t,
+                Some(DOCK_GAP_GLYPH),
+                loc::t("DockTopGapUnit"),
+                top_gap_unit,
+            ),
+            self.target_row(
+                "DockTopGapValue",
+                t,
+                Some(DOCK_GAP_GLYPH),
+                loc::t("DockTopGap"),
+                top_gap_value,
+            ),
+            self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
+            self.target_row(
+                "StartPlacement",
+                t,
+                Some("\u{E7C5}"),
+                loc::t("StartButtonPlacement"),
+                start_placement_dd,
+            ),
+            self.target_row(
+                "StartWidgetIndex",
+                t,
+                Some("\u{E9A6}"),
+                loc::t("StartWidgetIndex"),
+                stepper(
+                    "start-widget-index-minus",
+                    "start-widget-index-plus",
+                    t,
+                    self.settings.start_widget_index.to_string(),
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.start_widget_index =
+                            (this.settings.start_widget_index - 1).max(0);
+                        this.auto_save(cx);
+                    }),
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.start_widget_index =
+                            (this.settings.start_widget_index + 1).min(32);
+                        this.auto_save(cx);
+                    }),
+                ),
+            ),
+            self.target_row(
+                "DockScale",
+                t,
+                Some("\u{E8A3}"),
+                loc::t("DockScale"),
+                live_slider(
+                    "sc",
+                    t,
+                    ((self.settings.dock_scale as f32) - 0.75) / 0.75,
+                    16,
+                    loc::t_fmt("OpacityPercent", &[&scale_pct.to_string()]),
+                    |i| {
+                        let entity = cx.entity().downgrade();
+                        std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
+                                if (this.settings.dock_scale - next).abs() > 0.001 {
+                                    this.settings.dock_scale = next;
+                                    this.auto_save(cx);
+                                }
+                            });
+                        })
+                    },
+                ),
             )
             .into_any_element(),
+            self.target_row(
+                "DockBottomGap",
+                t,
+                Some(DOCK_GAP_GLYPH),
+                loc::t("DockBottomGap"),
+                live_slider(
+                    "gap",
+                    t,
+                    self.settings.dock_bottom_gap_pixels as f32 / 32.0,
+                    17,
+                    loc::t_fmt(
+                        "PixelsValue",
+                        &[&self.settings.dock_bottom_gap_pixels.to_string()],
+                    ),
+                    |i| {
+                        let entity = cx.entity().downgrade();
+                        std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                let next = ((i as i32) * 2).clamp(0, 32);
+                                if this.settings.dock_bottom_gap_pixels != next {
+                                    this.settings.dock_bottom_gap_pixels = next;
+                                    this.auto_save(cx);
+                                }
+                            });
+                        })
+                    },
+                ),
+            )
+            .into_any_element(),
+            self.target_row(
+                "DockIconPadding",
+                t,
+                Some("\u{E96E}"),
+                loc::t("DockIconPadding"),
+                live_slider(
+                    "pad",
+                    t,
+                    self.settings.dock_icon_padding as f32 / 12.0,
+                    13,
+                    loc::t_fmt(
+                        "PixelsValue",
+                        &[&self.settings.dock_icon_padding.to_string()],
+                    ),
+                    |i| {
+                        let entity = cx.entity().downgrade();
+                        std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                let next = (i as i32).clamp(0, 12);
+                                if this.settings.dock_icon_padding != next {
+                                    this.settings.dock_icon_padding = next;
+                                    this.auto_save(cx);
+                                }
+                            });
+                        })
+                    },
+                ),
+            )
+            .into_any_element(),
+            self.target_row(
+                "LayoutFullWidth",
+                t,
+                Some("\u{E740}"),
+                loc::t("LayoutFullWidth"),
+                ios_switch(
+                    "sw-fullw",
+                    t,
+                    self.settings.full_width,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.full_width = !this.settings.full_width;
+                        this.auto_save(cx);
+                    }),
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E72C}"),
+                width_label,
+                button(
+                    "btn-reset-width",
+                    t,
+                    loc::t("Reset"),
+                    ButtonVariant::Secondary,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.dock_custom_width_dips = None;
+                        this.auto_save(cx);
+                    }),
+                ),
+            )
+            .into_any_element(),
+        ]);
+
+        let out = vec![
+            section_card(t, loc::t("SectionDockLayout"), layout_rows).into_any_element(),
             section_card(
                 t,
                 format!(
@@ -6059,7 +7888,481 @@ impl SettingsView {
         out
     }
 
-    fn render_themes(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_theme_card(
+        &self,
+        t: &UiTheme,
+        spec: ThemeCardSpec,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ThemeCardSpec {
+            id,
+            title,
+            is_built_in,
+            swatches,
+            preserve_original_icons,
+        } = spec;
+        let active = match &id {
+            None => self.settings.theme_pack.trim().is_empty(),
+            Some(pack_id) => self.settings.theme_pack.eq_ignore_ascii_case(pack_id),
+        };
+        let card_id = id.as_deref().unwrap_or("windows-default").to_owned();
+        let border_col = if active { t.accent } else { t.border };
+        let card_hover = t.surface_hover;
+
+        // Mini dock preview bar computed from the theme's 5 swatches
+        let mini_dock = div()
+            .w_full()
+            .h(px(46.0))
+            .rounded(px(9.0))
+            .bg(rgba(swatches.card.to_gpui()))
+            .border_1()
+            .border_color(rgba(swatches.border.to_gpui()))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(10.0))
+            .child(
+                div()
+                    .h(px(26.0))
+                    .px(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(rgba(swatches.surface.to_gpui()))
+                    .border_1()
+                    .border_color(rgba(swatches.border.to_gpui()))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(
+                        div()
+                            .size(px(10.0))
+                            .rounded(px(3.0))
+                            .bg(rgba(swatches.accent.to_gpui())),
+                    )
+                    .child(
+                        div()
+                            .size(px(10.0))
+                            .rounded(px(3.0))
+                            .bg(rgba(swatches.text.with_alpha(0x55).to_gpui())),
+                    )
+                    .child(
+                        div()
+                            .size(px(10.0))
+                            .rounded(px(3.0))
+                            .bg(rgba(swatches.text.with_alpha(0x33).to_gpui())),
+                    )
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(12.0))
+                            .bg(rgba(swatches.border.to_gpui())),
+                    )
+                    .child(
+                        div()
+                            .px(px(5.0))
+                            .h(px(14.0))
+                            .rounded(px(4.0))
+                            .bg(rgba(swatches.card.to_gpui()))
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .w(px(18.0))
+                                    .h(px(3.0))
+                                    .rounded(px(1.5))
+                                    .bg(rgba(swatches.text.to_gpui())),
+                            ),
+                    ),
+            );
+
+        // 5-color swatch strip
+        let swatch_strip = div()
+            .w_full()
+            .h(px(7.0))
+            .rounded(px(3.5))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgba(t.border))
+            .flex()
+            .children(
+                [
+                    swatches.surface,
+                    swatches.card,
+                    swatches.accent,
+                    swatches.text,
+                    swatches.border,
+                ]
+                .into_iter()
+                .map(|c| div().flex_1().h_full().bg(rgba(c.to_gpui()))),
+            );
+
+        // Direct one-click Apply / Active control
+        let apply_control: AnyElement = if active {
+            badge(t, format!("✓ {}", loc::t("ThemeActive")), true).into_any_element()
+        } else {
+            let apply_id = id.clone();
+            let apply_title = title.clone();
+            compact_card_button(
+                SharedString::from(format!("theme-apply-{card_id}")),
+                t,
+                loc::t("ThemeApply"),
+                true,
+                cx.listener(move |this, _, win, cx| {
+                    this.open_dropdown = None;
+                    this.settings.theme_pack = apply_id.clone().unwrap_or_default();
+                    if let Some(ref pid) = apply_id
+                        && !theme_packs::is_built_in(pid)
+                    {
+                        this.custom_theme_name = apply_title.clone();
+                        let len = this.custom_theme_name.encode_utf16().count();
+                        this.custom_theme_name_selection = len..len;
+                    } else {
+                        this.custom_theme_name.clear();
+                        this.custom_theme_name_selection = 0..0;
+                    }
+                    persist_theme_tokens(&mut this.settings, Map::new());
+                    this.apply_theme_change(Some(win), true, cx);
+                }),
+            )
+            .into_any_element()
+        };
+
+        // Compact `⋮` action menu for installed theme packs
+        let menu_control: Option<AnyElement> = id.as_ref().map(|pack_id| {
+            let entity = cx.entity().downgrade();
+            let edit_action: DropdownSelectHandler = {
+                let entity = entity.clone();
+                let pid = pack_id.clone();
+                let display_title = title.clone();
+                std::rc::Rc::new(move |win, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.open_dropdown = None;
+                        if is_built_in {
+                            let clone_name = loc::t_fmt("ThemeNewEditableName", &[&display_title]);
+                            match theme_packs::create_theme_named(
+                                &clone_name,
+                                None,
+                                Some(&pid),
+                                true,
+                            ) {
+                                Ok(cloned) => {
+                                    this.settings.theme_pack = cloned.id.clone();
+                                    this.custom_theme_name = cloned.display_name().to_owned();
+                                    let len = this.custom_theme_name.encode_utf16().count();
+                                    this.custom_theme_name_selection = len..len;
+                                    this.theme_status = loc::t("ThemePackCreated");
+                                    this.apply_theme_change(Some(win), true, cx);
+                                }
+                                Err(err) => {
+                                    this.theme_status = loc::t_fmt("ThemeCreationFailed", &[&err]);
+                                    cx.notify();
+                                }
+                            }
+                        } else {
+                            this.settings.theme_pack = pid.clone();
+                            this.custom_theme_name = display_title.clone();
+                            let len = this.custom_theme_name.encode_utf16().count();
+                            this.custom_theme_name_selection = len..len;
+                            this.apply_theme_change(Some(win), true, cx);
+                        }
+                        this.custom_theme_name_focus.focus(win);
+                    });
+                })
+            };
+            let duplicate_action: DropdownSelectHandler = {
+                let entity = entity.clone();
+                let pid = pack_id.clone();
+                std::rc::Rc::new(move |_win, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.open_dropdown = None;
+                        this.theme_status =
+                            match theme_packs::create_theme(Some(&pid), preserve_original_icons) {
+                                Ok(_) => loc::t("ThemePackDuplicated"),
+                                Err(err) => loc::t_fmt("ThemeCreationFailed", &[&err]),
+                            };
+                        cx.notify();
+                    });
+                })
+            };
+            let export_action: DropdownSelectHandler = {
+                let entity = entity.clone();
+                let pid = pack_id.clone();
+                std::rc::Rc::new(move |_win, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.open_dropdown = None;
+                        this.export_theme(&pid, cx);
+                    });
+                })
+            };
+            let mut options = vec![
+                DropdownOption {
+                    label: SharedString::from(loc::t("Edit")),
+                    flag_path: None,
+                    glyph: Some("\u{E70F}"),
+                    selected: false,
+                    on_select: edit_action,
+                },
+                DropdownOption {
+                    label: SharedString::from(loc::t("ThemePackDuplicate")),
+                    flag_path: None,
+                    glyph: Some("\u{E8C8}"),
+                    selected: false,
+                    on_select: duplicate_action,
+                },
+                DropdownOption {
+                    label: SharedString::from(loc::t("ThemePackExport")),
+                    flag_path: None,
+                    glyph: Some("\u{EDE1}"),
+                    selected: false,
+                    on_select: export_action,
+                },
+            ];
+            if !is_built_in {
+                let pid = pack_id.clone();
+                let delete_action: DropdownSelectHandler = std::rc::Rc::new(move |win, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.open_dropdown = None;
+                        this.delete_theme(&pid, Some(win), cx);
+                    });
+                });
+                options.push(DropdownOption {
+                    label: SharedString::from(loc::t("ThemePackDelete")),
+                    flag_path: None,
+                    glyph: Some("\u{E74D}"),
+                    selected: false,
+                    on_select: delete_action,
+                });
+            }
+            self.make_icon_action_menu(format!("theme-actions-{pack_id}"), t, options, cx)
+                .into_any_element()
+        });
+
+        div()
+            .id(SharedString::from(format!("theme-card-{card_id}")))
+            .flex_1()
+            .min_w_0()
+            .p(px(11.0))
+            .rounded(px(11.0))
+            .bg(rgba(t.surface))
+            .border_1()
+            .border_color(rgba(border_col))
+            .hover(move |s| s.bg(rgba(card_hover)))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(mini_dock)
+            .child(swatch_strip)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(fonts::scaled_size(12.5)))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.text_primary))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(fonts::scaled_size(10.0)))
+                                    .text_color(rgba(t.text_secondary))
+                                    .child(loc::t(if is_built_in {
+                                        "ThemeBuiltInBadge"
+                                    } else {
+                                        "ThemeCustomBadge"
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .child(apply_control)
+                            .when_some(menu_control, |row, menu| row.child(menu)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_themes(
+        &self,
+        t: &UiTheme,
+        is_dark: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let effective_theme = if is_dark {
+            AppTheme::Dark
+        } else {
+            AppTheme::Light
+        };
+
+        // ---------------------------------------------------------------------
+        // SECTION 1 (AT THE VERY TOP): Theme Presets Gallery (`ThemePack`)
+        // ---------------------------------------------------------------------
+        let mut gallery_rows: Vec<AnyElement> = Vec::new();
+        let mut action_bar = div()
+            .w_full()
+            .px(px(16.0))
+            .py(px(10.0))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(button(
+                        "btn-theme-new",
+                        t,
+                        format!("+ {}", loc::t("ThemePackNew")),
+                        ButtonVariant::Primary,
+                        cx.listener(|this, _, win, cx| {
+                            this.custom_theme_name = loc::t("ThemePackNewDefault");
+                            let len = this.custom_theme_name.encode_utf16().count();
+                            this.custom_theme_name_selection = len..len;
+                            this.custom_theme_name_focus.focus(win);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "btn-theme-import",
+                        t,
+                        loc::t("ThemePackImport"),
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| this.import_theme(cx)),
+                    ))
+                    .child(button(
+                        "btn-theme-folder",
+                        t,
+                        loc::t("ThemePackOpenFolder"),
+                        ButtonVariant::Secondary,
+                        cx.listener(|_, _, _, _| {
+                            pins::launch(Self::themes_root().to_string_lossy().into_owned());
+                        }),
+                    )),
+            );
+        if !self.theme_status.is_empty() {
+            action_bar = action_bar.child(badge(t, self.theme_status.clone(), true));
+        }
+        gallery_rows.push(
+            self.mark_target("ThemePack", t, action_bar)
+                .into_any_element(),
+        );
+
+        let all_packs = theme_packs::discover(&Self::themes_root());
+        let (built_in_packs, custom_packs): (Vec<_>, Vec<_>) = all_packs
+            .into_iter()
+            .partition(|pack| theme_packs::is_built_in(&pack.id));
+
+        let stock_pal = crate::design::palette(is_dark);
+        let win_accent = crate::design::windows_palette::read_for(is_dark)
+            .tokens()
+            .get("AccentBrush")
+            .and_then(crate::design::theme::token_rgba)
+            .unwrap_or_else(|| {
+                TokenRgba::from_rgb(stock_pal.accent.0, stock_pal.accent.1, stock_pal.accent.2)
+            });
+        let win_default_swatches = ThemePreviewSwatches {
+            surface: TokenRgba::from_rgb(
+                stock_pal.dock_pill.0,
+                stock_pal.dock_pill.1,
+                stock_pal.dock_pill.2,
+            ),
+            card: TokenRgba::from_rgb(
+                stock_pal.elevated.0,
+                stock_pal.elevated.1,
+                stock_pal.elevated.2,
+            ),
+            accent: win_accent,
+            text: TokenRgba::from_rgb(
+                stock_pal.text_primary.0,
+                stock_pal.text_primary.1,
+                stock_pal.text_primary.2,
+            ),
+            border: TokenRgba::from_rgb(
+                stock_pal.border_rgb.0,
+                stock_pal.border_rgb.1,
+                stock_pal.border_rgb.2,
+            ),
+        };
+
+        let mut theme_cards: Vec<AnyElement> = Vec::new();
+        theme_cards.push(self.render_theme_card(
+            t,
+            ThemeCardSpec {
+                id: None,
+                title: loc::t("ThemeWindowsAppearance"),
+                is_built_in: true,
+                swatches: win_default_swatches,
+                preserve_original_icons: true,
+            },
+            cx,
+        ));
+        for pack in built_in_packs.into_iter().chain(custom_packs) {
+            let swatches = theme_packs::preview_swatches(&pack, effective_theme);
+            let is_built_in = theme_packs::is_built_in(&pack.id);
+            let title = pack.display_name().to_owned();
+            let preserve_original_icons = pack.manifest.preserve_original_icons;
+            theme_cards.push(self.render_theme_card(
+                t,
+                ThemeCardSpec {
+                    id: Some(pack.id),
+                    title,
+                    is_built_in,
+                    swatches,
+                    preserve_original_icons,
+                },
+                cx,
+            ));
+        }
+
+        let mut grid = div()
+            .w_full()
+            .px(px(16.0))
+            .py(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0));
+        let mut iter = theme_cards.into_iter();
+        while let Some(first) = iter.next() {
+            let mut row = div().w_full().flex().gap(px(10.0)).child(first);
+            if let Some(second) = iter.next() {
+                row = row.child(second);
+            } else {
+                row = row.child(div().flex_1().min_w_0());
+            }
+            grid = grid.child(row);
+        }
+        gallery_rows.push(grid.into_any_element());
+
+        let mut out: Vec<AnyElement> = vec![
+            section_card(t, loc::t("ThemePack"), gallery_rows).into_any_element(),
+            // -----------------------------------------------------------------
+            // SECTION 2: Live Theme Studio & Custom Theme Creator
+            // -----------------------------------------------------------------
+            self.render_theme_studio(t, is_dark, window, cx),
+        ];
+
+        // ---------------------------------------------------------------------
+        // SECTION 3: Color Mode & Glass Optics
+        // ---------------------------------------------------------------------
         let theme_dd = self.make_dropdown(
             "themes-theme",
             t,
@@ -6076,11 +8379,11 @@ impl SettingsView {
                     flag_path: None,
                     glyph: None,
                     selected: self.settings.theme == th,
-                    on_select: std::rc::Rc::new(move |_win, app| {
+                    on_select: std::rc::Rc::new(move |win, app| {
                         let _ = entity.update(app, |this, cx| {
                             this.open_dropdown = None;
                             this.settings.theme = th;
-                            this.auto_save(cx);
+                            this.apply_theme_change(Some(win), false, cx);
                         });
                     }),
                 }
@@ -6089,99 +8392,505 @@ impl SettingsView {
             cx,
         );
 
-        let bg_dd = self.make_dropdown(
-            "themes-dock-bg",
-            t,
-            [
-                (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
-                (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
-                (loc::t("SurfaceNone"), SurfaceBackground::None),
-                (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
-            ]
-            .into_iter()
-            .map(|(label, bg)| {
-                let entity = cx.entity().downgrade();
-                DropdownOption {
-                    label: SharedString::from(label),
-                    flag_path: None,
-                    glyph: None,
-                    selected: self.settings.dock_background == bg,
-                    on_select: std::rc::Rc::new(move |_win, app| {
-                        let _ = entity.update(app, |this, cx| {
-                            this.open_dropdown = None;
-                            this.settings.dock_background = bg;
-                            this.auto_save(cx);
-                        });
-                    }),
-                }
-            })
-            .collect(),
-            cx,
-        );
-
-        let opacity_pct = (self.settings.dock_opacity * 100.0).round() as i32;
         let radius_label = self.settings.dock_corner_radius.map_or_else(
             || loc::t("Automatic"),
             |r| loc::t_fmt("PixelsValue", &[&r.to_string()]),
         );
 
-        let mut out = vec![
+        let mut color_mode_rows: Vec<AnyElement> = vec![
+            self.target_row("Theme", t, Some("\u{E790}"), loc::t("Theme"), theme_dd),
+            self.target_row(
+                "ThemeApplicationIcons",
+                t,
+                Some("\u{E91B}"),
+                loc::t("ThemeSectionIcons"),
+                ios_switch(
+                    "sw-theme-app-icons",
+                    t,
+                    self.settings.theme_application_icons,
+                    cx.listener(|this, _, win, cx| {
+                        this.settings.theme_application_icons =
+                            !this.settings.theme_application_icons;
+                        this.apply_theme_change(Some(win), false, cx);
+                    }),
+                ),
+            ),
+            self.target_row(
+                "DockCornerRadius",
+                t,
+                Some("\u{F158}"),
+                loc::t("DockCornerRadius"),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(live_slider(
+                        "rad",
+                        t,
+                        self.settings.dock_corner_radius.unwrap_or(16) as f32 / 32.0,
+                        17,
+                        radius_label,
+                        |i| {
+                            let entity = cx.entity().downgrade();
+                            std::rc::Rc::new(move |_win, app| {
+                                let _ = entity.update(app, |this, cx| {
+                                    let next = Some(((i as i32) * 2).clamp(0, 32));
+                                    if this.settings.dock_corner_radius != next {
+                                        this.settings.dock_corner_radius = next;
+                                        this.auto_save(cx);
+                                    }
+                                });
+                            })
+                        },
+                    ))
+                    .when(self.settings.dock_corner_radius.is_some(), |row| {
+                        row.child(compact_card_button(
+                            "btn-radius-auto",
+                            t,
+                            loc::t("Automatic"),
+                            false,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_corner_radius = None;
+                                this.auto_save(cx);
+                            }),
+                        ))
+                    }),
+            ),
+        ];
+
+        let any_glass = self.settings.dock_background == SurfaceBackground::Glass
+            || self.settings.dynamic_island_background == SurfaceBackground::Glass
+            || self.settings.menu_background == SurfaceBackground::Glass
+            || self.settings.widget_background == SurfaceBackground::Glass
+            || self.settings.settings_background == SurfaceBackground::Glass;
+        if any_glass {
+            let blur_px = self.settings.glass_blur_sigma.clamp(0.0, 36.0).round() as i32;
+            let sat_pct = (self.settings.glass_saturation.clamp(0.8, 1.8) * 100.0).round() as i32;
+            let edge_pct = (self.settings.glass_edge_glow.clamp(0.0, 1.0) * 100.0).round() as i32;
+            color_mode_rows.extend([
+                self.target_row(
+                    "GlassBlurLabel",
+                    t,
+                    Some("\u{EB42}"),
+                    loc::t("GlassBlurLabel"),
+                    live_slider(
+                        "glass-blur",
+                        t,
+                        (self.settings.glass_blur_sigma.clamp(0.0, 36.0) as f32) / 36.0,
+                        37,
+                        loc::t_fmt("PixelsValue", &[&blur_px.to_string()]),
+                        |i| {
+                            let entity = cx.entity().downgrade();
+                            std::rc::Rc::new(move |win, app| {
+                                let _ = entity.update(app, |this, cx| {
+                                    let next = (i as f64).clamp(0.0, 36.0);
+                                    if (this.settings.glass_blur_sigma - next).abs() > 0.01 {
+                                        this.settings.glass_blur_sigma = next;
+                                        this.sync_settings_glass(win);
+                                        this.auto_save(cx);
+                                    }
+                                });
+                            })
+                        },
+                    ),
+                ),
+                self.target_row(
+                    "GlassSaturationLabel",
+                    t,
+                    Some("\u{E771}"),
+                    loc::t("GlassSaturationLabel"),
+                    live_slider(
+                        "glass-sat",
+                        t,
+                        ((self.settings.glass_saturation.clamp(0.8, 1.8) as f32) - 0.8) / 1.0,
+                        26,
+                        loc::t_fmt("OpacityPercent", &[&sat_pct.to_string()]),
+                        |i| {
+                            let entity = cx.entity().downgrade();
+                            std::rc::Rc::new(move |win, app| {
+                                let _ = entity.update(app, |this, cx| {
+                                    let next = (0.80 + (i as f64) * 0.04).clamp(0.80, 1.80);
+                                    if (this.settings.glass_saturation - next).abs() > 0.001 {
+                                        this.settings.glass_saturation = next;
+                                        this.sync_settings_glass(win);
+                                        this.auto_save(cx);
+                                    }
+                                });
+                            })
+                        },
+                    ),
+                ),
+                self.target_row(
+                    "GlassEdgeGlowLabel",
+                    t,
+                    Some("\u{E706}"),
+                    loc::t("GlassEdgeGlowLabel"),
+                    live_slider(
+                        "glass-edge",
+                        t,
+                        self.settings.glass_edge_glow.clamp(0.0, 1.0) as f32,
+                        26,
+                        loc::t_fmt("OpacityPercent", &[&edge_pct.to_string()]),
+                        |i| {
+                            let entity = cx.entity().downgrade();
+                            std::rc::Rc::new(move |win, app| {
+                                let _ = entity.update(app, |this, cx| {
+                                    let next = ((i as f64) * 0.04).clamp(0.0, 1.0);
+                                    if (this.settings.glass_edge_glow - next).abs() > 0.001 {
+                                        this.settings.glass_edge_glow = next;
+                                        this.sync_settings_glass(win);
+                                        this.auto_save(cx);
+                                    }
+                                });
+                            })
+                        },
+                    ),
+                ),
+                self.target_row(
+                    "GlassPointerLightLabel",
+                    t,
+                    Some("\u{E8B0}"),
+                    loc::t("GlassPointerLightLabel"),
+                    ios_switch(
+                        "sw-glass-ptr",
+                        t,
+                        self.settings.glass_pointer_light,
+                        cx.listener(|this, _, win, cx| {
+                            this.settings.glass_pointer_light = !this.settings.glass_pointer_light;
+                            this.sync_settings_glass(win);
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
+            ]);
+        }
+        out.push(section_card(t, loc::t("SectionTheme"), color_mode_rows).into_any_element());
+
+        // ---------------------------------------------------------------------
+        // SECTION 4: Consolidated Surfaces & Borders (ZERO duplication!)
+        // Preserves ALL search targets: DockBackground, DockOpacity, SurfaceDock/Menu/Widget/Settings,
+        // SurfaceOpacityLabel:Dock/Menu/Widget/Settings/Surfaces.
+        // ---------------------------------------------------------------------
+        let mut surface_rows: Vec<AnyElement> = vec![
+            self.mark_target(
+                "DockBackground",
+                t,
+                div().child(self.surface_row(
+                    t,
+                    cx,
+                    "surf-dock",
+                    "SurfaceDock",
+                    loc::t("SurfaceDock"),
+                    self.settings.dock_background,
+                    |settings, value| settings.dock_background = value,
+                )),
+            )
+            .into_any_element(),
+            self.surface_row(
+                t,
+                cx,
+                "surf-menu",
+                "SurfaceMenu",
+                loc::t("SurfaceMenu"),
+                self.settings.menu_background,
+                |settings, value| settings.menu_background = value,
+            ),
+            self.surface_row(
+                t,
+                cx,
+                "surf-widget",
+                "SurfaceWidget",
+                loc::t("SurfaceWidget"),
+                self.settings.widget_background,
+                |settings, value| settings.widget_background = value,
+            ),
+            self.surface_row(
+                t,
+                cx,
+                "surf-settings",
+                "SurfaceSettings",
+                loc::t("SurfaceSettings"),
+                self.settings.settings_background,
+                |settings, value| settings.settings_background = value,
+            ),
+            self.mark_target(
+                "DockOpacity",
+                t,
+                div().child(self.surface_opacity_row(
+                    t,
+                    cx,
+                    "SurfaceOpacityLabel:Dock",
+                    "surf-op-dock",
+                    SurfaceKind::Dock,
+                    format!(
+                        "{} · {}",
+                        loc::t("SurfaceDock"),
+                        loc::t("SurfaceOpacityLabel")
+                    ),
+                    self.settings.dock_background,
+                    self.settings.dock_opacity,
+                )),
+            )
+            .into_any_element(),
+            self.mark_target(
+                "SurfaceOpacityLabel:Surfaces",
+                t,
+                div().child(self.surface_opacity_row(
+                    t,
+                    cx,
+                    "SurfaceOpacityLabel:Menu",
+                    "surf-op-menu",
+                    SurfaceKind::Menu,
+                    format!(
+                        "{} · {}",
+                        loc::t("SurfaceMenu"),
+                        loc::t("SurfaceOpacityLabel")
+                    ),
+                    self.settings.menu_background,
+                    self.settings.menu_opacity,
+                )),
+            )
+            .into_any_element(),
+            self.surface_opacity_row(
+                t,
+                cx,
+                "SurfaceOpacityLabel:Widget",
+                "surf-op-widget",
+                SurfaceKind::Widget,
+                format!(
+                    "{} · {}",
+                    loc::t("SurfaceWidget"),
+                    loc::t("SurfaceOpacityLabel")
+                ),
+                self.settings.widget_background,
+                self.settings.widget_opacity,
+            ),
+            self.surface_opacity_row(
+                t,
+                cx,
+                "SurfaceOpacityLabel:Settings",
+                "surf-op-settings",
+                SurfaceKind::Settings,
+                format!(
+                    "{} · {}",
+                    loc::t("SurfaceSettings"),
+                    loc::t("SurfaceOpacityLabel")
+                ),
+                self.settings.settings_background,
+                self.settings.settings_opacity,
+            ),
+        ];
+
+        let border_surfaces = [
+            (
+                "border-dock",
+                loc::t("SurfaceDock"),
+                self.settings.dock_border_thickness,
+                self.settings.dock_border_color.clone(),
+                0usize,
+            ),
+            (
+                "border-menu",
+                loc::t("SurfaceMenu"),
+                self.settings.menu_border_thickness,
+                self.settings.menu_border_color.clone(),
+                1usize,
+            ),
+            (
+                "border-widget",
+                loc::t("SurfaceWidget"),
+                self.settings.widget_border_thickness,
+                self.settings.widget_border_color.clone(),
+                2usize,
+            ),
+            (
+                "border-settings",
+                loc::t("SurfaceSettings"),
+                self.settings.settings_border_thickness,
+                self.settings.settings_border_color.clone(),
+                3usize,
+            ),
+        ];
+        for (id, label, thickness, color, index) in border_surfaces {
+            let step = stepper(
+                SharedString::from(format!("{id}-minus")),
+                SharedString::from(format!("{id}-plus")),
+                t,
+                format!("{thickness:.1}"),
+                cx.listener(move |this, _, _, cx| {
+                    let next = match index {
+                        0 => this.settings.dock_border_thickness,
+                        1 => this.settings.menu_border_thickness,
+                        2 => this.settings.widget_border_thickness,
+                        _ => this.settings.settings_border_thickness,
+                    } - 0.5;
+                    set_border_thickness(&mut this.settings, index, next);
+                    this.auto_save(cx);
+                }),
+                cx.listener(move |this, _, _, cx| {
+                    let next = match index {
+                        0 => this.settings.dock_border_thickness,
+                        1 => this.settings.menu_border_thickness,
+                        2 => this.settings.widget_border_thickness,
+                        _ => this.settings.settings_border_thickness,
+                    } + 0.5;
+                    set_border_thickness(&mut this.settings, index, next);
+                    this.auto_save(cx);
+                }),
+            );
+            let has_custom_color = color.is_some();
+            let color_id = SharedString::from(format!("{id}-color"));
+            let swatch_rgba = color
+                .as_deref()
+                .and_then(parse_hex_color)
+                .unwrap_or(t.border);
+            let color_hover = t.surface_hover;
+            let color_btn = div()
+                .id(color_id)
+                .h(px(30.0))
+                .px(px(9.0))
+                .rounded(px(8.0))
+                .bg(rgba(t.surface_muted))
+                .border_1()
+                .border_color(rgba(t.border))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(rgba(color_hover)))
+                .active(|s| s.opacity(0.86))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit_border_color(index, cx);
+                }))
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .bg(rgba(swatch_rgba)),
+                )
+                .child(
+                    div()
+                        .text_size(px(fonts::scaled_size(11.5)))
+                        .text_color(rgba(t.text_primary))
+                        .child(color.unwrap_or_else(|| loc::t("Automatic"))),
+                );
+            surface_rows.push(
+                setting_row(
+                    t,
+                    Some("\u{E790}"),
+                    format!("{label} · {}", loc::t("BorderStyleLabel")),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(step)
+                        .child(color_btn)
+                        .when(has_custom_color, |row| {
+                            row.child(compact_card_button(
+                                SharedString::from(format!("{id}-color-clear")),
+                                t,
+                                "×",
+                                false,
+                                cx.listener(move |this, _, win, cx| {
+                                    this.reset_border_picker_color(index, win, cx);
+                                }),
+                            ))
+                        }),
+                )
+                .into_any_element(),
+            );
+        }
+        out.push(section_card(t, loc::t("SectionSurfaces"), surface_rows).into_any_element());
+
+        // ---------------------------------------------------------------------
+        // SECTION 5: Typography
+        // ---------------------------------------------------------------------
+        out.push(
             section_card(
                 t,
-                loc::t("SectionTheme"),
+                loc::t("ThemeSectionTypography"),
                 vec![
-                    self.target_row("Theme", t, Some("\u{E790}"), loc::t("Theme"), theme_dd),
-                    self.target_row(
-                        "DockBackground",
-                        t,
-                        Some("\u{E81E}"),
-                        loc::t("DockBackground"),
-                        bg_dd,
-                    ),
-                    self.target_row(
-                        "SurfaceOpacityLabel:Dock",
-                        t,
-                        Some("\u{E793}"),
-                        loc::t("SurfaceOpacityLabel"),
-                        live_slider(
-                            "op",
-                            t,
-                            ((self.settings.dock_opacity as f32) - 0.2) / 0.8,
-                            17,
-                            loc::t_fmt("OpacityPercent", &[&opacity_pct.to_string()]),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
+                    {
+                        let mut font_options: Vec<DropdownOption> =
+                            Vec::with_capacity(self.installed_fonts.len() + 1);
+                        let native_entity = cx.entity().downgrade();
+                        font_options.push(DropdownOption {
+                            label: SharedString::from(loc::t_fmt(
+                                "FontNativeWithWindows",
+                                &[fonts::native_ui_face()],
+                            )),
+                            flag_path: None,
+                            glyph: None,
+                            selected: self.settings.ui_font_family.trim().is_empty(),
+                            on_select: std::rc::Rc::new(move |_win, app| {
+                                let _ = native_entity.update(app, |this, cx| {
+                                    this.open_dropdown = None;
+                                    this.clear_picker_state("ui-font-family");
+                                    this.settings.ui_font_family.clear();
+                                    fonts::set_selected_family("");
+                                    this.auto_save(cx);
+                                });
+                            }),
+                        });
+                        for name in &self.installed_fonts {
+                            let selected = self.settings.ui_font_family.eq_ignore_ascii_case(name);
+                            let family = name.clone();
+                            let entity = cx.entity().downgrade();
+                            font_options.push(DropdownOption {
+                                label: SharedString::from(name.clone()),
+                                flag_path: None,
+                                glyph: None,
+                                selected,
+                                on_select: std::rc::Rc::new(move |_win, app| {
+                                    let family = family.clone();
                                     let _ = entity.update(app, |this, cx| {
-                                        let next = (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
-                                        if (this.settings.dock_opacity - next).abs() > 0.001 {
-                                            this.settings.dock_opacity = next;
-                                            this.auto_save(cx);
-                                        }
+                                        this.open_dropdown = None;
+                                        this.clear_picker_state("ui-font-family");
+                                        this.settings.ui_font_family = family.clone();
+                                        fonts::set_selected_family(&family);
+                                        this.auto_save(cx);
                                     });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "DockCornerRadius",
-                        t,
-                        Some("\u{F158}"),
-                        loc::t("DockCornerRadius"),
-                        live_slider(
-                            "rad",
+                                }),
+                            });
+                        }
+                        setting_row(
                             t,
-                            self.settings.dock_corner_radius.unwrap_or(16) as f32 / 32.0,
-                            17,
-                            radius_label,
+                            Some("\u{E8D3}"),
+                            loc::t("UiFontFamily"),
+                            self.make_searchable_dropdown(
+                                "ui-font-family",
+                                t,
+                                &self.font_picker_focus,
+                                &font_options,
+                                cx,
+                            ),
+                        )
+                        .into_any_element()
+                    },
+                    setting_row(
+                        t,
+                        Some("\u{E8D3}"),
+                        loc::t("UiFontSize"),
+                        live_slider(
+                            "ui-font-size",
+                            t,
+                            (self.settings.ui_font_size - 9.0) / 15.0,
+                            16,
+                            loc::t_fmt(
+                                "PixelsValue",
+                                &[&(self.settings.ui_font_size.round() as i32).to_string()],
+                            ),
                             |i| {
                                 let entity = cx.entity().downgrade();
                                 std::rc::Rc::new(move |_win, app| {
                                     let _ = entity.update(app, |this, cx| {
-                                        let next = Some(((i as i32) * 2).clamp(0, 32));
-                                        if this.settings.dock_corner_radius != next {
-                                            this.settings.dock_corner_radius = next;
+                                        let next = (9.0 + i as f32).clamp(9.0, 24.0);
+                                        if (this.settings.ui_font_size - next).abs() > 0.01 {
+                                            this.settings.ui_font_size = next;
+                                            fonts::apply_settings(&this.settings);
                                             this.auto_save(cx);
                                         }
                                     });
@@ -6193,130 +8902,168 @@ impl SettingsView {
                 ],
             )
             .into_any_element(),
-        ];
+        );
 
-        // Clear Crystal optical glass tuning controls — strictly shown when Glass mode is active.
-        let any_glass = self.settings.dock_background == SurfaceBackground::Glass
-            || self.settings.dynamic_island_background == SurfaceBackground::Glass
-            || self.settings.menu_background == SurfaceBackground::Glass
-            || self.settings.widget_background == SurfaceBackground::Glass
-            || self.settings.settings_background == SurfaceBackground::Glass;
-        if any_glass {
-            let blur_px = self.settings.glass_blur_sigma.clamp(0.0, 36.0).round() as i32;
-            let sat_pct = (self.settings.glass_saturation.clamp(0.8, 1.8) * 100.0).round() as i32;
-            let edge_pct = (self.settings.glass_edge_glow.clamp(0.0, 1.0) * 100.0).round() as i32;
-            out.push(
-                section_card(
-                    t,
-                    loc::t("SectionGlassEffect"),
-                    vec![
-                        self.target_row(
-                            "GlassBlurLabel",
+        // ---------------------------------------------------------------------
+        // SECTION 6: Animations (all 5 controls intact)
+        // ---------------------------------------------------------------------
+        out.push(
+            section_card(
+                t,
+                loc::t("Animations"),
+                vec![
+                    self.target_row(
+                        "Animations",
+                        t,
+                        Some("\u{E945}"),
+                        loc::t("Animations"),
+                        ios_switch(
+                            "sw-anim",
                             t,
-                            Some("\u{E793}"),
-                            loc::t("GlassBlurLabel"),
-                            live_slider(
-                                "glass-blur",
-                                t,
-                                (self.settings.glass_blur_sigma.clamp(0.0, 36.0) as f32) / 36.0,
-                                37,
-                                loc::t_fmt("PixelsValue", &[&blur_px.to_string()]),
-                                |i| {
-                                    let entity = cx.entity().downgrade();
-                                    std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            let next = (i as f64).clamp(0.0, 36.0);
-                                            if (this.settings.glass_blur_sigma - next).abs() > 0.01
-                                            {
-                                                this.settings.glass_blur_sigma = next;
-                                                this.auto_save(cx);
-                                            }
-                                        });
-                                    })
-                                },
-                            ),
-                        )
-                        .into_any_element(),
+                            self.settings.animations_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.animations_enabled =
+                                    !this.settings.animations_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    dim_when(
+                        !self.settings.animations_enabled,
                         self.target_row(
-                            "GlassSaturationLabel",
+                            "Magnification",
                             t,
-                            Some("\u{E790}"),
-                            loc::t("GlassSaturationLabel"),
-                            live_slider(
-                                "glass-sat",
-                                t,
-                                ((self.settings.glass_saturation.clamp(0.8, 1.8) as f32) - 0.8)
-                                    / 1.0,
-                                26,
-                                loc::t_fmt("OpacityPercent", &[&sat_pct.to_string()]),
-                                |i| {
-                                    let entity = cx.entity().downgrade();
-                                    std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            let next = (0.80 + (i as f64) * 0.04).clamp(0.80, 1.80);
-                                            if (this.settings.glass_saturation - next).abs() > 0.001
-                                            {
-                                                this.settings.glass_saturation = next;
-                                                this.auto_save(cx);
-                                            }
-                                        });
-                                    })
-                                },
-                            ),
-                        )
-                        .into_any_element(),
-                        self.target_row(
-                            "GlassEdgeGlowLabel",
-                            t,
-                            Some("\u{E706}"),
-                            loc::t("GlassEdgeGlowLabel"),
-                            live_slider(
-                                "glass-edge",
-                                t,
-                                self.settings.glass_edge_glow.clamp(0.0, 1.0) as f32,
-                                26,
-                                loc::t_fmt("OpacityPercent", &[&edge_pct.to_string()]),
-                                |i| {
-                                    let entity = cx.entity().downgrade();
-                                    std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            let next = ((i as f64) * 0.04).clamp(0.0, 1.0);
-                                            if (this.settings.glass_edge_glow - next).abs() > 0.001
-                                            {
-                                                this.settings.glass_edge_glow = next;
-                                                this.auto_save(cx);
-                                            }
-                                        });
-                                    })
-                                },
-                            ),
-                        )
-                        .into_any_element(),
-                        self.target_row(
-                            "GlassPointerLightLabel",
-                            t,
-                            Some("\u{E8B0}"),
-                            loc::t("GlassPointerLightLabel"),
+                            Some("\u{E71E}"),
+                            loc::t("Magnification"),
                             ios_switch(
-                                "sw-glass-ptr",
+                                "sw-mag",
                                 t,
-                                self.settings.glass_pointer_light,
+                                self.settings.magnification_enabled,
                                 cx.listener(|this, _, _, cx| {
-                                    this.settings.glass_pointer_light =
-                                        !this.settings.glass_pointer_light;
+                                    this.settings.magnification_enabled =
+                                        !this.settings.magnification_enabled;
                                     this.auto_save(cx);
                                 }),
                             ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        !self.settings.magnification_enabled,
+                        self.target_row_desc(
+                            "MagnificationExpandsDock",
+                            t,
+                            Some("\u{E71E}"),
+                            loc::t("MagnificationExpandsDock"),
+                            loc::t("MagnificationExpandsDockDescription"),
+                            ios_switch(
+                                "sw-mag-expands-dock",
+                                t,
+                                self.settings.magnification_expands_dock,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.magnification_expands_dock =
+                                        !this.settings.magnification_expands_dock;
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        !self.settings.animations_enabled || !self.settings.magnification_enabled,
+                        self.target_row(
+                            "FisheyeIntensity",
+                            t,
+                            Some("\u{E9E9}"),
+                            loc::t("FisheyeIntensity"),
+                            self.make_dropdown(
+                                "themes-fisheye",
+                                t,
+                                [
+                                    (FisheyeIntensity::Low, loc::t("FisheyeLow")),
+                                    (FisheyeIntensity::Normal, loc::t("FisheyeNormal")),
+                                    (FisheyeIntensity::Strong, loc::t("FisheyeStrong")),
+                                ]
+                                .into_iter()
+                                .map(|(level, label)| {
+                                    let entity = cx.entity().downgrade();
+                                    DropdownOption {
+                                        label: SharedString::from(label),
+                                        flag_path: None,
+                                        glyph: None,
+                                        selected: self.settings.fisheye_intensity == level,
+                                        on_select: std::rc::Rc::new(move |_win, app| {
+                                            let _ = entity.update(app, |this, cx| {
+                                                this.open_dropdown = None;
+                                                this.settings.fisheye_intensity = level;
+                                                this.auto_save(cx);
+                                            });
+                                        }),
+                                    }
+                                })
+                                .collect(),
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    {
+                        let max_hz = win32::max_connected_refresh_hz().max(15);
+                        let max_step = (max_hz - 15 + 1) as usize;
+                        let current_step = match self.settings.animation_fps {
+                            Some(fps) => (fps.clamp(15, max_hz) - 15) as usize,
+                            None => max_step,
+                        };
+                        let fps_label = match self.settings.animation_fps {
+                            Some(fps) => loc::t_fmt(
+                                "AnimationFpsValue",
+                                &[&fps.clamp(15, max_hz).to_string()],
+                            ),
+                            None => format!("{} ({max_hz} Hz)", loc::t("AnimationFpsAuto")),
+                        };
+                        let fps_entity = cx.entity().downgrade();
+                        dim_when(
+                            !self.settings.animations_enabled,
+                            self.target_row(
+                                "AnimationFps",
+                                t,
+                                Some("\u{EC4A}"),
+                                loc::t("AnimationFps"),
+                                live_slider(
+                                    "anim-fps",
+                                    t,
+                                    current_step as f32 / max_step.max(1) as f32,
+                                    max_step + 1,
+                                    fps_label,
+                                    move |i| {
+                                        let entity = fps_entity.clone();
+                                        std::rc::Rc::new(move |_win, app| {
+                                            let _ = entity.update(app, |this, cx| {
+                                                let next = if i >= max_step {
+                                                    None
+                                                } else {
+                                                    Some((15 + i as u32).min(max_hz))
+                                                };
+                                                if this.settings.animation_fps != next {
+                                                    this.settings.animation_fps = next;
+                                                    this.auto_save(cx);
+                                                }
+                                            });
+                                        })
+                                    },
+                                ),
+                            ),
                         )
-                        .into_any_element(),
-                    ],
-                )
-                .into_any_element(),
-            );
-        }
+                        .into_any_element()
+                    },
+                ],
+            )
+            .into_any_element(),
+        );
 
-        // OLED / display care. True black itself is selected per surface in the
-        // materials dropdowns above; these rows tune the associated power-saving behaviour.
+        // ---------------------------------------------------------------------
+        // SECTION 7: OLED & Display Care (all 8 controls intact)
+        // ---------------------------------------------------------------------
         let threshold_options: Vec<(String, i32)> = [0, 10, 20, 30, 50]
             .into_iter()
             .map(|value| {
@@ -6351,9 +9098,10 @@ impl SettingsView {
                         div()
                             .w_full()
                             .px(px(16.0))
-                            .py(px(10.0))
+                            .pt(px(10.0))
+                            .pb(px(12.0))
                             .text_size(px(fonts::scaled_size(12.0)))
-                            .text_color(rgba(t.text_secondary))
+                            .text_color(rgba(t.text_primary))
                             .child(loc::t("SurfaceTrueBlack")),
                     )
                     .into_any_element(),
@@ -6366,9 +9114,10 @@ impl SettingsView {
                             "sw-oled-reduce-glow",
                             t,
                             self.settings.oled_reduce_glow_enabled,
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, _, win, cx| {
                                 this.settings.oled_reduce_glow_enabled =
                                     !this.settings.oled_reduce_glow_enabled;
+                                this.sync_settings_glass(win);
                                 this.auto_save(cx);
                             }),
                         ),
@@ -6514,631 +9263,6 @@ impl SettingsView {
             )
             .into_any_element(),
         );
-
-        out.extend([
-            section_card(
-                t,
-                loc::t("Animations"),
-                vec![
-                    self.target_row(
-                        "Animations",
-                        t,
-                        Some("\u{E945}"),
-                        loc::t("Animations"),
-                        ios_switch(
-                            "sw-anim",
-                            t,
-                            self.settings.animations_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.animations_enabled =
-                                    !this.settings.animations_enabled;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    dim_when(
-                        !self.settings.animations_enabled,
-                        self.target_row(
-                            "Magnification",
-                            t,
-                            Some("\u{E71E}"),
-                            loc::t("Magnification"),
-                            ios_switch(
-                                "sw-mag",
-                                t,
-                                self.settings.magnification_enabled,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.magnification_enabled =
-                                        !this.settings.magnification_enabled;
-                                    this.auto_save(cx);
-                                }),
-                            ),
-                        ),
-                    )
-                    .into_any_element(),
-                    dim_when(
-                        !self.settings.magnification_enabled,
-                        self.target_row_desc(
-                            "MagnificationExpandsDock",
-                            t,
-                            Some("\u{E71E}"),
-                            loc::t("MagnificationExpandsDock"),
-                            loc::t("MagnificationExpandsDockDescription"),
-                            ios_switch(
-                                "sw-mag-expands-dock",
-                                t,
-                                self.settings.magnification_expands_dock,
-                                cx.listener(|this, _, _, cx| {
-                                    this.settings.magnification_expands_dock =
-                                        !this.settings.magnification_expands_dock;
-                                    this.auto_save(cx);
-                                }),
-                            ),
-                        ),
-                    )
-                    .into_any_element(),
-                    dim_when(
-                        !self.settings.animations_enabled || !self.settings.magnification_enabled,
-                        self.target_row(
-                            "FisheyeIntensity",
-                            t,
-                            Some("\u{E9E9}"),
-                            loc::t("FisheyeIntensity"),
-                            self.make_dropdown(
-                                "themes-fisheye",
-                                t,
-                                [
-                                    (FisheyeIntensity::Low, loc::t("FisheyeLow")),
-                                    (FisheyeIntensity::Normal, loc::t("FisheyeNormal")),
-                                    (FisheyeIntensity::Strong, loc::t("FisheyeStrong")),
-                                ]
-                                .into_iter()
-                                .map(|(level, label)| {
-                                    let entity = cx.entity().downgrade();
-                                    DropdownOption {
-                                        label: SharedString::from(label),
-                                        flag_path: None,
-                                        glyph: None,
-                                        selected: self.settings.fisheye_intensity == level,
-                                        on_select: std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                this.open_dropdown = None;
-                                                this.settings.fisheye_intensity = level;
-                                                this.auto_save(cx);
-                                            });
-                                        }),
-                                    }
-                                })
-                                .collect(),
-                                cx,
-                            ),
-                        ),
-                    )
-                    .into_any_element(),
-                    {
-                        let max_hz = win32::max_connected_refresh_hz().max(15);
-                        let max_step = (max_hz - 15 + 1) as usize;
-                        let current_step = match self.settings.animation_fps {
-                            Some(fps) => (fps.clamp(15, max_hz) - 15) as usize,
-                            None => max_step,
-                        };
-                        let fps_label = match self.settings.animation_fps {
-                            Some(fps) => loc::t_fmt(
-                                "AnimationFpsValue",
-                                &[&fps.clamp(15, max_hz).to_string()],
-                            ),
-                            None => format!("{} ({max_hz} Hz)", loc::t("AnimationFpsAuto")),
-                        };
-                        let fps_entity = cx.entity().downgrade();
-                        dim_when(
-                            !self.settings.animations_enabled,
-                            self.target_row(
-                                "AnimationFps",
-                                t,
-                                Some("\u{EC4A}"),
-                                loc::t("AnimationFps"),
-                                live_slider(
-                                    "anim-fps",
-                                    t,
-                                    current_step as f32 / max_step.max(1) as f32,
-                                    max_step + 1,
-                                    fps_label,
-                                    move |i| {
-                                        let entity = fps_entity.clone();
-                                        std::rc::Rc::new(move |_win, app| {
-                                            let _ = entity.update(app, |this, cx| {
-                                                let next = if i >= max_step {
-                                                    None
-                                                } else {
-                                                    Some((15 + i as u32).min(max_hz))
-                                                };
-                                                if this.settings.animation_fps != next {
-                                                    this.settings.animation_fps = next;
-                                                    this.auto_save(cx);
-                                                }
-                                            });
-                                        })
-                                    },
-                                ),
-                            ),
-                        )
-                        .into_any_element()
-                    },
-                ],
-            )
-            .into_any_element(),
-            section_card(
-                t,
-                loc::t("ThemeSectionTypography"),
-                vec![
-                    {
-                        let mut font_options: Vec<DropdownOption> =
-                            Vec::with_capacity(self.installed_fonts.len() + 1);
-                        let native_entity = cx.entity().downgrade();
-                        font_options.push(DropdownOption {
-                            label: SharedString::from(loc::t_fmt(
-                                "FontNativeWithWindows",
-                                &[fonts::native_ui_face()],
-                            )),
-                            flag_path: None,
-                            glyph: None,
-                            selected: self.settings.ui_font_family.trim().is_empty(),
-                            on_select: std::rc::Rc::new(move |_win, app| {
-                                let _ = native_entity.update(app, |this, cx| {
-                                    this.open_dropdown = None;
-                                    this.clear_picker_state("ui-font-family");
-                                    this.settings.ui_font_family.clear();
-                                    fonts::set_selected_family("");
-                                    this.auto_save(cx);
-                                });
-                            }),
-                        });
-                        for name in &self.installed_fonts {
-                            let selected = self.settings.ui_font_family.eq_ignore_ascii_case(name);
-                            let family = name.clone();
-                            let entity = cx.entity().downgrade();
-                            font_options.push(DropdownOption {
-                                label: SharedString::from(name.clone()),
-                                flag_path: None,
-                                glyph: None,
-                                selected,
-                                on_select: std::rc::Rc::new(move |_win, app| {
-                                    let family = family.clone();
-                                    let _ = entity.update(app, |this, cx| {
-                                        this.open_dropdown = None;
-                                        this.clear_picker_state("ui-font-family");
-                                        this.settings.ui_font_family = family.clone();
-                                        fonts::set_selected_family(&family);
-                                        this.auto_save(cx);
-                                    });
-                                }),
-                            });
-                        }
-                        setting_row(
-                            t,
-                            Some("\u{E8D3}"),
-                            loc::t("UiFontFamily"),
-                            self.make_searchable_dropdown(
-                                "ui-font-family",
-                                t,
-                                &self.font_picker_focus,
-                                &font_options,
-                                cx,
-                            ),
-                        )
-                        .into_any_element()
-                    },
-                    setting_row(
-                        t,
-                        Some("\u{E8D3}"),
-                        loc::t("UiFontSize"),
-                        live_slider(
-                            "ui-font-size",
-                            t,
-                            (self.settings.ui_font_size - 9.0) / 15.0,
-                            16,
-                            loc::t_fmt(
-                                "PixelsValue",
-                                &[&(self.settings.ui_font_size.round() as i32).to_string()],
-                            ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (9.0 + i as f32).clamp(9.0, 24.0);
-                                        if (this.settings.ui_font_size - next).abs() > 0.01 {
-                                            this.settings.ui_font_size = next;
-                                            fonts::apply_settings(&this.settings);
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-            section_card(
-                t,
-                loc::t("MyThemes"),
-                vec![
-                    div()
-                        .w_full()
-                        .flex()
-                        .gap(px(6.0))
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .child(button(
-                            "btn-theme-import",
-                            t,
-                            loc::t("ThemePackImport"),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| this.import_theme(cx)),
-                        ))
-                        .child(button(
-                            "btn-theme-folder",
-                            t,
-                            loc::t("ThemePackOpenFolder"),
-                            ButtonVariant::Secondary,
-                            cx.listener(|_, _, _, _| {
-                                pins::launch(Self::themes_root().to_string_lossy().into_owned());
-                            }),
-                        ))
-                        .into_any_element(),
-                    {
-                        let packs = theme_packs::discover(&Self::themes_root());
-                        let mut rows = div().w_full().flex().flex_col().gap(px(2.0));
-                        if packs.is_empty() {
-                            rows = rows.child(
-                                div()
-                                    .w_full()
-                                    .px(px(16.0))
-                                    .py(px(10.0))
-                                    .text_size(px(fonts::scaled_size(12.0)))
-                                    .text_color(rgba(t.text_secondary))
-                                    .child(loc::t("NoCustomThemes")),
-                            );
-                        }
-                        for pack in packs {
-                            let id = pack.id.clone();
-                            let active = self.settings.theme_pack.eq_ignore_ascii_case(&id);
-                            let entity = cx.entity().downgrade();
-                            let use_action = {
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                std::rc::Rc::new(
-                                    move |_win: &mut gpui::Window, app: &mut gpui::App| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            this.open_dropdown = None;
-                                            this.settings.theme_pack = id.clone();
-                                            crate::platform::icon_pack::set_active_pack(Some(
-                                                &Self::themes_root().join(&id),
-                                            ));
-                                            this.auto_save(cx);
-                                        });
-                                    },
-                                )
-                                    as crate::ui::components::DropdownSelectHandler
-                            };
-                            let export_action = {
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                std::rc::Rc::new(
-                                    move |_win: &mut gpui::Window, app: &mut gpui::App| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            this.open_dropdown = None;
-                                            this.export_theme(&id, cx);
-                                        });
-                                    },
-                                )
-                                    as crate::ui::components::DropdownSelectHandler
-                            };
-                            let delete_action = {
-                                let id = id.clone();
-                                std::rc::Rc::new(
-                                    move |_win: &mut gpui::Window, app: &mut gpui::App| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            this.open_dropdown = None;
-                                            this.delete_theme(&id, cx);
-                                        });
-                                    },
-                                )
-                                    as crate::ui::components::DropdownSelectHandler
-                            };
-                            let actions: Vec<DropdownOption> = vec![
-                                DropdownOption {
-                                    label: SharedString::from(loc::t(if active {
-                                        "ThemeCurrent"
-                                    } else {
-                                        "ThemeUse"
-                                    })),
-                                    flag_path: None,
-                                    glyph: Some("\u{E73E}"),
-                                    selected: active,
-                                    on_select: use_action,
-                                },
-                                DropdownOption {
-                                    label: SharedString::from(loc::t("ThemePackExport")),
-                                    flag_path: None,
-                                    glyph: Some("\u{EDE1}"),
-                                    selected: false,
-                                    on_select: export_action,
-                                },
-                                DropdownOption {
-                                    label: SharedString::from(loc::t("ThemePackDelete")),
-                                    flag_path: None,
-                                    glyph: Some("\u{E74D}"),
-                                    selected: false,
-                                    on_select: delete_action,
-                                },
-                            ];
-                            rows = rows.child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .px(px(16.0))
-                                    .py(px(9.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(fonts::scaled_size(12.0)))
-                                            .child(pack.manifest.name.clone()),
-                                    )
-                                    .child(self.make_icon_action_menu(
-                                        format!("theme-actions-{id}"),
-                                        t,
-                                        actions,
-                                        cx,
-                                    )),
-                            );
-                        }
-                        rows = rows.child(div().px(px(16.0)).py(px(10.0)).child(button(
-                            "theme-use-native",
-                            t,
-                            loc::t("UiFontNative"),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.theme_pack.clear();
-                                crate::platform::icon_pack::set_active_pack(None);
-                                this.auto_save(cx);
-                            }),
-                        )));
-                        rows.into_any_element()
-                    },
-                    div()
-                        .w_full()
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .text_size(px(fonts::scaled_size(12.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(self.theme_status.clone())
-                        .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-            section_card(
-                t,
-                loc::t("SectionSurfaces"),
-                vec![
-                    self.surface_row(
-                        t,
-                        cx,
-                        "surf-dock",
-                        "SurfaceDock",
-                        loc::t("SurfaceDock"),
-                        self.settings.dock_background,
-                        |settings, value| settings.dock_background = value,
-                    ),
-                    self.surface_row(
-                        t,
-                        cx,
-                        "surf-menu",
-                        "SurfaceMenu",
-                        loc::t("SurfaceMenu"),
-                        self.settings.menu_background,
-                        |settings, value| settings.menu_background = value,
-                    ),
-                    self.surface_row(
-                        t,
-                        cx,
-                        "surf-widget",
-                        "SurfaceWidget",
-                        loc::t("SurfaceWidget"),
-                        self.settings.widget_background,
-                        |settings, value| settings.widget_background = value,
-                    ),
-                    self.surface_row(
-                        t,
-                        cx,
-                        "surf-settings",
-                        "SurfaceSettings",
-                        loc::t("SurfaceSettings"),
-                        self.settings.settings_background,
-                        |settings, value| settings.settings_background = value,
-                    ),
-                    // Distinct opacity control for each surface; the old single
-                    // "SurfaceOpacityLabel:Surfaces" row is intentionally gone.
-                    self.surface_opacity_row(
-                        t,
-                        cx,
-                        "SurfaceOpacityLabel:Dock",
-                        "surf-op-dock",
-                        SurfaceKind::Dock,
-                        format!(
-                            "{} · {}",
-                            loc::t("SurfaceDock"),
-                            loc::t("SurfaceOpacityLabel")
-                        ),
-                        self.settings.dock_background,
-                        self.settings.dock_opacity,
-                    ),
-                    self.surface_opacity_row(
-                        t,
-                        cx,
-                        "SurfaceOpacityLabel:Menu",
-                        "surf-op-menu",
-                        SurfaceKind::Menu,
-                        format!(
-                            "{} · {}",
-                            loc::t("SurfaceMenu"),
-                            loc::t("SurfaceOpacityLabel")
-                        ),
-                        self.settings.menu_background,
-                        self.settings.menu_opacity,
-                    ),
-                    self.surface_opacity_row(
-                        t,
-                        cx,
-                        "SurfaceOpacityLabel:Widget",
-                        "surf-op-widget",
-                        SurfaceKind::Widget,
-                        format!(
-                            "{} · {}",
-                            loc::t("SurfaceWidget"),
-                            loc::t("SurfaceOpacityLabel")
-                        ),
-                        self.settings.widget_background,
-                        self.settings.widget_opacity,
-                    ),
-                    self.surface_opacity_row(
-                        t,
-                        cx,
-                        "SurfaceOpacityLabel:Settings",
-                        "surf-op-settings",
-                        SurfaceKind::Settings,
-                        format!(
-                            "{} · {}",
-                            loc::t("SurfaceSettings"),
-                            loc::t("SurfaceOpacityLabel")
-                        ),
-                        self.settings.settings_background,
-                        self.settings.settings_opacity,
-                    ),
-                ],
-            )
-            .into_any_element(),
-            {
-                let border_surfaces = [
-                    (
-                        "border-dock",
-                        loc::t("SurfaceDock"),
-                        self.settings.dock_border_thickness,
-                        self.settings.dock_border_color.clone(),
-                        0usize,
-                    ),
-                    (
-                        "border-menu",
-                        loc::t("SurfaceMenu"),
-                        self.settings.menu_border_thickness,
-                        self.settings.menu_border_color.clone(),
-                        1usize,
-                    ),
-                    (
-                        "border-widget",
-                        loc::t("SurfaceWidget"),
-                        self.settings.widget_border_thickness,
-                        self.settings.widget_border_color.clone(),
-                        2usize,
-                    ),
-                    (
-                        "border-settings",
-                        loc::t("SurfaceSettings"),
-                        self.settings.settings_border_thickness,
-                        self.settings.settings_border_color.clone(),
-                        3usize,
-                    ),
-                ];
-                let mut border_rows: Vec<AnyElement> = Vec::new();
-                for (id, label, thickness, color, index) in border_surfaces {
-                    let step = stepper(
-                        SharedString::from(format!("{id}-minus")),
-                        SharedString::from(format!("{id}-plus")),
-                        t,
-                        format!("{thickness:.1}"),
-                        cx.listener(move |this, _, _, cx| {
-                            let next = match index {
-                                0 => this.settings.dock_border_thickness,
-                                1 => this.settings.menu_border_thickness,
-                                2 => this.settings.widget_border_thickness,
-                                _ => this.settings.settings_border_thickness,
-                            } - 0.5;
-                            set_border_thickness(&mut this.settings, index, next);
-                            this.auto_save(cx);
-                        }),
-                        cx.listener(move |this, _, _, cx| {
-                            let next = match index {
-                                0 => this.settings.dock_border_thickness,
-                                1 => this.settings.menu_border_thickness,
-                                2 => this.settings.widget_border_thickness,
-                                _ => this.settings.settings_border_thickness,
-                            } + 0.5;
-                            set_border_thickness(&mut this.settings, index, next);
-                            this.auto_save(cx);
-                        }),
-                    );
-                    let color_id = SharedString::from(format!("{id}-color"));
-                    let swatch_rgba = color
-                        .as_deref()
-                        .and_then(parse_hex_color)
-                        .unwrap_or(t.border);
-                    let color_hover = t.surface_hover;
-                    let color_btn = div()
-                        .id(color_id)
-                        .h(px(30.0))
-                        .px(px(9.0))
-                        .rounded(px(8.0))
-                        .bg(rgba(t.surface_muted))
-                        .border_1()
-                        .border_color(rgba(t.border))
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(rgba(color_hover)))
-                        .active(|s| s.opacity(0.86))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit_border_color(index, cx);
-                        }))
-                        .child(
-                            div()
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .rounded(px(4.0))
-                                .border_1()
-                                .border_color(rgba(t.border))
-                                .bg(rgba(swatch_rgba)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(fonts::scaled_size(11.5)))
-                                .text_color(rgba(t.text_primary))
-                                .child(color.unwrap_or_else(|| loc::t("Automatic"))),
-                        );
-                    border_rows.push(
-                        setting_row(
-                            t,
-                            None,
-                            label,
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(step)
-                                .child(color_btn),
-                        )
-                        .into_any_element(),
-                    );
-                }
-                section_card(t, loc::t("BorderStyleLabel"), border_rows).into_any_element()
-            },
-        ]);
-        out.extend(self.render_theme_editor(t, cx));
         out
     }
 
@@ -7146,11 +9270,11 @@ impl SettingsView {
         match id {
             "clock" => Some(format!(
                 "{} · {}",
-                if self.settings.clock_24_hour {
-                    "24h"
+                short_clock_format_label(&loc::t(if self.settings.clock_24_hour {
+                    "ClockFormat24Hour"
                 } else {
-                    "12h"
-                },
+                    "ClockFormat12Hour"
+                })),
                 match self.settings.clock_date_layout {
                     ClockDateLayout::Beside => loc::t("ClockDateLayoutBeside"),
                     ClockDateLayout::Below => loc::t("ClockDateLayoutBelow"),
@@ -7163,7 +9287,7 @@ impl SettingsView {
                     .split(", ")
                     .next()
                     .filter(|s| !s.is_empty())
-                    .unwrap_or("Istanbul");
+                    .unwrap_or(weather_fallback_city());
                 let unit = match self.settings.weather_unit {
                     TemperatureUnit::Celsius => "°C",
                     TemperatureUnit::Fahrenheit => "°F",
@@ -7198,18 +9322,629 @@ impl SettingsView {
             } else {
                 format!("≤ {}%", self.settings.wireless_battery_low_threshold)
             }),
-            // Per-provider account/status rows were removed; AI usage is global.
+            id if id.starts_with("aiusage_") => {
+                let probe = widgets::telemetry::ai_auth_probe(id);
+                Some(if probe.env_override {
+                    loc::t("AiUsageEnvActive")
+                } else if probe.has_token {
+                    loc::t("AiUsageAccountConnected")
+                } else {
+                    loc::t("AiUsageAccountSignInRequired")
+                })
+            }
             _ => None,
         }
+    }
+
+    fn render_widget_shared_drawer_rows(
+        &self,
+        wid: &'static str,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let canonical_id = settings::canonical_widget_setting_id(wid);
+        let current_density = read_density_override(&self.settings, &canonical_id);
+        let canonical_for_write = canonical_id.clone();
+        let density_control = self.enum_dropdown(
+            format!("w-density-{wid}"),
+            t,
+            vec![
+                (loc::t("WidgetDensityAuto"), WidgetDensityMode::Auto),
+                (loc::t("WidgetDensityCompact"), WidgetDensityMode::Compact),
+                (loc::t("WidgetDensityFull"), WidgetDensityMode::Full),
+            ],
+            current_density,
+            move |this, value, cx| {
+                write_density_override(&mut this.settings, &canonical_for_write, value);
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        let density_target = match wid {
+            "clock" => Some("WidgetDensityOverrideClock"),
+            "weather" => Some("WidgetDensityOverrideWeather"),
+            "stats" => Some("WidgetDensityOverrideStats"),
+            _ => None,
+        };
+        rows.push(if let Some(target_id) = density_target {
+            self.target_row(
+                target_id,
+                t,
+                Some("\u{E80A}"),
+                loc::t("WidgetDensity"),
+                density_control,
+            )
+        } else {
+            setting_row(
+                t,
+                Some("\u{E80A}"),
+                loc::t("WidgetDensity"),
+                density_control,
+            )
+            .into_any_element()
+        });
+
+        let monitors = win32::enumerate_monitors();
+        let current_placement = self
+            .settings
+            .dynamic_island_placements
+            .iter()
+            .find(|(k, _)| dynamic_island::same_widget_id(k, wid))
+            .map(|(_, v)| v.clone());
+        let mut choices: Vec<(Option<String>, String)> = vec![
+            (None, loc::t("DynamicIslandDock")),
+            (
+                Some(settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned()),
+                loc::t("DynamicIslandAllDisplays"),
+            ),
+        ];
+        for mon in &monitors {
+            choices.push((Some(mon.device_name.clone()), mon.display_label()));
+        }
+        let place_opts: Vec<DropdownOption> = choices
+            .into_iter()
+            .map(|(target, label)| {
+                let selected = match (&current_placement, &target) {
+                    (None, None) => true,
+                    (Some(cur), Some(tgt)) => cur.eq_ignore_ascii_case(tgt),
+                    _ => false,
+                };
+                let entity = cx.entity().downgrade();
+                DropdownOption {
+                    label: SharedString::from(label),
+                    flag_path: None,
+                    glyph: None,
+                    selected,
+                    on_select: std::rc::Rc::new(move |_win, app| {
+                        let _ = entity.update(app, |this, cx| {
+                            this.open_dropdown = None;
+                            this.settings
+                                .dynamic_island_placements
+                                .retain(|k, _| !dynamic_island::same_widget_id(k, wid));
+                            if let Some(ref dev) = target {
+                                this.settings.set_widget_enabled(wid, true);
+                                if wid == "media" {
+                                    this.settings.show_media = true;
+                                }
+                                let canonical = settings::canonical_widget_setting_id(wid);
+                                this.settings
+                                    .dynamic_island_placements
+                                    .insert(canonical, dev.clone());
+                            }
+                            this.auto_save(cx);
+                        });
+                    }),
+                }
+            })
+            .collect();
+        rows.push(
+            setting_row(
+                t,
+                Some("\u{E8A1}"),
+                loc::t("DynamicIslandWidgetLocation"),
+                self.make_dropdown(format!("w-di-place-{wid}"), t, place_opts, cx),
+            )
+            .into_any_element(),
+        );
+
+        if widgets::widget_has_flyout(wid) {
+            rows.push(
+                setting_row(
+                    t,
+                    Some("\u{E8B0}"),
+                    loc::t("WidgetPreviewFlyout"),
+                    button(
+                        SharedString::from(format!("w-preview-flyout-{wid}")),
+                        t,
+                        loc::t("WidgetPreviewFlyout"),
+                        ButtonVariant::Secondary,
+                        cx.listener(move |this, _, window, _| {
+                            this.preview_widget_flyout(wid, Self::window_hwnd(window));
+                        }),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    fn render_ai_provider_drawer(
+        &self,
+        wid: &'static str,
+        t: &UiTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let meta = widgets::telemetry::ai_provider_meta(wid);
+        let probe = widgets::telemetry::ai_auth_probe(wid);
+        let is_testing = self.ai_testing.contains(wid);
+
+        let status_label = if probe.env_override {
+            if probe.env_var_hint.is_empty() {
+                loc::t("AiUsageEnvActive")
+            } else {
+                format!("{} ({})", loc::t("AiUsageEnvActive"), probe.env_var_hint)
+            }
+        } else if probe.has_token {
+            let source_tag = match probe.source {
+                AiAuthSource::Dpapi => "DPAPI",
+                AiAuthSource::CliFile => "CLI",
+                AiAuthSource::GhKeyring => "gh",
+                AiAuthSource::CursorPkce => "PKCE",
+                AiAuthSource::Env => "ENV",
+                AiAuthSource::None => "",
+            };
+            if source_tag.is_empty() {
+                loc::t("AiUsageAccountConnected")
+            } else {
+                format!("{} · {source_tag}", loc::t("AiUsageAccountConnected"))
+            }
+        } else {
+            loc::t("AiUsageAccountSignInRequired")
+        };
+
+        let mut status_controls = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap(px(6.0))
+            .child(badge(
+                t,
+                status_label,
+                probe.has_token || probe.env_override,
+            ))
+            .child(button_with_state(
+                SharedString::from(format!("ai-test-{wid}")),
+                t,
+                loc::t("AiUsageTestConnection"),
+                ButtonVariant::Secondary,
+                !is_testing,
+                cx.listener(move |this, _, _, cx| {
+                    if this.ai_testing.contains(wid) {
+                        return;
+                    }
+                    this.ai_testing.insert(wid);
+                    this.ai_test_status.remove(wid);
+                    cx.notify();
+                    cx.spawn(async move |this, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { widgets::telemetry::test_ai_connection(wid) })
+                            .await;
+                        let _ = this.update(cx, |view, cx| {
+                            view.ai_testing.remove(wid);
+                            view.ai_test_status.insert(wid, result);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }),
+            ));
+        if let Some(meta) = meta {
+            let dashboard_url = meta.dashboard_url.to_owned();
+            status_controls = status_controls.child(button(
+                SharedString::from(format!("ai-dash-{wid}")),
+                t,
+                loc::t("AiUsageOpenDashboard"),
+                ButtonVariant::Secondary,
+                move |_, _, _| {
+                    pins::launch(dashboard_url.clone());
+                },
+            ));
+        }
+        rows.push(
+            setting_row(
+                t,
+                Some("\u{E99A}"),
+                loc::t("AiUsageAccountLabel"),
+                status_controls,
+            )
+            .into_any_element(),
+        );
+
+        if let Some((ok, msg)) = self.ai_test_status.get(wid) {
+            rows.push(
+                div()
+                    .w_full()
+                    .px(px(14.0))
+                    .py(px(6.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(7.0))
+                            .bg(rgba(if *ok {
+                                t.accent_soft
+                            } else {
+                                t.destructive_soft
+                            }))
+                            .text_size(px(fonts::scaled_size(11.5)))
+                            .text_color(rgba(if *ok { t.accent } else { t.destructive }))
+                            .child(msg.clone()),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if wid == "aiusage_cursor" {
+            let signed_in = cursor_auth::has_session();
+            rows.push(
+                setting_row_desc(
+                    t,
+                    Some("\u{E77B}"),
+                    loc::t("AiUsageCursorAccountLabel"),
+                    self.ai_status.clone(),
+                    button(
+                        "btn-drawer-cursor-auth",
+                        t,
+                        if signed_in {
+                            loc::t("AiUsageCursorSignOut")
+                        } else {
+                            loc::t("AiUsageCursorSignIn")
+                        },
+                        if signed_in {
+                            ButtonVariant::Secondary
+                        } else {
+                            ButtonVariant::Primary
+                        },
+                        cx.listener(move |this, _, _, cx| {
+                            if cursor_auth::has_session() {
+                                let _ = cursor_auth::sign_out();
+                                this.settings.extra.remove("CursorAuthToken");
+                                this.ai_status = loc::t("AiCursorNotSignedIn");
+                                this.ai_test_status.remove(wid);
+                                this.save_immediately(cx);
+                                return;
+                            }
+                            let start = cursor_auth::sign_in_start();
+                            pins::launch(start.login_url);
+                            this.ai_status = loc::t("AiUsageCursorWaiting");
+                            cx.notify();
+                            cx.spawn(async move |this, cx| {
+                                let ok = cx
+                                    .background_executor()
+                                    .spawn(async { cursor_auth::sign_in_finish() })
+                                    .await;
+                                let _ = this.update(cx, |view, cx| {
+                                    if ok && cursor_auth::has_session() {
+                                        view.settings.extra.remove("CursorAuthToken");
+                                        view.ai_status = loc::t("AiCursorSignedIn");
+                                        view.ai_test_status.remove(wid);
+                                        view.save_immediately(cx);
+                                    } else {
+                                        view.ai_status = loc::t("AiUsageCursorSignInTimedOut");
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        }),
+                    ),
+                )
+                .into_any_element(),
+            );
+        } else if matches!(
+            wid,
+            "aiusage_claude" | "aiusage_codex" | "aiusage_copilot" | "aiusage_opencode"
+        ) {
+            let hint = meta
+                .map(|m| loc::t_fmt("AiUsageSignInHint", &[m.signin_hint]))
+                .unwrap_or_default();
+            let cli_control: AnyElement = if probe.cli_installed {
+                button(
+                    SharedString::from(format!("ai-cli-signin-{wid}")),
+                    t,
+                    loc::t("AiUsageCliSignInLabel"),
+                    ButtonVariant::Secondary,
+                    cx.listener(move |this, _, _, cx| {
+                        let launched = launch_ai_cli_sign_in(wid);
+                        this.ai_test_status.insert(
+                            wid,
+                            (
+                                launched,
+                                if launched {
+                                    loc::t("AiCliSignInLaunched")
+                                } else {
+                                    loc::t("AiUsageCliMissing")
+                                },
+                            ),
+                        );
+                        cx.notify();
+                    }),
+                )
+                .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(badge(t, loc::t("AiUsageCliMissing"), false))
+                    .when_some(meta, |row, m| {
+                        row.child(
+                            div()
+                                .px(px(7.0))
+                                .py(px(3.0))
+                                .rounded(px(5.0))
+                                .bg(rgba(t.surface_muted))
+                                .text_size(px(fonts::scaled_size(11.0)))
+                                .text_color(rgba(t.text_secondary))
+                                .child(m.signin_hint),
+                        )
+                    })
+                    .into_any_element()
+            };
+            rows.push(
+                setting_row_desc(
+                    t,
+                    Some("\u{E756}"),
+                    loc::t("AiUsageCliSignInLabel"),
+                    hint,
+                    cli_control,
+                )
+                .into_any_element(),
+            );
+        }
+
+        if let (Some(secret_key), Some(focus_handle)) = (
+            widgets::telemetry::ai_secret_key_for_provider(wid),
+            self.ai_secret_focus.get(wid).cloned(),
+        ) {
+            let has_dpapi = widgets::telemetry::has_dpapi_secret(secret_key);
+            let raw_buf = self
+                .ai_secret_buffers
+                .get(wid)
+                .map(String::as_str)
+                .unwrap_or("");
+            let is_focused = focus_handle.is_focused(window);
+            let has_input = !raw_buf.trim().is_empty();
+
+            let input_display = if !raw_buf.is_empty() {
+                let masked = "•".repeat(raw_buf.chars().count());
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(fonts::scaled_size(12.0)))
+                            .text_color(rgba(t.text_primary))
+                            .child(masked),
+                    )
+                    .when(is_focused, |line| {
+                        line.child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(1.0))
+                                .h(px(13.0))
+                                .bg(rgba(t.accent)),
+                        )
+                    })
+            } else {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(fonts::scaled_size(11.5)))
+                    .text_color(rgba(t.text_secondary))
+                    .child(if has_dpapi {
+                        loc::t("AiUsageApiKeySaved")
+                    } else {
+                        loc::t("AiUsageApiKeyPlaceholder")
+                    })
+            };
+
+            let focus_for_click = focus_handle.clone();
+            let focus_for_keys = focus_handle.clone();
+            let secret_inner = div()
+                .id(SharedString::from(format!("ai-secret-input-{wid}")))
+                .track_focus(&focus_handle)
+                .tab_index(0)
+                .w(px(210.0))
+                .h(px(28.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .rounded(px(7.0))
+                .bg(rgba(t.surface))
+                .border_1()
+                .border_color(rgba(if is_focused { t.accent } else { t.border }))
+                .cursor_text()
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    focus_for_click.focus(window);
+                    cx.notify();
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if !focus_for_keys.is_focused(window) {
+                        return;
+                    }
+                    if this.handle_text_field_key_down(ActiveTextField::AiSecret(wid), event, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(input_display);
+
+            let secret_input = TextInput::new(secret_inner, focus_handle, cx.entity());
+            let key_desc = if probe.env_override && !probe.env_var_hint.is_empty() {
+                format!("{} ({})", loc::t("AiUsageEnvActive"), probe.env_var_hint)
+            } else if !probe.env_var_hint.is_empty() {
+                format!(
+                    "{} · {}",
+                    loc::t("AiUsageApiKeyPlaceholder"),
+                    probe.env_var_hint
+                )
+            } else {
+                loc::t("AiUsageApiKeyPlaceholder")
+            };
+
+            rows.push(
+                setting_row_desc(
+                    t,
+                    Some("\u{E8D7}"),
+                    loc::t("AiUsageApiKeyLabel"),
+                    key_desc,
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .child(secret_input)
+                        .child(button_with_state(
+                            SharedString::from(format!("ai-key-save-{wid}")),
+                            t,
+                            loc::t("AiUsageApiKeySave"),
+                            ButtonVariant::Primary,
+                            has_input && !is_testing,
+                            cx.listener(move |this, _, _, cx| {
+                                let trimmed = this
+                                    .ai_secret_buffers
+                                    .get(wid)
+                                    .map(|s| s.trim().to_owned())
+                                    .unwrap_or_default();
+                                if trimmed.is_empty() {
+                                    return;
+                                }
+                                if widgets::telemetry::save_dpapi_secret(secret_key, &trimmed) {
+                                    this.ai_secret_buffers.remove(wid);
+                                    this.ai_secret_selections.remove(wid);
+                                    this.ai_testing.insert(wid);
+                                    this.ai_test_status.remove(wid);
+                                    notify_docks_reload();
+                                    cx.notify();
+                                    cx.spawn(async move |this, cx| {
+                                        let result = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                widgets::telemetry::test_ai_connection(wid)
+                                            })
+                                            .await;
+                                        let _ = this.update(cx, |view, cx| {
+                                            view.ai_testing.remove(wid);
+                                            view.ai_test_status.insert(wid, result);
+                                            notify_docks_reload();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                } else {
+                                    this.ai_test_status
+                                        .insert(wid, (false, loc::t("ErrorAiUsageApiKey")));
+                                    cx.notify();
+                                }
+                            }),
+                        ))
+                        .child(button_with_state(
+                            SharedString::from(format!("ai-key-clear-{wid}")),
+                            t,
+                            loc::t("AiUsageApiKeyClear"),
+                            ButtonVariant::Secondary,
+                            has_dpapi || !raw_buf.is_empty(),
+                            cx.listener(move |this, _, _, cx| {
+                                widgets::telemetry::clear_dpapi_secret(secret_key);
+                                this.ai_secret_buffers.remove(wid);
+                                this.ai_secret_selections.remove(wid);
+                                this.ai_test_status.remove(wid);
+                                notify_docks_reload();
+                                cx.notify();
+                            }),
+                        )),
+                )
+                .into_any_element(),
+            );
+        }
+
+        let current_ring = widgets::resolved_ai_usage_ring(&self.settings, wid);
+        let ring_dropdown = self.enum_dropdown(
+            format!("ai-ring-{wid}"),
+            t,
+            vec![
+                (loc::t("AiUsageRingHighest"), AiUsageRing::Highest),
+                (loc::t("AiUsageRingSession"), AiUsageRing::Session),
+                (loc::t("AiUsageRingWeekly"), AiUsageRing::Weekly),
+            ],
+            current_ring,
+            move |this, value, cx| {
+                this.settings.ai_usage_ring = value;
+                let mut overrides = widgets::setting_value(&this.settings, "AiUsageRingOverrides")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                overrides.retain(|k, _| !dynamic_island::same_widget_id(k, wid));
+                let ring_str = match value {
+                    AiUsageRing::Highest => "Highest",
+                    AiUsageRing::Session => "Session",
+                    AiUsageRing::Weekly => "Weekly",
+                };
+                overrides.insert(
+                    widgets::canonical_widget_id(wid).to_owned(),
+                    serde_json::Value::String(ring_str.to_owned()),
+                );
+                widgets::set_setting(
+                    &mut this.settings,
+                    "AiUsageRingOverrides",
+                    serde_json::Value::Object(overrides),
+                );
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        rows.push(if wid == "aiusage_claude" {
+            self.target_row(
+                "AiUsageRingLabel",
+                t,
+                Some("\u{E99A}"),
+                loc::t("AiUsageRingLabel"),
+                ring_dropdown,
+            )
+        } else {
+            setting_row(
+                t,
+                Some("\u{E99A}"),
+                loc::t("AiUsageRingLabel"),
+                ring_dropdown,
+            )
+            .into_any_element()
+        });
+        rows
     }
 
     fn render_widget_inline_settings(
         &self,
         wid: &'static str,
         t: &UiTheme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        match wid {
+        let mut rows: Vec<AnyElement> = match wid {
+            "aiusage_claude" | "aiusage_codex" | "aiusage_opencode" | "aiusage_copilot"
+            | "aiusage_deepseek" | "aiusage_openrouter" | "aiusage_cursor" => {
+                self.render_ai_provider_drawer(wid, t, window, cx)
+            }
             "clock" => vec![
                 self.target_row(
                     "ClockFormat24Hour",
@@ -7329,7 +10064,32 @@ impl SettingsView {
                     ),
                 ),
             ],
-            "weather" => self.render_weather_picker(t, cx),
+            "weather" => {
+                let mut weather_rows = self.render_weather_picker(t, cx);
+                let compact = widgets::setting_bool(&self.settings, "WeatherCompactMode", false);
+                weather_rows.push(self.target_row(
+                    "WeatherCompactMode",
+                    t,
+                    Some("\u{E753}"),
+                    loc::t("WeatherCompactMode"),
+                    ios_switch(
+                        "sw-weather-compact",
+                        t,
+                        compact,
+                        cx.listener(|this, _, _, cx| {
+                            let next =
+                                !widgets::setting_bool(&this.settings, "WeatherCompactMode", false);
+                            widgets::set_setting(
+                                &mut this.settings,
+                                "WeatherCompactMode",
+                                serde_json::Value::Bool(next),
+                            );
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ));
+                weather_rows
+            }
             "stats" => vec![
                 self.target_row(
                     "Cpu",
@@ -7393,98 +10153,200 @@ impl SettingsView {
                     ),
                 ),
             ],
-            "bluetoothbattery" => vec![
-                self.target_row(
-                    "WirelessBatteryLowThreshold",
-                    t,
-                    Some("\u{E850}"),
-                    loc::t("WirelessBatteryAlertLabel"),
-                    self.make_dropdown(
-                        "bt-low-threshold",
+            "bluetoothbattery" => {
+                let extra_ignored = self
+                    .settings
+                    .extra
+                    .get("IgnoredWirelessDevices")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let ignored_count = self
+                    .settings
+                    .ignored_wireless_devices
+                    .len()
+                    .max(extra_ignored);
+                vec![
+                    self.target_row(
+                        "WirelessBatteryLowThreshold",
                         t,
-                        [
-                            (0, loc::t("WirelessBatteryAlertOff")),
-                            (10, "10%".to_owned()),
-                            (20, "20%".to_owned()),
-                            (30, "30%".to_owned()),
-                        ]
-                        .into_iter()
-                        .map(|(threshold, label)| {
-                            let entity = cx.entity().downgrade();
-                            DropdownOption {
-                                label: SharedString::from(label),
-                                flag_path: None,
-                                glyph: None,
-                                selected: self.settings.wireless_battery_low_threshold == threshold,
-                                on_select: std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        this.open_dropdown = None;
-                                        this.settings.wireless_battery_low_threshold = threshold;
-                                        this.auto_save(cx);
-                                    });
-                                }),
-                            }
-                        })
-                        .collect(),
-                        cx,
-                    ),
-                ),
-                self.target_row(
-                    "WirelessBatteryPollSeconds",
-                    t,
-                    Some("\u{E916}"),
-                    loc::t_fmt(
-                        "WirelessBatteryPollInterval",
-                        &[&self.settings.wireless_battery_poll_seconds.to_string()],
-                    ),
-                    self.make_dropdown(
-                        "bt-poll-interval",
-                        t,
-                        [15, 30, 60, 120, 300]
+                        Some("\u{E850}"),
+                        loc::t("WirelessBatteryAlertLabel"),
+                        self.make_dropdown(
+                            "bt-low-threshold",
+                            t,
+                            [
+                                (0, loc::t("WirelessBatteryAlertOff")),
+                                (10, "10%".to_owned()),
+                                (20, "20%".to_owned()),
+                                (30, "30%".to_owned()),
+                            ]
                             .into_iter()
-                            .map(|secs| {
+                            .map(|(threshold, label)| {
                                 let entity = cx.entity().downgrade();
                                 DropdownOption {
-                                    label: SharedString::from(format!("{secs}s")),
+                                    label: SharedString::from(label),
                                     flag_path: None,
                                     glyph: None,
-                                    selected: self.settings.wireless_battery_poll_seconds == secs,
+                                    selected: self.settings.wireless_battery_low_threshold
+                                        == threshold,
                                     on_select: std::rc::Rc::new(move |_win, app| {
                                         let _ = entity.update(app, |this, cx| {
                                             this.open_dropdown = None;
-                                            this.settings.wireless_battery_poll_seconds = secs;
+                                            this.settings.wireless_battery_low_threshold =
+                                                threshold;
                                             this.auto_save(cx);
                                         });
                                     }),
                                 }
                             })
                             .collect(),
-                        cx,
+                            cx,
+                        ),
                     ),
-                ),
-                self.target_row(
-                    "WirelessBatteryListenOnly",
-                    t,
-                    Some("\u{E702}"),
-                    loc::t_fmt(
-                        "WirelessBatteryListenOnly",
-                        &[&loc::t(if self.settings.wireless_battery_listen_only {
-                            "WirelessBatteryListenOnlyOn"
-                        } else {
-                            "WirelessBatteryListenOnlyOff"
-                        })],
-                    ),
-                    ios_switch(
-                        "sw-bt-listen-only",
+                    self.target_row(
+                        "WirelessBatteryPollSeconds",
                         t,
-                        self.settings.wireless_battery_listen_only,
+                        Some("\u{E916}"),
+                        loc::t_fmt(
+                            "WirelessBatteryPollInterval",
+                            &[&self.settings.wireless_battery_poll_seconds.to_string()],
+                        ),
+                        self.make_dropdown(
+                            "bt-poll-interval",
+                            t,
+                            [15, 30, 60, 120, 300]
+                                .into_iter()
+                                .map(|secs| {
+                                    let entity = cx.entity().downgrade();
+                                    DropdownOption {
+                                        label: SharedString::from(format!("{secs}s")),
+                                        flag_path: None,
+                                        glyph: None,
+                                        selected: self.settings.wireless_battery_poll_seconds
+                                            == secs,
+                                        on_select: std::rc::Rc::new(move |_win, app| {
+                                            let _ = entity.update(app, |this, cx| {
+                                                this.open_dropdown = None;
+                                                this.settings.wireless_battery_poll_seconds = secs;
+                                                this.auto_save(cx);
+                                            });
+                                        }),
+                                    }
+                                })
+                                .collect(),
+                            cx,
+                        ),
+                    ),
+                    self.target_row(
+                        "WirelessBatteryListenOnly",
+                        t,
+                        Some("\u{E702}"),
+                        loc::t_fmt(
+                            "WirelessBatteryListenOnly",
+                            &[&loc::t(if self.settings.wireless_battery_listen_only {
+                                "WirelessBatteryListenOnlyOn"
+                            } else {
+                                "WirelessBatteryListenOnlyOff"
+                            })],
+                        ),
+                        ios_switch(
+                            "sw-bt-listen-only",
+                            t,
+                            self.settings.wireless_battery_listen_only,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.wireless_battery_listen_only =
+                                    !this.settings.wireless_battery_listen_only;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    self.target_row(
+                        "RestoreIgnoredDevices",
+                        t,
+                        Some("\u{E777}"),
+                        loc::t("RestoreIgnoredDevices"),
+                        button_with_state(
+                            "btn-bt-restore-ignored",
+                            t,
+                            if ignored_count > 0 {
+                                format!("{} ({ignored_count})", loc::t("Restore"))
+                            } else {
+                                loc::t("Restore")
+                            },
+                            ButtonVariant::Secondary,
+                            ignored_count > 0,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.ignored_wireless_devices.clear();
+                                this.settings.extra.remove("IgnoredWirelessDevices");
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                ]
+            }
+            "storage" => {
+                let compact = widgets::setting_bool(&self.settings, "StorageCompactMode", false);
+                vec![self.target_row(
+                    "StorageCompactMode",
+                    t,
+                    Some("\u{EDA2}"),
+                    loc::t("StorageCompactMode"),
+                    ios_switch(
+                        "sw-storage-compact",
+                        t,
+                        compact,
                         cx.listener(|this, _, _, cx| {
-                            this.settings.wireless_battery_listen_only =
-                                !this.settings.wireless_battery_listen_only;
+                            let next =
+                                !widgets::setting_bool(&this.settings, "StorageCompactMode", false);
+                            widgets::set_setting(
+                                &mut this.settings,
+                                "StorageCompactMode",
+                                serde_json::Value::Bool(next),
+                            );
                             this.auto_save(cx);
                         }),
                     ),
+                )]
+            }
+            "media" => vec![self.target_row(
+                "ShowMedia",
+                t,
+                Some("\u{E8D6}"),
+                loc::t("WidgetShowInDockMedia"),
+                ios_switch(
+                    "sw-show-media",
+                    t,
+                    self.settings.show_media,
+                    cx.listener(|this, _, _, cx| {
+                        let next = !this.settings.show_media;
+                        this.settings.show_media = next;
+                        if next && this.settings.focus_mode {
+                            this.settings.focus_mode = false;
+                        }
+                        this.settings.set_widget_enabled("media", next);
+                        this.auto_save(cx);
+                    }),
                 ),
+            )],
+            "audio" => vec![
+                setting_row_desc(
+                    t,
+                    Some("\u{E767}"),
+                    loc::t("WheelVolume"),
+                    loc::t("WheelVolumeDescription"),
+                    ios_switch(
+                        "sw-audio-wheel-volume",
+                        t,
+                        self.settings.wheel_volume_enabled,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.wheel_volume_enabled =
+                                !this.settings.wheel_volume_enabled;
+                            this.auto_save(cx);
+                        }),
+                    ),
+                )
+                .into_any_element(),
             ],
             "focus" => vec![
                 self.target_row(
@@ -7536,10 +10398,28 @@ impl SettingsView {
                     ),
                 ),
             ],
-            // Provider account rows were removed. AI usage options are global
-            // (see the Widgets page); there is no per-provider account panel any more.
+            "countdown" => vec![self.target_row(
+                "CountdownDefaultMinutes",
+                t,
+                Some("\u{EA8F}"),
+                loc::t("CountdownDefaultMinutes"),
+                self.number_stepper_with_suffix(
+                    "countdown-default-minutes",
+                    t,
+                    self.settings.countdown_default_minutes() as i32,
+                    " min",
+                    1,
+                    180,
+                    1,
+                    |s| s.countdown_default_minutes() as i32,
+                    |s, value| s.set_countdown_default_minutes(value.clamp(1, 180) as u32),
+                    cx,
+                ),
+            )],
             _ => Vec::new(),
-        }
+        };
+        rows.extend(self.render_widget_shared_drawer_rows(wid, t, cx));
+        rows
     }
 
     fn render_widget_card(
@@ -7547,11 +10427,12 @@ impl SettingsView {
         w: &'static widgets::WidgetDescriptor,
         t: &UiTheme,
         is_dark: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let wid = w.id;
         let enabled = self.settings.is_widget_enabled(wid);
-        let has_inline = widget_has_inline_settings(wid);
+        let has_inline = widget_has_card_drawer(wid);
         let expanded = has_inline && self.expanded_widget == Some(wid);
         let preview = self.render_widget_preview(wid, t, is_dark);
         let border_col = if enabled || expanded {
@@ -7685,11 +10566,14 @@ impl SettingsView {
             t,
             enabled,
             cx.listener(move |this, _, _, cx| {
-                let cur = this.settings.is_widget_enabled(wid);
-                if !cur && this.settings.focus_mode && wid != "clock" && wid != "focus" {
+                let next = !this.settings.is_widget_enabled(wid);
+                if next && this.settings.focus_mode && wid != "clock" && wid != "focus" {
                     this.settings.focus_mode = false;
                 }
-                this.settings.set_widget_enabled(wid, !cur);
+                this.settings.set_widget_enabled(wid, next);
+                if wid == "media" {
+                    this.settings.show_media = next;
+                }
                 this.auto_save(cx);
             }),
         );
@@ -7782,7 +10666,7 @@ impl SettingsView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(12.0))
                     .flex_shrink_0()
                     .when_some(custom_actions, |row, b| row.child(b))
                     .when_some(icon_button, |row, b| row.child(b))
@@ -7825,7 +10709,7 @@ impl SettingsView {
             .child(head);
 
         if expanded {
-            let rows = self.render_widget_inline_settings(wid, t, cx);
+            let rows = self.render_widget_inline_settings(wid, t, window, cx);
             let mut drawer = div()
                 .w_full()
                 .pt(px(8.0))
@@ -7859,6 +10743,7 @@ impl SettingsView {
         t: &UiTheme,
         is_dark: bool,
         columns: usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
@@ -7923,14 +10808,16 @@ impl SettingsView {
                         cx.notify();
                     }),
                 ))
-                .child(button(
+                .child(button_with_state(
                     "btn-clear-widgets",
                     t,
                     loc::t("ClearAll"),
                     ButtonVariant::Secondary,
+                    active_count > 0,
                     cx.listener(|this, _, _, cx| {
                         this.settings.show_clock_widget = false;
                         this.settings.show_system_stats_widget = false;
+                        this.settings.show_media = false;
                         this.settings.enabled_widgets.clear();
                         this.auto_save(cx);
                     }),
@@ -7977,7 +10864,7 @@ impl SettingsView {
                 }
                 let mut row = div().w_full().flex_shrink_0().flex().gap(px(12.0));
                 for &w in pending.iter() {
-                    row = row.child(this.render_widget_card(w, t, is_dark, cx));
+                    row = row.child(this.render_widget_card(w, t, is_dark, window, cx));
                 }
                 if pending.len() < columns {
                     row = row.child(div().flex_1());
@@ -7988,10 +10875,10 @@ impl SettingsView {
 
             for &w in &items {
                 let is_expanded =
-                    widget_has_inline_settings(w.id) && self.expanded_widget == Some(w.id);
+                    widget_has_card_drawer(w.id) && self.expanded_widget == Some(w.id);
                 if is_expanded {
                     flush_row(&mut pending_row, &mut out, self, cx);
-                    out.push(self.render_widget_card(w, t, is_dark, cx));
+                    out.push(self.render_widget_card(w, t, is_dark, window, cx));
                 } else {
                     pending_row.push(w);
                     if pending_row.len() >= columns {
@@ -8055,75 +10942,14 @@ impl SettingsView {
         })
         .collect();
 
-        let density_choices = || {
-            vec![
-                (loc::t("WidgetDensityAuto"), WidgetDensityMode::Auto),
-                (loc::t("WidgetDensityCompact"), WidgetDensityMode::Compact),
-                (loc::t("WidgetDensityFull"), WidgetDensityMode::Full),
-            ]
-        };
-        let density_override_rows: Vec<AnyElement> = ["clock", "weather", "stats"]
-            .into_iter()
-            .map(|id| {
-                let current = self
-                    .settings
-                    .widget_density_overrides
-                    .get(id)
-                    .copied()
-                    .unwrap_or(WidgetDensityMode::Auto);
-                let row_id = match id {
-                    "clock" => "WidgetDensityOverrideClock",
-                    "weather" => "WidgetDensityOverrideWeather",
-                    _ => "WidgetDensityOverrideStats",
-                };
-                self.target_row(
-                    row_id,
-                    t,
-                    Some("\u{E80A}"),
-                    loc::t(id),
-                    self.enum_dropdown(
-                        format!("widget-density-{id}"),
-                        t,
-                        density_choices(),
-                        current,
-                        move |this, value, cx| {
-                            if value == WidgetDensityMode::Auto {
-                                this.settings.widget_density_overrides.remove(id);
-                            } else {
-                                this.settings
-                                    .widget_density_overrides
-                                    .insert(id.to_owned(), value);
-                            }
-                            this.auto_save(cx);
-                        },
-                        cx,
-                    ),
-                )
-            })
-            .collect();
-        let ai_ring = self.enum_dropdown(
-            "ai-usage-ring",
-            t,
-            vec![
-                (loc::t("AiUsageRingHighest"), AiUsageRing::Highest),
-                (loc::t("AiUsageRingSession"), AiUsageRing::Session),
-                (loc::t("AiUsageRingWeekly"), AiUsageRing::Weekly),
-            ],
-            self.settings.ai_usage_ring,
-            |this, value, cx| {
-                this.settings.ai_usage_ring = value;
-                this.auto_save(cx);
-            },
-            cx,
-        );
         let shrink_priority = self.number_stepper(
             "shrink-priority",
             t,
-            extra_number(&self.settings, "ShrinkPriority", 0),
-            0,
-            8,
-            |s| extra_number(s, "ShrinkPriority", 0),
-            |s, value| set_extra_number(s, "ShrinkPriority", value),
+            self.settings.shrink_priority_bias(),
+            -10,
+            10,
+            |s| s.shrink_priority_bias(),
+            |s, value| s.set_shrink_priority_bias(value),
             cx,
         );
 
@@ -8139,46 +10965,22 @@ impl SettingsView {
                         self.make_dropdown("widget-flyout-trigger", t, trigger_opts, cx),
                     )
                     .into_any_element(),
-                    setting_row(
+                    self.target_row(
+                        "WidgetDensityCompact",
                         t,
                         Some("\u{E80A}"),
                         loc::t("WidgetDensity"),
                         self.make_dropdown("widget-density", t, density_opts, cx),
-                    )
-                    .into_any_element(),
-                    setting_row(
+                    ),
+                    self.target_row_desc(
+                        "ShrinkPriority",
                         t,
                         Some("\u{E80A}"),
                         loc::t("ShrinkPriority"),
+                        loc::t("ShrinkPriorityDesc"),
                         shrink_priority,
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "AiUsageRing",
-                        t,
-                        Some("\u{E99A}"),
-                        loc::t("AiUsageRingLabel"),
-                        ai_ring,
                     ),
-                    self.target_row(
-                        "ShowMedia",
-                        t,
-                        Some("\u{E8D6}"),
-                        loc::t("ShowMedia"),
-                        ios_switch(
-                            "sw-show-media",
-                            t,
-                            self.settings.show_media,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_media = !this.settings.show_media;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    ),
-                ]
-                .into_iter()
-                .chain(density_override_rows)
-                .collect(),
+                ],
             )
             .into_any_element(),
         );
@@ -8187,7 +10989,6 @@ impl SettingsView {
 
     fn render_dynamic_island(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let monitors = win32::enumerate_monitors();
-        let active = widgets::active_widgets(&self.settings);
         let di_opacity_pct = (self.settings.dynamic_island_opacity * 100.0).round() as i32;
 
         let di_disabled = !self.settings.dynamic_island_enable;
@@ -8210,6 +11011,83 @@ impl SettingsView {
                                     !this.settings.dynamic_island_enable;
                                 this.auto_save(cx);
                             }),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandStyleLabel",
+                            t,
+                            Some("\u{E8A1}"),
+                            loc::t("DynamicIslandStyleLabel"),
+                            self.enum_dropdown(
+                                "di-style",
+                                t,
+                                vec![
+                                    (loc::t("DynamicIslandStyleNotch"), DynamicIslandStyle::Notch),
+                                    (
+                                        loc::t("DynamicIslandStyleFloating"),
+                                        DynamicIslandStyle::Floating,
+                                    ),
+                                ],
+                                self.settings.dynamic_island_style(),
+                                |this, value, cx| {
+                                    this.settings.set_dynamic_island_style(value);
+                                    this.auto_save(cx);
+                                },
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandLayoutLabel",
+                            t,
+                            Some("\u{E80A}"),
+                            loc::t("DynamicIslandLayoutLabel"),
+                            self.enum_dropdown(
+                                "di-layout",
+                                t,
+                                vec![
+                                    (
+                                        loc::t("DynamicIslandLayoutPaged"),
+                                        DynamicIslandLayout::Paged,
+                                    ),
+                                    (
+                                        loc::t("DynamicIslandLayoutStrip"),
+                                        DynamicIslandLayout::Strip,
+                                    ),
+                                ],
+                                self.settings.dynamic_island_layout(),
+                                |this, value, cx| {
+                                    this.settings.set_dynamic_island_layout(value);
+                                    this.auto_save(cx);
+                                },
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row(
+                            "DynamicIslandShowFocusWidgets",
+                            t,
+                            Some("\u{E7C8}"),
+                            loc::t("DynamicIslandShowFocusWidgets"),
+                            ios_switch(
+                                "di-show-focus-widgets",
+                                t,
+                                self.settings.dynamic_island_show_focus_widgets(),
+                                cx.listener(|this, _, _, cx| {
+                                    let next = !this.settings.dynamic_island_show_focus_widgets();
+                                    this.settings.set_dynamic_island_show_focus_widgets(next);
+                                    this.auto_save(cx);
+                                }),
+                            ),
                         ),
                     )
                     .into_any_element(),
@@ -8383,7 +11261,7 @@ impl SettingsView {
                         self.target_row_desc(
                             "DynamicIslandOpacity",
                             t,
-                            Some("\u{E793}"),
+                            Some("\u{E7B3}"),
                             // No `DynamicIslandOpacity` locale key exists; reuse the generic Opacity label.
                             loc::t("SurfaceOpacityLabel"),
                             loc::t("DynamicIslandOpacityDescription"),
@@ -8416,95 +11294,213 @@ impl SettingsView {
             .into_any_element(),
         ];
 
-        let mut placement_rows: Vec<AnyElement> = Vec::new();
-        if active.is_empty() {
-            placement_rows.push(
-                self.mark_target(
-                    "DynamicIslandWidgetLocation",
-                    t,
-                    div()
-                        .w_full()
-                        .px(px(14.0))
-                        .py(px(12.0))
-                        .text_size(px(12.5))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandWidgetLocationDescription")),
-                )
-                .into_any_element(),
-            );
-        } else {
-            for (index, wd) in active.into_iter().enumerate() {
-                let wid = wd.id;
-                let current = self
-                    .settings
+        let all_widgets: Vec<&'static widgets::WidgetDescriptor> =
+            widgets::catalog_widgets().collect();
+        let placed_ids_raw: Vec<String> = all_widgets
+            .iter()
+            .filter(|wd| {
+                self.settings
                     .dynamic_island_placements
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(wid))
-                    .map(|(_, v)| v.clone());
+                    .keys()
+                    .any(|k| dynamic_island::same_widget_id(k, wd.id))
+            })
+            .map(|wd| settings::canonical_widget_setting_id(wd.id))
+            .collect();
+        let saved_global_order = self
+            .settings
+            .dynamic_island_widget_orders
+            .get(settings::DYNAMIC_ISLAND_ALL_DISPLAYS)
+            .map(Vec::as_slice);
+        let placed_order =
+            dynamic_island::order_widgets(&placed_ids_raw, saved_global_order, None, &[]);
 
-                let mut choices: Vec<(Option<String>, String)> = Vec::new();
-                choices.push((None, loc::t("DynamicIslandDock")));
-                choices.push((
-                    Some(settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned()),
-                    loc::t("DynamicIslandAllDisplays"),
-                ));
-                for mon in &monitors {
-                    choices.push((Some(mon.device_name.clone()), mon.display_label()));
-                }
+        let mut ordered_widgets: Vec<&'static widgets::WidgetDescriptor> =
+            Vec::with_capacity(all_widgets.len());
+        for pid in &placed_order {
+            if let Some(&wd) = all_widgets
+                .iter()
+                .find(|wd| dynamic_island::same_widget_id(wd.id, pid))
+            {
+                ordered_widgets.push(wd);
+            }
+        }
+        for &wd in &all_widgets {
+            if !ordered_widgets
+                .iter()
+                .any(|existing| dynamic_island::same_widget_id(existing.id, wd.id))
+            {
+                ordered_widgets.push(wd);
+            }
+        }
 
-                let dd_opts: Vec<DropdownOption> = choices
-                    .into_iter()
-                    .map(|(target, label)| {
-                        let is_active = match (&current, &target) {
-                            (None, None) => true,
-                            (Some(cur), Some(tgt)) => cur.eq_ignore_ascii_case(tgt),
-                            _ => false,
-                        };
-                        let wid_owned = wid.to_owned();
-                        let entity = cx.entity().downgrade();
-                        DropdownOption {
-                            label: SharedString::from(label),
-                            flag_path: None,
-                            glyph: None,
-                            selected: is_active,
-                            on_select: std::rc::Rc::new(move |_win, app| {
-                                let _ = entity.update(app, |this, cx| {
-                                    this.open_dropdown = None;
+        let mut placement_rows: Vec<AnyElement> = Vec::with_capacity(ordered_widgets.len());
+        for (index, wd) in ordered_widgets.into_iter().enumerate() {
+            let wid = wd.id;
+            let current = self
+                .settings
+                .dynamic_island_placements
+                .iter()
+                .find(|(k, _)| dynamic_island::same_widget_id(k, wid))
+                .map(|(_, v)| v.clone());
+            let in_island = current.is_some();
+            let placed_pos = placed_order
+                .iter()
+                .position(|id| dynamic_island::same_widget_id(id, wid));
+
+            let mut choices: Vec<(Option<String>, String)> = Vec::new();
+            choices.push((None, loc::t("DynamicIslandDock")));
+            choices.push((
+                Some(settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned()),
+                loc::t("DynamicIslandAllDisplays"),
+            ));
+            for mon in &monitors {
+                choices.push((Some(mon.device_name.clone()), mon.display_label()));
+            }
+
+            let dd_opts: Vec<DropdownOption> = choices
+                .into_iter()
+                .map(|(target, label)| {
+                    let is_active = match (&current, &target) {
+                        (None, None) => true,
+                        (Some(cur), Some(tgt)) => cur.eq_ignore_ascii_case(tgt),
+                        _ => false,
+                    };
+                    let entity = cx.entity().downgrade();
+                    DropdownOption {
+                        label: SharedString::from(label),
+                        flag_path: None,
+                        glyph: None,
+                        selected: is_active,
+                        on_select: std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                this.open_dropdown = None;
+                                this.settings
+                                    .dynamic_island_placements
+                                    .retain(|k, _| !dynamic_island::same_widget_id(k, wid));
+                                if let Some(ref dev) = target {
+                                    this.settings.set_widget_enabled(wid, true);
+                                    if wid == "media" {
+                                        this.settings.show_media = true;
+                                    }
+                                    let canonical = settings::canonical_widget_setting_id(wid);
                                     this.settings
                                         .dynamic_island_placements
-                                        .retain(|k, _| !k.eq_ignore_ascii_case(&wid_owned));
-                                    if let Some(ref dev) = target {
-                                        this.settings
-                                            .dynamic_island_placements
-                                            .insert(wid_owned.clone(), dev.clone());
-                                    }
-                                    this.auto_save(cx);
-                                });
-                            }),
-                        }
-                    })
-                    .collect();
+                                        .insert(canonical, dev.clone());
+                                }
+                                this.auto_save(cx);
+                            });
+                        }),
+                    }
+                })
+                .collect();
 
-                let control = self.make_dropdown(format!("di-place-{wid}"), t, dd_opts, cx);
-                placement_rows.push(if index == 0 {
-                    // The catalog entry for this section targets its first widget row.
-                    self.target_row(
-                        "DynamicIslandWidgetLocation",
+            let quick_switch = ios_switch(
+                SharedString::from(format!("di-sw-{wid}")),
+                t,
+                in_island,
+                cx.listener(move |this, _, _, cx| {
+                    let currently_in = this
+                        .settings
+                        .dynamic_island_placements
+                        .keys()
+                        .any(|k| dynamic_island::same_widget_id(k, wid));
+                    this.settings
+                        .dynamic_island_placements
+                        .retain(|k, _| !dynamic_island::same_widget_id(k, wid));
+                    if !currently_in {
+                        this.settings.set_widget_enabled(wid, true);
+                        if wid == "media" {
+                            this.settings.show_media = true;
+                        }
+                        let canonical = settings::canonical_widget_setting_id(wid);
+                        this.settings
+                            .dynamic_island_placements
+                            .insert(canonical, settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned());
+                    }
+                    this.auto_save(cx);
+                }),
+            );
+
+            let mut control = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(quick_switch)
+                .child(self.make_dropdown(format!("di-place-{wid}"), t, dd_opts, cx));
+
+            if let Some(pos) = placed_pos
+                && placed_order.len() > 1
+            {
+                let order_up = placed_order.clone();
+                let target_dev_up = current.clone();
+                let order_down = placed_order.clone();
+                let target_dev_down = current.clone();
+                control = control
+                    .child(button_with_state(
+                        SharedString::from(format!("di-up-{wid}")),
                         t,
-                        Some(widget_glyph(wid)),
-                        widgets::widget_name(wid),
-                        control,
-                    )
-                } else {
-                    setting_row(
+                        "▲",
+                        ButtonVariant::Secondary,
+                        pos > 0,
+                        cx.listener(move |this, _, _, cx| {
+                            let next = dynamic_island::move_widget(&order_up, wid, -1);
+                            this.settings.dynamic_island_widget_orders.insert(
+                                settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned(),
+                                next.clone(),
+                            );
+                            if let Some(ref dev) = target_dev_up
+                                && !dev.eq_ignore_ascii_case(settings::DYNAMIC_ISLAND_ALL_DISPLAYS)
+                            {
+                                this.settings
+                                    .dynamic_island_widget_orders
+                                    .insert(dev.clone(), next);
+                            }
+                            this.auto_save(cx);
+                        }),
+                    ))
+                    .child(button_with_state(
+                        SharedString::from(format!("di-down-{wid}")),
                         t,
-                        Some(widget_glyph(wid)),
-                        widgets::widget_name(wid),
-                        control,
-                    )
-                    .into_any_element()
-                });
+                        "▼",
+                        ButtonVariant::Secondary,
+                        pos + 1 < placed_order.len(),
+                        cx.listener(move |this, _, _, cx| {
+                            let next = dynamic_island::move_widget(&order_down, wid, 1);
+                            this.settings.dynamic_island_widget_orders.insert(
+                                settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned(),
+                                next.clone(),
+                            );
+                            if let Some(ref dev) = target_dev_down
+                                && !dev.eq_ignore_ascii_case(settings::DYNAMIC_ISLAND_ALL_DISPLAYS)
+                            {
+                                this.settings
+                                    .dynamic_island_widget_orders
+                                    .insert(dev.clone(), next);
+                            }
+                            this.auto_save(cx);
+                        }),
+                    ));
             }
+
+            placement_rows.push(if index == 0 {
+                // The catalog entry for this section targets its first widget row.
+                self.target_row_desc(
+                    "DynamicIslandWidgetLocation",
+                    t,
+                    Some(widget_glyph(wid)),
+                    widgets::widget_name(wid),
+                    loc::t("DynamicIslandShowInIsland"),
+                    control,
+                )
+            } else {
+                setting_row(
+                    t,
+                    Some(widget_glyph(wid)),
+                    widgets::widget_name(wid),
+                    control,
+                )
+                .into_any_element()
+            });
         }
 
         cards.push(
@@ -8637,7 +11633,7 @@ impl SettingsView {
                                         .text_size(px(fonts::scaled_size(12.0)))
                                         .cursor_pointer()
                                         .child(label)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             if let Some(profile) = this
                                                 .settings
                                                 .profiles
@@ -8654,9 +11650,8 @@ impl SettingsView {
                                                 Some(profile_name.clone());
                                             fonts::apply_settings(&this.settings);
                                             loc::set_language(&this.settings.language);
-                                            crate::design::theme::apply_saved_token_overrides(
-                                                &this.settings,
-                                            );
+                                            sync_from_settings(&this.settings);
+                                            this.sync_settings_glass(window);
                                             this.widget_runtime.tick(&this.settings);
                                             this.auto_save(cx);
                                         }))
@@ -8794,22 +11789,19 @@ impl SettingsView {
                         .text_color(rgba(t.text_secondary))
                         .child(self.startup_status.clone())
                         .into_any_element(),
-                    // The window-picker (WS-10) toggle is persisted in `extra`;
-                    // the dock reads this key when that workstream lands.
-                    // No WS-10 toggle API exists in this worktree yet.
                     self.target_row_desc(
-                        "WindowPickerEnabled",
+                        "WindowPickerTitle",
                         t,
                         Some("\u{E7C4}"),
                         loc::t("WindowPickerTitle"),
-                        loc::t("WindowPickerPage"),
+                        loc::t("WindowPickerEnabledDesc"),
                         ios_switch(
                             "sw-window-picker",
                             t,
-                            extra_number(&self.settings, "WindowPickerEnabled", 0) != 0,
+                            extra_number(&self.settings, "WindowPickerEnabled", 1) != 0,
                             cx.listener(|this, _, _, cx| {
                                 let next =
-                                    extra_number(&this.settings, "WindowPickerEnabled", 0) == 0;
+                                    extra_number(&this.settings, "WindowPickerEnabled", 1) == 0;
                                 set_extra_number(
                                     &mut this.settings,
                                     "WindowPickerEnabled",
@@ -8853,14 +11845,15 @@ impl SettingsView {
                                 t,
                                 loc::t("ImportSettings"),
                                 ButtonVariant::Secondary,
-                                cx.listener(|this, _, _, cx| {
+                                cx.listener(|this, _, window, cx| {
                                     let src = settings::app_data_dir().join("settings.backup.json");
                                     if src.exists() {
                                         this.settings = settings::load_from(&src);
                                         fonts::apply_settings(&this.settings);
                                         loc::set_language(&this.settings.language);
-                                        this.widget_runtime.tick(&this.settings);
-                                        this.save_settings(cx);
+                                        sync_from_settings(&this.settings);
+                                        this.sync_settings_glass(window);
+                                        this.save_immediately(cx);
                                     }
                                 }),
                             )),
@@ -8876,12 +11869,17 @@ impl SettingsView {
                             t,
                             loc::t("Reset"),
                             ButtonVariant::Destructive,
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, _, window, cx| {
                                 this.settings = DockSettings::default();
+                                this.custom_theme_name.clear();
+                                this.custom_theme_name_selection = 0..0;
+                                this.theme_status.clear();
+                                this.token_apply_status.clear();
                                 fonts::apply_settings(&this.settings);
                                 loc::set_language(&this.settings.language);
-                                this.widget_runtime.tick(&this.settings);
-                                this.save_settings(cx);
+                                sync_from_settings(&this.settings);
+                                this.sync_settings_glass(window);
+                                this.save_immediately(cx);
                             }),
                         ),
                     )
@@ -8890,7 +11888,6 @@ impl SettingsView {
             )
             .into_any_element(),
         ];
-        out.push(section_card(t, "Hotkeys", self.render_hotkeys(t, cx)).into_any_element());
         out.push(
             section_card(t, loc::t("AiAccountsHeading"), self.render_ai_auth(t, cx))
                 .into_any_element(),
@@ -8975,7 +11972,7 @@ impl SettingsView {
                         button(
                             "btn-restore-tb",
                             t,
-                            loc::t("Restore"),
+                            loc::t("RestoreWindowsTaskbar"),
                             ButtonVariant::Destructive,
                             |_, _, _| opentaskbar_shell::taskbar::restore_from_journal(),
                         ),
@@ -8988,35 +11985,40 @@ impl SettingsView {
     }
 }
 
-/// Backing buffer for the header search field. GPUI uses this to route typing, paste and
-/// IME input to the focused input element.
+/// Backing buffer for Settings text inputs (header search, custom theme name, and masked
+/// AI provider DPAPI secret fields). GPUI uses this to route typing, paste and IME input
+/// to whichever `TextInput` currently holds focus.
 impl EntityInputHandler for SettingsView {
     fn text_for_range(
         &mut self,
         range: Range<usize>,
         adjusted_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let len = self.search_utf16_len();
+        let field = self.focused_text_field(window);
+        let (buf, _) = self.text_field_ref(field);
+        let len = buf.encode_utf16().count();
         let start = range.start.min(len);
         let end = range.end.clamp(start, len);
         if start != range.start || end != range.end {
             *adjusted_range = Some(start..end);
         }
-        let from = Self::byte_index_for_utf16(&self.search_text, start);
-        let to = Self::byte_index_for_utf16(&self.search_text, end);
-        Some(self.search_text[from..to].to_owned())
+        let from = Self::byte_index_for_utf16(buf, start);
+        let to = Self::byte_index_for_utf16(buf, end);
+        Some(buf[from..to].to_owned())
     }
 
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        let field = self.focused_text_field(window);
+        let (_, range) = self.text_field_ref(field);
         Some(UTF16Selection {
-            range: self.search_selection.clone(),
+            range,
             reversed: false,
         })
     }
@@ -9035,11 +12037,12 @@ impl EntityInputHandler for SettingsView {
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range.unwrap_or_else(|| self.search_selection.clone());
-        self.replace_search_range(range, text);
+        let field = self.focused_text_field(window);
+        let range = range.unwrap_or_else(|| self.text_field_ref(field).1);
+        self.replace_text_field_range(field, range, text);
         cx.notify();
     }
 
@@ -9048,11 +12051,12 @@ impl EntityInputHandler for SettingsView {
         range: Option<Range<usize>>,
         new_text: &str,
         _new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range.unwrap_or_else(|| self.search_selection.clone());
-        self.replace_search_range(range, new_text);
+        let field = self.focused_text_field(window);
+        let range = range.unwrap_or_else(|| self.text_field_ref(field).1);
+        self.replace_text_field_range(field, range, new_text);
         cx.notify();
     }
 
@@ -9079,15 +12083,34 @@ impl EntityInputHandler for SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_dark = self.resolve_is_dark();
-        let settings_glass = self.settings.settings_background == SurfaceBackground::Glass;
         self.sync_settings_glass(window);
-        let mut t = UiTheme::for_settings(is_dark, settings_glass);
+        let mut t = UiTheme::for_settings_background(is_dark, self.settings.settings_background);
         t.border_width = self.settings.settings_border_thickness.clamp(0.0, 8.0) as f32;
         if let Some(value) = &self.settings.settings_border_color
             && let Some(color) = parse_hex_color(value)
         {
             t.border = color;
         }
+        // Outer chrome: 8 DIP rounded surface on Windows 11 (matching DWMWCP_ROUND and the
+        // SpatialGlassHost clip), square on Windows 10. Exactly one crisp border: the glass
+        // host's optical rim when it is active, otherwise a GPUI border on the root.
+        let corner_radius = settings_corner_radius(window_chrome::is_windows_11());
+        let glass_rim_active = self.spatial_glass.is_some() && {
+            let cfg = SpatialGlassConfig::from_settings(
+                &self.settings,
+                self.settings.settings_background,
+                self.settings.settings_opacity,
+                is_dark,
+                false,
+            );
+            cfg.enabled && cfg.edge_glow > 0.0
+        };
+        let root_border_width = if settings_root_draws_border(glass_rim_active) {
+            Some(t.border_width.max(1.0))
+        } else {
+            None
+        };
+        let root_border_color = t.border;
         let width = window.viewport_size().width;
         let narrow = width < px(SIDEBAR_BREAKPOINT);
         let inset = px(if narrow { 20.0 } else { 32.0 });
@@ -9135,10 +12158,10 @@ impl Render for SettingsView {
                     } else {
                         2
                     };
-                    self.render_widgets(&t, is_dark, columns, cx)
+                    self.render_widgets(&t, is_dark, columns, window, cx)
                 }
                 SettingsPage::DynamicIsland => self.render_dynamic_island(&t, cx),
-                SettingsPage::Themes => self.render_themes(&t, cx),
+                SettingsPage::Themes => self.render_themes(&t, is_dark, window, cx),
                 SettingsPage::Preferences => self.render_preferences(&t, cx),
                 SettingsPage::About => self.render_about(&t),
             }
@@ -9190,7 +12213,11 @@ impl Render for SettingsView {
             .border_color(rgba(t.border))
             .when(narrow, |panel| panel.w_full().border_b_1())
             .when(!narrow, |panel| {
-                panel.w(px(SIDEBAR_WIDTH)).h_full().border_r_1()
+                panel
+                    .w(px(SIDEBAR_WIDTH))
+                    .h_full()
+                    .border_r_1()
+                    .rounded_bl(px(corner_radius))
             })
             .child(
                 div()
@@ -9228,7 +12255,8 @@ impl Render for SettingsView {
                     cx.notify();
                 }))
                 .px(inset)
-                .py(px(20.0))
+                .pt(px(20.0))
+                .pb(px(40.0))
                 .child(page_content),
         );
 
@@ -9281,7 +12309,7 @@ impl Render for SettingsView {
                             .child(header_subtitle),
                     ),
             )
-            .when(self.save_failed, |panel| {
+            .when_some(self.save_error.clone(), |panel, reason| {
                 panel.child(
                     div()
                         .px(inset)
@@ -9289,7 +12317,7 @@ impl Render for SettingsView {
                         .bg(rgba(t.destructive_soft))
                         .text_color(rgba(t.destructive))
                         .text_size(px(fonts::scaled_size(13.0)))
-                        .child(loc::t("SettingsSaveError")),
+                        .child(format!("{} — {reason}", loc::t("SettingsSaveError"))),
                 )
             })
             .child(scroll_wrap);
@@ -9366,18 +12394,11 @@ impl Render for SettingsView {
                     if !this.search_focus.is_focused(window) {
                         return;
                     }
+                    if this.handle_text_field_key_down(ActiveTextField::Search, event, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     match event.keystroke.key.as_str() {
-                        "backspace" => {
-                            let selection = this.search_selection.clone();
-                            let end = selection.end.min(this.search_utf16_len());
-                            if end > selection.start {
-                                this.replace_search_range(selection.start..end, "");
-                            } else if end > 0 {
-                                this.replace_search_range(end - 1..end, "");
-                            }
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
                         "escape" => {
                             this.clear_search();
                             this.highlight_row = None;
@@ -9441,6 +12462,8 @@ impl Render for SettingsView {
             .flex()
             .items_center()
             .justify_between()
+            // GPUI content masks are rectangular: round the corner-touching fills themselves.
+            .rounded_t(px(corner_radius))
             .bg(rgba(t.sidebar_bg))
             .border_b_1()
             .border_color(rgba(t.border))
@@ -9503,6 +12526,7 @@ impl Render for SettingsView {
                             .id("cap-close")
                             .w(px(46.0))
                             .h_full()
+                            .rounded_tr(px(corner_radius))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -9553,60 +12577,16 @@ impl Render for SettingsView {
                 this.flyout_preview = !this.flyout_preview;
                 cx.notify();
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                let key = event.keystroke.key.as_str();
-                if this.hotkey_capture.is_some() {
-                    if key == "escape" {
-                        this.hotkey_capture = None;
-                        cx.notify();
-                        return;
-                    }
-                    if matches!(
-                        key,
-                        "control" | "alt" | "shift" | "windows" | "capslock" | "function"
-                    ) {
-                        return;
-                    }
-                    let mut parts: Vec<String> = Vec::new();
-                    if event.keystroke.modifiers.control {
-                        parts.push("Ctrl".to_owned());
-                    }
-                    if event.keystroke.modifiers.alt {
-                        parts.push("Alt".to_owned());
-                    }
-                    if event.keystroke.modifiers.shift {
-                        parts.push("Shift".to_owned());
-                    }
-                    if event.keystroke.modifiers.platform {
-                        parts.push("Win".to_owned());
-                    }
-                    let raw = event
-                        .keystroke
-                        .key_char
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(key);
-                    let named = if raw.chars().count() == 1 {
-                        raw.to_uppercase()
-                    } else {
-                        let mut chars = raw.chars();
-                        chars.next().map_or_else(String::new, |c| {
-                            c.to_uppercase().collect::<String>() + chars.as_str()
-                        })
-                    };
-                    parts.push(named);
-                    if let Some(which) = this.hotkey_capture.take() {
-                        set_extra_string(&mut this.settings, which, &parts.join("+"));
-                        this.auto_save(cx);
-                    }
-                }
-            }))
             .relative()
             .w_full()
             .h_full()
             .flex()
             .flex_col()
+            .rounded(px(corner_radius))
             .overflow_hidden()
+            .when_some(root_border_width, |root, width| {
+                root.border(px(width)).border_color(rgba(root_border_color))
+            })
             .bg(rgba(t.canvas_bg))
             .font_family(SharedString::from(
                 if self.settings.ui_font_family.trim().is_empty() {
@@ -9643,19 +12623,259 @@ mod tests {
     use super::{
         BrushMode, DockSettings, FALLBACK_WIDGET_GLYPH, SettingsPage, WIN_H, WIN_W,
         ai_cli_sign_in_command, brush_to_json, build_backup, build_brush, city_list,
-        civil_from_days, close_spawned_settings_windows, field_cell_hsv, gradient_stop_at,
-        import_backup_into, inspect_backup, location_auto_fill_value, persist_theme_tokens,
-        reorder_gradient_stop, resolve_startup_toggle, safe_backup_path, settings_search,
-        settings_window_options, weather_country_for, widget_glyph, zip_store, zip_unstore,
+        civil_from_days, close_spawned_settings_windows, field_cell_hsv, fit_settings_size,
+        gradient_stop_at, import_backup_into, inspect_backup, location_auto_fill_value,
+        persist_theme_tokens, read_density_override, reorder_gradient_stop, resolve_startup_toggle,
+        safe_backup_path, settings_corner_radius, settings_root_draws_border, settings_search,
+        settings_window_options, weather_country_for, widget_glyph, write_density_override,
+        zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{
         apply_token_overrides, theme_test_guard, token_overrides_from_json,
     };
     use crate::design::tokens::{Rgba, TokenMap, TokenValue};
-    use gpui::px;
+    use gpui::{WindowBounds, px, size};
     use opentaskbar_core::i18n as loc;
     use serde_json::Map;
+
+    #[test]
+    fn widget_glyphs_avoid_unassigned_codepoints() {
+        // U+E917 has no glyph in Segoe Fluent Icons and rendered as a tofu box.
+        assert_ne!(widget_glyph("countdown"), "\u{E917}");
+        assert_eq!(widget_glyph("countdown"), "\u{EA8F}");
+        assert_ne!(widget_glyph("countdown"), widget_glyph("stopwatch"));
+    }
+
+    #[test]
+    fn dock_value_steppers_hidden_for_computed_sizes() {
+        use opentaskbar_core::settings::{DockHeightMode, DockWidthMode};
+        assert!(!super::dock_width_has_value(DockWidthMode::Auto));
+        assert!(!super::dock_width_has_value(DockWidthMode::Fill));
+        assert!(super::dock_width_has_value(DockWidthMode::Pixels));
+        assert!(super::dock_width_has_value(DockWidthMode::Percent));
+        assert!(!super::dock_height_has_value(DockHeightMode::Auto));
+        assert!(!super::dock_height_has_value(DockHeightMode::Fill));
+        assert!(super::dock_height_has_value(DockHeightMode::Pixels));
+        assert!(super::dock_height_has_value(DockHeightMode::Percent));
+        assert_eq!(super::unit_suffix(true), "%");
+        assert_eq!(super::unit_suffix(false), " px");
+    }
+
+    #[test]
+    fn dock_stepper_bounds_match_core_validation() {
+        use opentaskbar_core::settings::{DockGapUnit, DockHeightMode, DockWidthMode};
+
+        let (w_px_min, w_px_max, w_px_step) =
+            super::dock_width_stepper_bounds(DockWidthMode::Pixels);
+        let (w_pct_min, w_pct_max, w_pct_step) =
+            super::dock_width_stepper_bounds(DockWidthMode::Percent);
+        assert_eq!((w_px_min, w_px_max, w_px_step), (100, 5000, 10));
+        assert_eq!((w_pct_min, w_pct_max, w_pct_step), (10, 100, 1));
+
+        let (h_px_min, h_px_max, h_px_step) =
+            super::dock_height_stepper_bounds(DockHeightMode::Pixels);
+        let (h_pct_min, h_pct_max, h_pct_step) =
+            super::dock_height_stepper_bounds(DockHeightMode::Percent);
+        assert_eq!((h_px_min, h_px_max, h_px_step), (24, 400, 2));
+        assert_eq!((h_pct_min, h_pct_max, h_pct_step), (2, 25, 1));
+
+        let (g_px_min, g_px_max, g_px_step) =
+            super::dock_top_gap_stepper_bounds(DockGapUnit::Pixels);
+        let (g_pct_min, g_pct_max, g_pct_step) =
+            super::dock_top_gap_stepper_bounds(DockGapUnit::Percent);
+        assert_eq!((g_px_min, g_px_max, g_px_step), (0, 200, 2));
+        assert_eq!((g_pct_min, g_pct_max, g_pct_step), (0, 100, 1));
+
+        let min_valid = DockSettings {
+            dock_width_pixels: w_px_min,
+            dock_width_percent: w_pct_min,
+            dock_height_pixels: h_px_min,
+            dock_height_percent: h_pct_min,
+            dock_top_gap_pixels: g_px_min,
+            dock_top_gap_percent: g_pct_min,
+            ..Default::default()
+        };
+        assert!(
+            min_valid.validate().is_empty(),
+            "{:?}",
+            min_valid.validate()
+        );
+
+        let max_valid = DockSettings {
+            dock_width_pixels: w_px_max,
+            dock_width_percent: w_pct_max,
+            dock_height_pixels: h_px_max,
+            dock_height_percent: h_pct_max,
+            dock_top_gap_pixels: g_px_max,
+            dock_top_gap_percent: g_pct_max,
+            ..Default::default()
+        };
+        assert!(
+            max_valid.validate().is_empty(),
+            "{:?}",
+            max_valid.validate()
+        );
+
+        let below_min = DockSettings {
+            dock_width_pixels: w_px_min - 1,
+            dock_width_percent: w_pct_min - 1,
+            dock_height_pixels: h_px_min - 1,
+            dock_height_percent: h_pct_min - 1,
+            ..Default::default()
+        };
+        let below_errors = below_min.validate();
+        for rule in [
+            "DockWidthPixelsOutOfRange",
+            "DockWidthPercentOutOfRange",
+            "DockHeightPixelsOutOfRange",
+            "DockHeightPercentOutOfRange",
+        ] {
+            assert!(
+                below_errors.contains(&rule),
+                "missing {rule}: {below_errors:?}"
+            );
+        }
+
+        let above_max = DockSettings {
+            dock_width_pixels: w_px_max + 1,
+            dock_width_percent: w_pct_max + 1,
+            dock_height_pixels: h_px_max + 1,
+            dock_height_percent: h_pct_max + 1,
+            dock_top_gap_pixels: g_px_max + 1,
+            dock_top_gap_percent: g_pct_max + 1,
+            ..Default::default()
+        };
+        let above_errors = above_max.validate();
+        for rule in [
+            "DockWidthPixelsOutOfRange",
+            "DockWidthPercentOutOfRange",
+            "DockHeightPixelsOutOfRange",
+            "DockHeightPercentOutOfRange",
+            "DockTopGapPixelsOutOfRange",
+            "DockTopGapPercentOutOfRange",
+        ] {
+            assert!(
+                above_errors.contains(&rule),
+                "missing {rule}: {above_errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn weather_fallback_city_follows_language() {
+        assert_eq!(super::weather_fallback_city_for("tr-TR"), "İstanbul");
+        assert_eq!(super::weather_fallback_city_for("en-US"), "Istanbul");
+    }
+
+    #[test]
+    fn short_clock_format_label_drops_example() {
+        assert_eq!(
+            super::short_clock_format_label("24 saat (14:32)"),
+            "24 saat"
+        );
+        assert_eq!(
+            super::short_clock_format_label("12-hour (02:32 PM)"),
+            "12-hour"
+        );
+        assert_eq!(super::short_clock_format_label("24h"), "24h");
+    }
+
+    #[test]
+    fn clock_weekday_redundant_only_when_date_contains_it() {
+        assert!(super::clock_weekday_is_redundant("Cum 27 Kas", "Cum"));
+        assert!(super::clock_weekday_is_redundant("Fri 27 Nov", "Fri"));
+        assert!(!super::clock_weekday_is_redundant("27 Kas", "Cum"));
+        assert!(!super::clock_weekday_is_redundant(
+            "Cumartesi 28 Kas",
+            "Cum"
+        ));
+    }
+
+    #[test]
+    fn widget_density_override_uses_canonical_pascal_case_keys() {
+        use opentaskbar_core::settings::WidgetDensityMode;
+
+        let mut settings = DockSettings::default();
+        write_density_override(&mut settings, "Clock", WidgetDensityMode::Compact);
+        write_density_override(&mut settings, "SystemStats", WidgetDensityMode::Full);
+        assert_eq!(
+            settings.widget_density_overrides.get("Clock"),
+            Some(&WidgetDensityMode::Compact)
+        );
+        assert_eq!(
+            settings.widget_density_overrides.get("SystemStats"),
+            Some(&WidgetDensityMode::Full)
+        );
+        assert_eq!(
+            read_density_override(&settings, "Clock"),
+            WidgetDensityMode::Compact
+        );
+        assert_eq!(
+            read_density_override(&settings, "SystemStats"),
+            WidgetDensityMode::Full
+        );
+
+        // Legacy lowercase keys still read cleanly and are replaced on write.
+        settings
+            .widget_density_overrides
+            .insert("weather".to_owned(), WidgetDensityMode::Compact);
+        assert_eq!(
+            read_density_override(&settings, "Weather"),
+            WidgetDensityMode::Compact
+        );
+        write_density_override(&mut settings, "Weather", WidgetDensityMode::Auto);
+        assert!(!settings.widget_density_overrides.contains_key("weather"));
+        assert!(!settings.widget_density_overrides.contains_key("Weather"));
+    }
+
+    #[test]
+    fn settings_window_is_transparent_and_fits_small_work_areas() {
+        let options = settings_window_options(None);
+        // Opaque tells GPUI to pass ACCENT_DISABLED directly (avoiding
+        // ACCENT_ENABLE_TRANSPARENTGRADIENT / 0x00000000 black corner bleed on Win11)
+        // while GPUI still keeps its DXGI_ALPHA_MODE_PREMULTIPLIED swapchain.
+        assert!(matches!(
+            options.window_background,
+            gpui::WindowBackgroundAppearance::Opaque
+        ));
+
+        // Unknown work area keeps the fixed dialog size.
+        assert_eq!(fit_settings_size(None), size(px(WIN_W), px(WIN_H)));
+        // Large work area: unchanged.
+        assert_eq!(
+            fit_settings_size(Some(size(px(2560.0), px(1400.0)))),
+            size(px(WIN_W), px(WIN_H))
+        );
+        // 1080p at 150% with a 48 px taskbar ≈ 1280×688 DIP: the height must shrink.
+        let fitted = fit_settings_size(Some(size(px(1280.0), px(688.0))));
+        assert_eq!(fitted.width, px(WIN_W));
+        assert!(fitted.height <= px(688.0 - 32.0));
+        // Pathologically tiny work areas never produce a window larger than the work area.
+        let tiny = fit_settings_size(Some(size(px(300.0), px(200.0))));
+        assert!(tiny.width <= px(300.0) && tiny.height <= px(200.0));
+        assert!(tiny.width > px(0.0) && tiny.height > px(0.0));
+
+        // A clamped initial size lowers the minimum size with it (min == initial).
+        let bounds = gpui::Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: fitted,
+        };
+        let clamped = settings_window_options(Some(WindowBounds::Windowed(bounds)));
+        let minimum = clamped.window_min_size.expect("minimum size");
+        assert_eq!(minimum, fitted);
+        assert!(!clamped.is_resizable);
+    }
+
+    #[test]
+    fn settings_chrome_draws_exactly_one_rounded_border() {
+        assert_eq!(settings_corner_radius(true), 8.0);
+        assert_eq!(settings_corner_radius(false), 0.0);
+        // Active glass rim → GPUI root draws no border (no double outline).
+        assert!(!settings_root_draws_border(true));
+        // Solid / True Black / None, or Glass with OLED glow reduction → GPUI border.
+        assert!(settings_root_draws_border(false));
+    }
 
     #[test]
     fn every_catalog_widget_has_a_non_fallback_glyph() {
@@ -10109,15 +13329,102 @@ mod tests {
             "an unconfirmed write must not leave the switch in the requested position"
         );
     }
+
+    #[test]
+    fn persist_theme_tokens_preserves_active_theme_pack_layer() {
+        use crate::design::theme::apply_pack_tokens_to_palette;
+
+        let _guard = theme_test_guard();
+        apply_pack_tokens_to_palette(TokenMap::new());
+        apply_token_overrides(TokenMap::new());
+
+        let pack_surface = Rgba::from_rgb(24, 34, 44);
+        let mut pack_tokens = TokenMap::new();
+        pack_tokens.insert(
+            "SurfaceBackground".to_owned(),
+            TokenValue::Solid(pack_surface),
+        );
+        apply_pack_tokens_to_palette(pack_tokens);
+
+        let accent = Rgba::from_rgb(99, 120, 240);
+        let brush = build_brush(
+            BrushMode::Solid,
+            Hsv::from(accent),
+            accent.a,
+            90.0,
+            &[accent],
+        );
+        let mut user_tokens = Map::new();
+        user_tokens.insert("AccentBrush".to_owned(), brush_to_json(&brush));
+        let mut settings = DockSettings::default();
+        persist_theme_tokens(&mut settings, user_tokens);
+
+        assert_eq!(
+            crate::design::theme::ThemeManager::resolve("SurfaceBackground"),
+            Some(TokenValue::Solid(pack_surface)),
+            "persisting user token overrides must not wipe the active theme pack layer"
+        );
+        assert_eq!(
+            crate::design::theme::ThemeManager::resolve("AccentBrush"),
+            Some(TokenValue::Solid(accent))
+        );
+
+        apply_token_overrides(TokenMap::new());
+        apply_pack_tokens_to_palette(TokenMap::new());
+    }
+
+    #[test]
+    fn parse_hex_color_accepts_rgb_and_argb() {
+        assert_eq!(super::parse_hex_color("#112233"), Some(0x1122_33FF));
+        assert_eq!(super::parse_hex_color("#80112233"), Some(0x1122_3380));
+        assert_eq!(super::parse_hex_color("  #AA010203  "), Some(0x0102_03AA));
+        assert_eq!(super::parse_hex_color("112233"), Some(0x1122_33FF));
+        assert_eq!(super::parse_hex_color("#12345"), None);
+        assert_eq!(super::parse_hex_color("#GGGGGG"), None);
+    }
+
+    #[test]
+    fn widget_has_card_drawer_covers_all_7_ai_and_22_builtin_widgets() {
+        assert_eq!(crate::widgets::telemetry::AI_PROVIDERS.len(), 7);
+        for provider in crate::widgets::telemetry::AI_PROVIDERS {
+            assert!(
+                super::widget_has_card_drawer(provider.id),
+                "missing card drawer for AI provider {}",
+                provider.id
+            );
+        }
+        let catalog: Vec<_> = crate::widgets::catalog_widgets().collect();
+        assert!(catalog.len() >= 22);
+        for widget in catalog {
+            assert!(
+                super::widget_has_card_drawer(widget.id),
+                "missing card drawer for catalog widget {}",
+                widget.id
+            );
+        }
+    }
 }
 
 /// Window options for the Settings dialog, kept as a function so the fixed-size/resize contract
 /// can be tested directly instead of by scanning this file's source text.
 fn settings_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
+    // Fixed dialog: min == initial size. The initial size may have been clamped below
+    // WIN_W×WIN_H to fit a small work area, so the minimum never exceeds it.
+    let min_size = match window_bounds {
+        Some(WindowBounds::Windowed(bounds)) => size(
+            bounds.size.width.min(px(WIN_W)),
+            bounds.size.height.min(px(WIN_H)),
+        ),
+        _ => size(px(WIN_W), px(WIN_H)),
+    };
     WindowOptions {
         window_bounds,
-        // Fixed dialog: min == initial size and resizing (edge/corner handle) is off.
-        window_min_size: Some(size(px(WIN_W), px(WIN_H))),
+        window_min_size: Some(min_size),
+        // Opaque makes GPUI pass ACCENT_DISABLED directly instead of
+        // ACCENT_ENABLE_TRANSPARENTGRADIENT (0x00000000), while keeping GPUI's
+        // DXGI_ALPHA_MODE_PREMULTIPLIED swapchain so rounded corners never turn black.
+        window_background: WindowBackgroundAppearance::Opaque,
+        // Resizing (edge/corner handle) stays off.
         is_resizable: false,
         titlebar: Some(TitlebarOptions {
             title: Some(loc::t("SettingsTitle").into()),
@@ -10130,6 +13437,11 @@ fn settings_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions
 
 #[allow(clippy::items_after_test_module)]
 pub fn run_settings_window() {
+    // Single-instance Settings even for external launches: a second `--settings` process
+    // focuses the existing window and exits. The lock lives until this function returns.
+    let Some(_instance_lock) = window_chrome::acquire_settings_instance() else {
+        return;
+    };
     let loaded = settings::load_from(&settings::settings_path());
     Application::new()
         .with_assets(fonts::EmbeddedAssets)
@@ -10141,7 +13453,16 @@ pub fn run_settings_window() {
                 KeyBinding::new("escape", CloseWidgetPanel, None),
                 KeyBinding::new("f9", ToggleFlyoutPreview, None),
             ]);
-            let bounds = Bounds::centered(None, size(px(WIN_W), px(WIN_H)), cx);
+            // Fit the fixed dialog into the primary work area (high DPI on small screens) and
+            // center it there instead of on the full display (which ignores the taskbar).
+            let work = cx
+                .primary_display()
+                .and_then(|display| window_chrome::primary_work_area(display.bounds()));
+            let win_size = fit_settings_size(work.map(|w| w.size));
+            let bounds = match work {
+                Some(work) => Bounds::centered_at(work.center(), win_size),
+                None => Bounds::centered(None, win_size, cx),
+            };
             let _ = cx.open_window(
                 settings_window_options(Some(WindowBounds::Windowed(bounds))),
                 |window, cx| cx.new(|cx| SettingsView::new(loaded.clone(), window, cx)),

@@ -133,7 +133,9 @@ fn read_reg_string(key: HKEY, name: &str) -> Option<String> {
         return None;
     }
     let words: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     let end = words.iter().position(|&c| c == 0).unwrap_or(words.len());

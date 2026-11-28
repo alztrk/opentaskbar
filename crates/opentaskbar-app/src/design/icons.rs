@@ -28,7 +28,7 @@ const BIN_FULL: &str = "\u{E922}";
 const DELETE: &str = "\u{E923}";
 
 /// One `(Fluent, MDL2)` pair per icon, indexed by `AppIcon` discriminant.
-const GLYPHS: [(&str, &str); 22] = [
+const GLYPHS: [(&str, &str); 24] = [
     ("\u{E721}", "\u{E721}"),           // Search
     ("\u{E7C4}", "\u{E7C4}"),           // TaskView
     (CHEVRON_DOWN, CHEVRON_DOWN),       // TrayChevron
@@ -51,6 +51,8 @@ const GLYPHS: [(&str, &str); 22] = [
     ("\u{E76B}", "\u{E76B}"),           // ChevronLeft (prev page)
     ("\u{E76C}", "\u{E76C}"),           // ChevronRight (next page)
     ("\u{E81E}", "\u{E81E}"),           // Layers
+    ("\u{EA8F}", "\u{EA8F}"),           // Bell
+    ("\u{E708}", "\u{E708}"),           // Moon
 ];
 
 /// Unified icon catalog backed by Windows 11's native `Segoe Fluent Icons` font.
@@ -82,6 +84,8 @@ pub enum AppIcon {
     ChevronLeft,
     ChevronRight,
     Layers,
+    Bell,
+    Moon,
 }
 
 /// Official Windows 11 `Segoe Fluent Icons` Unicode codepoint for each icon.
@@ -254,6 +258,8 @@ mod tests {
             AppIcon::ChevronLeft,
             AppIcon::ChevronRight,
             AppIcon::Layers,
+            AppIcon::Bell,
+            AppIcon::Moon,
         ];
         for icon in all {
             let g = fluent_glyph(icon);

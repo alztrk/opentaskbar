@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Component;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use serde_json::{Map, Value};
@@ -17,16 +18,32 @@ use serde_json::{Map, Value};
 use super::json_ext::{json_get_ci, object_get_ci, relaxed_json, string_ci};
 
 static ACTIVE_PACK: OnceLock<RwLock<Option<IconPackManifest>>> = OnceLock::new();
+static THEME_APP_ICONS: AtomicBool = AtomicBool::new(true);
+
+/// Enables or disables application icon theming from the active icon pack.
+pub fn set_theme_application_icons(enabled: bool) {
+    THEME_APP_ICONS.store(enabled, Ordering::Relaxed);
+}
+
+/// Returns whether application icon theming from the active icon pack is enabled.
+pub fn theme_application_icons_enabled() -> bool {
+    THEME_APP_ICONS.load(Ordering::Relaxed)
+}
 
 /// Loads the icon pack from an active theme directory and makes it process-wide.
 /// Passing `None`/empty clears the pack so native icons are used again.
 pub fn set_active_pack(theme_directory: Option<&Path>) {
-    let manifest = theme_directory.and_then(load);
+    let manifest = theme_directory.and_then(|dir| load(dir).or_else(|| load(&dir.join("icons"))));
     let slot = ACTIVE_PACK.get_or_init(|| RwLock::new(None));
-    *slot.write().expect("icon pack lock poisoned") = manifest;
+    *slot
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = manifest;
 }
 
 pub fn active_pack() -> Option<IconPackManifest> {
+    if !theme_application_icons_enabled() {
+        return None;
+    }
     ACTIVE_PACK
         .get()
         .and_then(|slot| slot.read().ok())
@@ -36,6 +53,9 @@ pub fn active_pack() -> Option<IconPackManifest> {
 /// Resolves a dock icon spec (`exe path`, `shell:AppsFolder\<AUMID>`, `@start`, ...)
 /// to an image file inside the active pack, if the pack maps it.
 pub fn find_for_spec(spec: &str) -> Option<String> {
+    if !theme_application_icons_enabled() {
+        return None;
+    }
     let pack = active_pack()?;
     let trimmed = spec.trim();
     let (exe, app_id, special) = if trimmed.starts_with("@") {
@@ -239,6 +259,9 @@ pub fn find_icon(
     app_id: Option<&str>,
     special_key: Option<&str>,
 ) -> Option<String> {
+    if !theme_application_icons_enabled() {
+        return None;
+    }
     for key in candidate_keys(exe_path, app_id, special_key) {
         if let Some(relative) = lookup(&manifest.icons, &key)
             && let Some(path) =
@@ -413,6 +436,8 @@ mod tests {
 
     #[test]
     fn find_icon_precedence_and_fallthrough() {
+        let _guard = crate::design::theme::theme_test_guard();
+        set_theme_application_icons(true);
         let temp = TempDir::new("precedence");
         let dir = temp.path().join("pack");
         write(&dir.join("special.png"), "special");
@@ -458,6 +483,8 @@ mod tests {
 
     #[test]
     fn convention_and_traversal() {
+        let _guard = crate::design::theme::theme_test_guard();
+        set_theme_application_icons(true);
         let temp = TempDir::new("convention");
         let dir = temp.path().join("pack");
         write(&dir.join("icons/firefox.png"), "stem");
@@ -489,6 +516,43 @@ mod tests {
             None
         );
         assert!(find_icon(&manifest, "", None, None).is_none());
+    }
+
+    #[test]
+    fn theme_application_icons_toggle_disables_icon_lookups() {
+        let _guard = crate::design::theme::theme_test_guard();
+        let temp = TempDir::new("toggle");
+        let dir = temp.path().join("theme");
+        write(
+            &dir.join("icons/pack.json"),
+            r#"{"name":"Demo","icons":{"firefox.exe":"firefox.png"}}"#,
+        );
+        write(&dir.join("icons/firefox.png"), "png");
+
+        set_theme_application_icons(true);
+        set_active_pack(Some(&dir));
+        assert!(theme_application_icons_enabled());
+        assert!(active_pack().is_some());
+        assert!(find_for_spec(r"C:\Apps\Firefox\firefox.exe").is_some());
+
+        set_theme_application_icons(false);
+        assert!(!theme_application_icons_enabled());
+        assert!(active_pack().is_none());
+        assert!(find_for_spec(r"C:\Apps\Firefox\firefox.exe").is_none());
+
+        let pack = IconPack::load(&dir.join("icons")).expect("load icon pack");
+        assert!(
+            pack.find_icon_file(Some(r"C:\Apps\Firefox\firefox.exe"), None, None)
+                .is_none()
+        );
+
+        set_theme_application_icons(true);
+        assert!(
+            pack.find_icon_file(Some(r"C:\Apps\Firefox\firefox.exe"), None, None)
+                .is_some()
+        );
+        assert!(find_for_spec(r"C:\Apps\Firefox\firefox.exe").is_some());
+        set_active_pack(None);
     }
 }
 
@@ -775,6 +839,9 @@ impl IconPack {
         app_id: Option<&str>,
         special_key: Option<&str>,
     ) -> Option<PathBuf> {
+        if !theme_application_icons_enabled() {
+            return None;
+        }
         for key in Self::candidate_keys(executable_path, app_id, special_key) {
             if let Some(relative) = self.icons.get(key)
                 && let Some(found) = resolve_inside_pack(&self.directory, Path::new(relative))

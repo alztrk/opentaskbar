@@ -24,12 +24,25 @@ use crate::design::{self, fonts, gpui_rgba};
 const PANEL_RADIUS: f32 = 14.0;
 const CONTROL_RADIUS: f32 = 8.0;
 const ROW_INSET: f32 = 16.0;
+/// Shared width of right-column controls (dropdown triggers, steppers) so a card's
+/// controls form one aligned vertical rail.
+const CONTROL_RAIL_WIDTH: f32 = 164.0;
+/// Fixed, right-aligned slider readout column; wide enough for "Otomatik" / "%132" so every
+/// slider track in a card starts and ends at the same x.
+const SLIDER_VALUE_WIDTH: f32 = 76.0;
+// Stepper = 2 x 28px buttons + 46px readout + gaps/padding/border; it must fit the rail.
+const _: () = assert!(CONTROL_RAIL_WIDTH >= 28.0 * 2.0 + 46.0 + 8.0 + 4.0 + 2.0);
 
 /// Rows kept alive in a virtualized searchable dropdown at once. A 10 000-city
-/// list costs ~12 row elements per keystroke instead of 10 000.
-const SEARCH_VIEWPORT_ROWS: usize = 8;
+/// list costs ~10 row elements per keystroke instead of 10 000.
+const SEARCH_VIEWPORT_ROWS: usize = 6;
 const SEARCH_OVERSCAN_ROWS: usize = 2;
 const SEARCH_ROW_H_PX: f32 = 30.0;
+/// Every dropdown popover stays at most this tall so it always fits either above or
+/// below its trigger inside the 740 px Settings window.
+const POPOVER_MAX_H: f32 = 240.0;
+const SEARCH_MENU_H: f32 = SEARCH_VIEWPORT_ROWS as f32 * SEARCH_ROW_H_PX + 36.0;
+const _: () = assert!(SEARCH_MENU_H <= POPOVER_MAX_H);
 /// While typing, re-filter every frame; once the query settles, reuse the cached
 /// index list across repaints and arrow-key navigation.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
@@ -64,9 +77,35 @@ pub struct UiTheme {
     pub scrollbar_thumb: u32,
 }
 
+/// Readable foreground (white or near-black) for text drawn on top of `bg`.
+fn readable_on(bg: design::Rgb) -> u32 {
+    let luma = 0.2126 * f32::from(bg.0) + 0.7152 * f32::from(bg.1) + 0.0722 * f32::from(bg.2);
+    if luma > 160.0 {
+        0x0f17_2aff
+    } else {
+        0xffff_ffff
+    }
+}
+
 impl UiTheme {
+    /// Opaque GPUI theme driven by the live (theme-pack / editor aware) palette.
+    ///
+    /// With the stock Windows Default theme the colours are byte-identical to the base
+    /// palette; once a theme is customised, hairlines and the accent foreground follow
+    /// the themed palette too.
     pub fn new(is_dark: bool) -> Self {
-        let p = design::palette(is_dark);
+        let p = design::active_palette(is_dark);
+        let themed = design::theme::has_active_theme_customization();
+        let mut t = Self::from_palette(&p, is_dark);
+        if themed {
+            t.border = gpui_rgba(p.border_rgb, 0xff);
+            t.separator = gpui_rgba(p.sep_rgb, 0xff);
+            t.accent_fg = readable_on(p.accent);
+        }
+        t
+    }
+
+    fn from_palette(p: &design::Palette, is_dark: bool) -> Self {
         Self {
             canvas_bg: gpui_rgba(p.canvas, 0xff),
             sidebar_bg: gpui_rgba(p.sidebar, 0xff),
@@ -96,40 +135,105 @@ impl UiTheme {
         }
     }
 
-    /// Settings window theme: opaque in Solid/None modes; in Glass mode lets the EXACT same
-    /// unified Clear Crystal `SpatialGlassHost` shine cleanly across the whole window (zero
-    /// opaque titlebar/sidebar slabs) with crisp glass cards and high-contrast ink.
+    /// Settings window theme: opaque in Solid mode, pure black in TrueBlack (OLED) mode,
+    /// transparent canvas in None mode, and in Glass mode lets the unified Clear Crystal
+    /// `SpatialGlassHost` shine cleanly across the whole window.
     pub fn for_settings(is_dark: bool, glass_mode: bool) -> Self {
-        let mut t = Self::new(is_dark);
-        if !glass_mode {
-            return t;
-        }
-        if is_dark {
-            t.canvas_bg = 0x0000_0000;
-            t.sidebar_bg = 0x0000_001e;
-            t.surface = 0xffff_ff0f;
-            t.surface_muted = 0xffff_ff18;
-            t.surface_hover = 0xffff_ff28;
-            t.popover_bg = 0x1216_20f2;
-            t.border = 0xffff_ff26;
-            t.separator = 0xffff_ff18;
-            t.text_primary = 0xffff_ffff;
-            t.text_secondary = 0xe2e8_f0dc;
-            t.switch_off = 0xffff_ff36;
+        let bg = if glass_mode {
+            opentaskbar_core::settings::SurfaceBackground::Glass
         } else {
-            t.canvas_bg = 0x0000_0000;
-            t.sidebar_bg = 0xffff_ff28;
-            t.surface = 0xffff_ff4c;
-            t.surface_muted = 0x0000_0010;
-            t.surface_hover = 0x0000_001b;
-            t.popover_bg = 0xf8fa_fcf5;
-            t.border = 0x0000_001f;
-            t.separator = 0x0000_0015;
-            t.text_primary = 0x0f17_2aff;
-            t.text_secondary = 0x2632_45eb;
-            t.switch_off = 0x0000_002e;
+            opentaskbar_core::settings::SurfaceBackground::Solid
+        };
+        Self::for_settings_background(is_dark, bg)
+    }
+
+    pub fn for_settings_background(
+        is_dark: bool,
+        background: opentaskbar_core::settings::SurfaceBackground,
+    ) -> Self {
+        use opentaskbar_core::settings::SurfaceBackground;
+        match background {
+            // Every surface/text/accent token follows the live palette.
+            SurfaceBackground::Solid => Self::new(is_dark),
+            // OLED care: the black canvas, sidebar and neutral text stay fixed; only the
+            // accent family follows the themed palette (inherited from `new`).
+            SurfaceBackground::TrueBlack => {
+                let mut t = Self::new(true);
+                t.canvas_bg = 0x0000_00ff;
+                t.sidebar_bg = 0x0000_00ff;
+                t.surface = 0x0c0c_0eff;
+                t.surface_muted = 0x1414_18ff;
+                t.surface_hover = 0x1e1e_24ff;
+                t.popover_bg = 0x0a0a_0cff;
+                t.border = 0xffff_ff18;
+                t.separator = 0xffff_ff14;
+                t.text_primary = 0xf4f4_f5ff;
+                t.text_secondary = 0xa1a1_aaff;
+                t.switch_off = 0x2a2a_32ff;
+                t
+            }
+            SurfaceBackground::None => {
+                let mut t = Self::new(is_dark);
+                t.canvas_bg = 0x0000_0000;
+                t.sidebar_bg = if design::theme::has_active_theme_customization() {
+                    gpui_rgba(design::active_palette(is_dark).sidebar, 0x40)
+                } else if is_dark {
+                    0x0000_0028
+                } else {
+                    0xffff_ff28
+                };
+                t
+            }
+            SurfaceBackground::Glass => {
+                let mut t = Self::new(is_dark);
+                if design::theme::has_active_theme_customization() {
+                    // Themed glass: translucent palette tints over the transparent canvas
+                    // so the tinted `SpatialGlassHost` keeps shining through.
+                    let p = design::active_palette(is_dark);
+                    let (sidebar_a, surface_a, muted_a, hover_a, popover_a, line_a) = if is_dark {
+                        (0x40, 0x66, 0x80, 0xa0, 0xf2, 0xcc)
+                    } else {
+                        (0x50, 0x80, 0x90, 0xb0, 0xf5, 0xdd)
+                    };
+                    t.canvas_bg = 0x0000_0000;
+                    t.sidebar_bg = gpui_rgba(p.sidebar, sidebar_a);
+                    t.surface = gpui_rgba(p.surface, surface_a);
+                    t.surface_muted = gpui_rgba(p.elevated, muted_a);
+                    t.surface_hover = gpui_rgba(p.hover, hover_a);
+                    t.popover_bg = gpui_rgba(p.surface, popover_a);
+                    t.border = gpui_rgba(p.border_rgb, line_a);
+                    t.separator = gpui_rgba(p.sep_rgb, line_a);
+                    t.text_primary = gpui_rgba(p.text_primary, 0xff);
+                    t.text_secondary = gpui_rgba(p.text_secondary, 0xff);
+                    t.switch_off = gpui_rgba(p.switch_off, muted_a);
+                } else if is_dark {
+                    t.canvas_bg = 0x0000_0000;
+                    t.sidebar_bg = 0x0000_001e;
+                    t.surface = 0xffff_ff0f;
+                    t.surface_muted = 0xffff_ff18;
+                    t.surface_hover = 0xffff_ff28;
+                    t.popover_bg = 0x1216_20f2;
+                    t.border = 0xffff_ff26;
+                    t.separator = 0xffff_ff18;
+                    t.text_primary = 0xffff_ffff;
+                    t.text_secondary = 0xe2e8_f0dc;
+                    t.switch_off = 0xffff_ff36;
+                } else {
+                    t.canvas_bg = 0x0000_0000;
+                    t.sidebar_bg = 0xffff_ff28;
+                    t.surface = 0xffff_ff4c;
+                    t.surface_muted = 0x0000_0010;
+                    t.surface_hover = 0x0000_001b;
+                    t.popover_bg = 0xf8fa_fcf5;
+                    t.border = 0x0000_001f;
+                    t.separator = 0x0000_0015;
+                    t.text_primary = 0x0f17_2aff;
+                    t.text_secondary = 0x2632_45eb;
+                    t.switch_off = 0x0000_002e;
+                }
+                t
+            }
         }
-        t
     }
 }
 
@@ -356,6 +460,7 @@ pub fn ios_switch(
         theme.switch_off
     };
     let thumb_left = if checked { px(18.0) } else { px(2.0) };
+    let thumb_bg = switch_thumb_color(theme, checked);
     // Checked switches already use `theme.accent` as their fill, so keyboard focus uses a
     // high-contrast outline (`text_primary`) to stay visible in both checked and unchecked states.
     let focus_border = if checked {
@@ -385,9 +490,19 @@ pub fn ios_switch(
                 .w(px(16.0))
                 .h(px(16.0))
                 .rounded(px(8.0))
-                .bg(rgba(theme.switch_thumb))
+                .bg(rgba(thumb_bg))
                 .ml(thumb_left - px(1.0)),
         )
+}
+
+/// ON switches keep a crisp opaque thumb; OFF switches mute it (78% alpha) so the
+/// unchecked state reads as resting instead of competing with checked toggles.
+pub fn switch_thumb_color(theme: &UiTheme, checked: bool) -> u32 {
+    if checked {
+        theme.switch_thumb
+    } else {
+        (theme.switch_thumb & 0xffff_ff00) | 0xc8
+    }
 }
 
 /// Compact badge pill.
@@ -423,6 +538,22 @@ pub fn button(
     variant: ButtonVariant,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    button_with_state(id, theme, label, variant, true, on_click)
+}
+
+/// Opacity applied to a disabled button; it also drops hover, focus and click handling.
+pub const DISABLED_OPACITY: f32 = 0.45;
+
+/// Same as [`button`], but `enabled == false` renders a dimmed, non-interactive button
+/// (no pointer cursor, hover, keyboard focus or click handler).
+pub fn button_with_state(
+    id: impl Into<gpui::ElementId>,
+    theme: &UiTheme,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
     let (bg, hover_bg, fg, border) = match variant {
         ButtonVariant::Primary => (
             theme.accent,
@@ -455,16 +586,17 @@ pub fn button(
         .text_size(px(fonts::scaled_size(12.0)))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(rgba(fg))
-        .cursor_pointer()
         .flex_shrink_0()
-        .tab_index(0)
-        .focus({
+        .when(!enabled, |b| b.opacity(DISABLED_OPACITY).cursor_default())
+        .when(enabled, move |b| {
             let focus = theme.text_primary;
-            move |style| style.border_color(rgba(focus))
+            b.cursor_pointer()
+                .tab_index(0)
+                .focus(move |style| style.border_color(rgba(focus)))
+                .hover(move |s| s.bg(rgba(hover_bg)))
+                .active(|s| s.opacity(0.84))
+                .on_click(on_click)
         })
-        .hover(move |s| s.bg(rgba(hover_bg)))
-        .active(|s| s.opacity(0.84))
-        .on_click(on_click)
         .child(label.into())
 }
 
@@ -653,17 +785,171 @@ fn dropdown_option_row(
         })
 }
 
-/// Shared deferred popover shell: all builders anchor it below the trigger and
-/// let clicks inside it stop propagating to the owner card.
-fn dropdown_popover(menu: impl IntoElement, top: f32) -> AnyElement {
-    deferred(
-        div()
-            .occlude()
-            .absolute()
-            .top(px(top))
-            .right_0()
-            .child(menu),
-    )
+/// Height of the custom Settings titlebar a popover must never slide under.
+const POPOVER_TOP_CLEARANCE: f32 = 36.0;
+/// Minimum distance kept between a popover and every window edge.
+const POPOVER_MARGIN: f32 = 8.0;
+/// Gap between the trigger and the popover it opens.
+const POPOVER_GAP: f32 = 4.0;
+
+/// Pure placement geometry for a right-aligned popover anchored to a trigger.
+///
+/// Opens below the trigger when the menu fits there (or when below is still the roomier
+/// side); otherwise flips above the trigger without overlapping it. The result is then
+/// clamped inside the viewport, never above the titlebar (`top_clearance`) and never off
+/// the left/right edges. Returns `(x, y, flipped_up)` in window coordinates.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_popover_placement(
+    trigger_top: f32,
+    trigger_right: f32,
+    trigger_h: f32,
+    menu_w: f32,
+    menu_h: f32,
+    vp_w: f32,
+    vp_h: f32,
+    gap: f32,
+    margin: f32,
+    top_clearance: f32,
+) -> (f32, f32, bool) {
+    let trigger_bottom = trigger_top + trigger_h;
+    let space_below = (vp_h - trigger_bottom - margin).max(0.0);
+    let space_above = (trigger_top - top_clearance - margin).max(0.0);
+    let min_y = top_clearance + margin;
+    let max_y = (vp_h - margin - menu_h).max(min_y);
+
+    let opens_below = space_below >= menu_h + gap || space_below >= space_above;
+    let y = if opens_below {
+        trigger_bottom + gap
+    } else {
+        (trigger_top - gap - menu_h).max(min_y)
+    };
+    let y = y.min(max_y).max(min_y);
+
+    let max_x = (vp_w - menu_w - margin).max(margin);
+    let x = (trigger_right - menu_w).min(max_x).max(margin);
+    (x, y, !opens_below)
+}
+
+/// Viewport-aware popover body: right-aligns its child to the trigger and opens it
+/// downward, or flips it above the trigger when the window bottom would clip it.
+///
+/// Rendered inside `deferred(..)`, whose replayed `prepaint` runs under the trigger's
+/// absolute element offset, so `bounds` is the live (already scrolled) window-space rect
+/// of the trigger container. The child is re-offset in `prepaint`, so painting, hitboxes,
+/// mouse and scroll-wheel handling all follow the flipped position.
+struct ViewportPopover {
+    child: AnyElement,
+    trigger_h: f32,
+    gap: f32,
+    margin: f32,
+    top_clearance: f32,
+}
+
+impl ViewportPopover {
+    fn new(child: AnyElement, trigger_h: f32) -> Self {
+        Self {
+            child,
+            trigger_h,
+            gap: POPOVER_GAP,
+            margin: POPOVER_MARGIN,
+            top_clearance: POPOVER_TOP_CLEARANCE,
+        }
+    }
+}
+
+impl gpui::Element for ViewportPopover {
+    type RequestLayoutState = gpui::LayoutId;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        let child_layout_id = self.child.request_layout(window, cx);
+        // Absolutely positioned against the trigger wrapper's top-right corner and sized to
+        // its content: `bounds.right()` is the trigger's right edge and the child keeps its
+        // own fixed width. The wrapper itself paints nothing.
+        let mut style = gpui::Style {
+            position: gpui::Position::Absolute,
+            ..Default::default()
+        };
+        style.inset.top = px(0.0).into();
+        style.inset.right = px(0.0).into();
+        let layout_id = window.request_layout(style, [child_layout_id], cx);
+        (layout_id, child_layout_id)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        child_layout_id: &mut Self::RequestLayoutState,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        let child_bounds = window.layout_bounds(*child_layout_id);
+        let vp = window.viewport_size();
+        let (x, y, _flipped_up) = compute_popover_placement(
+            f32::from(bounds.origin.y),
+            f32::from(bounds.right()),
+            self.trigger_h,
+            f32::from(child_bounds.size.width),
+            f32::from(child_bounds.size.height),
+            f32::from(vp.width),
+            f32::from(vp.height),
+            self.gap,
+            self.margin,
+            self.top_clearance,
+        );
+        let target = gpui::point(px(x.round()), px(y.round()));
+        let child = &mut self.child;
+        window.with_element_offset(target - child_bounds.origin, |window| {
+            child.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for ViewportPopover {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+/// Shared deferred popover shell for all three dropdown builders: viewport-aware placement
+/// (flips above the trigger near the window bottom) and an occluding menu so clicks inside
+/// it never reach the owner card.
+fn dropdown_popover(menu: gpui::Stateful<Div>, trigger_h: f32) -> AnyElement {
+    deferred(ViewportPopover::new(
+        menu.occlude().into_any_element(),
+        trigger_h,
+    ))
     .with_priority(1)
     .into_any_element()
 }
@@ -747,7 +1033,7 @@ pub fn dropdown_labeled(
 
     let trigger = div()
         .id(SharedString::from(format!("dd-trig-{id}")))
-        .min_w(px(148.0))
+        .min_w(px(CONTROL_RAIL_WIDTH))
         .h(px(32.0))
         .px(px(11.0))
         .rounded(px(CONTROL_RADIUS))
@@ -784,7 +1070,7 @@ pub fn dropdown_labeled(
         let mut menu_list = div()
             .id(SharedString::from(format!("dd-menu-{id}")))
             .w(px(216.0))
-            .max_h(px(240.0))
+            .max_h(px(POPOVER_MAX_H))
             .overflow_y_scroll()
             .p(px(4.0))
             .rounded(px(10.0))
@@ -812,7 +1098,7 @@ pub fn dropdown_labeled(
             ));
         }
 
-        wrap = wrap.child(dropdown_popover(menu_list, 36.0));
+        wrap = wrap.child(dropdown_popover(menu_list, 32.0));
     }
 
     wrap
@@ -882,7 +1168,7 @@ pub fn icon_action_menu(
         let mut menu_list = div()
             .id(SharedString::from(format!("icon-act-menu-{id}")))
             .w(px(196.0))
-            .max_h(px(240.0))
+            .max_h(px(POPOVER_MAX_H))
             .overflow_y_scroll()
             .p(px(4.0))
             .rounded(px(10.0))
@@ -910,7 +1196,7 @@ pub fn icon_action_menu(
             ));
         }
 
-        wrap = wrap.child(dropdown_popover(menu_list, 34.0));
+        wrap = wrap.child(dropdown_popover(menu_list, 30.0));
     }
 
     wrap
@@ -1254,7 +1540,7 @@ pub fn searchable_dropdown(
     let toggle = on_toggle.clone();
     let trigger = div()
         .id(SharedString::from(format!("sdd-trig-{id}")))
-        .min_w(px(148.0))
+        .min_w(px(CONTROL_RAIL_WIDTH))
         .h(px(32.0))
         .px(px(11.0))
         .rounded(px(CONTROL_RADIUS))
@@ -1396,7 +1682,7 @@ pub fn searchable_dropdown(
         let menu_base = div()
             .w(px(240.0))
             // Fixed viewport: only the virtualized slice exists in the tree.
-            .h(px(SEARCH_VIEWPORT_ROWS as f32 * SEARCH_ROW_H_PX + 36.0))
+            .h(px(SEARCH_MENU_H))
             .overflow_hidden()
             .p(px(4.0))
             .rounded(px(10.0))
@@ -1481,16 +1767,7 @@ pub fn searchable_dropdown(
             ));
         }
 
-        let popover = deferred(
-            div()
-                .occlude()
-                .absolute()
-                .top(px(36.0))
-                .right_0()
-                .child(menu_list),
-        )
-        .with_priority(1);
-        wrap = wrap.child(popover);
+        wrap = wrap.child(dropdown_popover(menu_list, 32.0));
     }
 
     wrap
@@ -1674,10 +1951,12 @@ where
         )
         .child(
             div()
-                .min_w(px(46.0))
+                .w(px(SLIDER_VALUE_WIDTH))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_end()
+                .whitespace_nowrap()
                 .text_size(px(fonts::scaled_size(12.0)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_primary))
@@ -1695,8 +1974,10 @@ pub fn stepper(
 ) -> Div {
     let hover = theme.surface_hover;
     div()
+        .min_w(px(CONTROL_RAIL_WIDTH))
         .flex()
         .items_center()
+        .justify_between()
         .gap(px(4.0))
         .p(px(2.0))
         .rounded(px(8.0))
@@ -1730,10 +2011,12 @@ pub fn stepper(
         )
         .child(
             div()
+                .flex_1()
                 .min_w(px(46.0))
                 .flex()
                 .items_center()
                 .justify_center()
+                .whitespace_nowrap()
                 .text_size(px(fonts::scaled_size(11.5)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_primary))
@@ -1797,6 +2080,7 @@ pub fn sidebar_nav_item(
 
     let mut row = div()
         .id(id)
+        .relative()
         .w_full()
         .flex()
         .items_center()
@@ -1805,12 +2089,14 @@ pub fn sidebar_nav_item(
         .min_h(px(38.0))
         .rounded(px(CONTROL_RADIUS))
         .border_1()
-        .border_color(rgba(if active { theme.accent_soft } else { 0 }))
+        .border_color(rgba(0))
         .bg(rgba(bg))
         .tab_index(0)
         .focus({
-            let accent = theme.accent;
-            move |style| style.border_color(rgba(accent))
+            // Subtle keyboard ring: a clicked (and therefore focused) active tab must not look
+            // stuck in a bright focus state; the accent pill carries the selection instead.
+            let ring = theme.accent_soft;
+            move |style| style.border_color(rgba(ring))
         })
         .cursor_pointer()
         .hover(move |s| s.bg(rgba(hover)))
@@ -1839,6 +2125,18 @@ pub fn sidebar_nav_item(
     if let Some(cnt) = count_badge {
         row = row.child(badge(theme, cnt, active));
     }
+    if active {
+        row = row.child(
+            div()
+                .absolute()
+                .left(px(1.0))
+                .top(px(11.0))
+                .bottom(px(11.0))
+                .w(px(3.0))
+                .rounded(px(1.5))
+                .bg(rgba(theme.accent)),
+        );
+    }
     row
 }
 
@@ -1846,8 +2144,9 @@ pub fn sidebar_nav_item(
 mod tests {
     use super::{
         DropdownOption, Duration, Instant, SearchDebounce, SearchableDropdownState, SharedString,
-        StepMode, clamp_scroll_top, filter_dropdown_options, fold_search_text, no_results_message,
-        options_fingerprint, scroll_top_for_active, step_index, visible_row_range,
+        StepMode, clamp_scroll_top, compute_popover_placement, filter_dropdown_options,
+        fold_search_text, no_results_message, options_fingerprint, scroll_top_for_active,
+        step_index, visible_row_range,
     };
 
     fn options(labels: &[&str]) -> Vec<DropdownOption> {
@@ -1982,5 +2281,162 @@ mod tests {
         state.clear();
         assert_eq!(state.query, "");
         assert_eq!(state.active, 0);
+    }
+
+    #[test]
+    fn switch_thumb_is_muted_only_when_off() {
+        let theme = super::UiTheme::new(true);
+        assert_eq!(super::switch_thumb_color(&theme, true), theme.switch_thumb);
+        let off = super::switch_thumb_color(&theme, false);
+        assert_ne!(off, theme.switch_thumb);
+        assert_eq!(off & 0xffff_ff00, theme.switch_thumb & 0xffff_ff00);
+        assert!((off & 0xff) < (theme.switch_thumb & 0xff));
+    }
+
+    #[test]
+    fn settings_theme_distinguishes_glass_solid_none_and_true_black() {
+        use super::UiTheme;
+        use opentaskbar_core::settings::SurfaceBackground;
+        // `UiTheme` reads the live palette; serialize with the theme tests.
+        let _guard = crate::design::theme::theme_test_guard();
+        let glass = UiTheme::for_settings_background(true, SurfaceBackground::Glass);
+        let solid = UiTheme::for_settings_background(false, SurfaceBackground::Solid);
+        let none = UiTheme::for_settings_background(true, SurfaceBackground::None);
+        let black = UiTheme::for_settings_background(false, SurfaceBackground::TrueBlack);
+        assert_eq!(glass.canvas_bg, 0x0000_0000);
+        assert_ne!(solid.canvas_bg & 0xff, 0);
+        assert_eq!(none.canvas_bg, 0x0000_0000);
+        assert_eq!(black.canvas_bg, 0x0000_00ff);
+        assert_eq!(black.sidebar_bg, 0x0000_00ff);
+        assert_eq!(black.text_primary, 0xf4f4_f5ff);
+    }
+
+    #[test]
+    fn settings_theme_follows_applied_pack_tokens() {
+        use super::UiTheme;
+        use crate::design::theme::{
+            ThemeManager, apply_pack_tokens_to_palette, apply_token_overrides,
+            has_active_theme_customization, theme_test_guard,
+        };
+        use crate::design::tokens::{Rgba, TokenMap, TokenValue};
+        use opentaskbar_core::settings::{AppTheme, SurfaceBackground};
+
+        let _guard = theme_test_guard();
+        ThemeManager::apply(AppTheme::Dark, None);
+        apply_token_overrides(TokenMap::new());
+        apply_pack_tokens_to_palette(TokenMap::new());
+        let stock_solid = UiTheme::for_settings_background(true, SurfaceBackground::Solid);
+        let stock_glass = UiTheme::for_settings_background(true, SurfaceBackground::Glass);
+
+        let mut pack = TokenMap::new();
+        pack.insert(
+            "AccentBrush".to_owned(),
+            TokenValue::Solid(Rgba::from_rgb(0x12, 0x34, 0x56)),
+        );
+        pack.insert(
+            "SettingsBackground".to_owned(),
+            TokenValue::Solid(Rgba::from_rgb(0x20, 0x30, 0x40)),
+        );
+        apply_pack_tokens_to_palette(&pack);
+        assert!(has_active_theme_customization());
+
+        let solid = UiTheme::for_settings_background(true, SurfaceBackground::Solid);
+        let glass = UiTheme::for_settings_background(true, SurfaceBackground::Glass);
+        let black = UiTheme::for_settings_background(true, SurfaceBackground::TrueBlack);
+
+        assert_eq!(solid.accent, 0x1234_56ff);
+        assert_ne!(solid.accent, stock_solid.accent);
+        assert_eq!(solid.canvas_bg, 0x2030_40ff);
+        assert_ne!(solid.canvas_bg, stock_solid.canvas_bg);
+        assert_eq!(glass.accent, 0x1234_56ff);
+        assert_ne!(glass.accent, stock_glass.accent);
+        assert_eq!(glass.canvas_bg, 0x0000_0000);
+        assert_eq!(black.canvas_bg, 0x0000_00ff);
+        assert_eq!(black.sidebar_bg, 0x0000_00ff);
+        assert_eq!(black.text_primary, 0xf4f4_f5ff);
+        assert_eq!(black.accent, 0x1234_56ff);
+
+        apply_pack_tokens_to_palette(TokenMap::new());
+        apply_token_overrides(TokenMap::new());
+    }
+
+    #[test]
+    fn popover_opens_downward_when_there_is_room_below() {
+        // Trigger near the top of the 740 px Settings window, 240 px menu.
+        let (x, y, flipped) = compute_popover_placement(
+            120.0, 900.0, 32.0, 216.0, 240.0, 960.0, 740.0, 4.0, 8.0, 36.0,
+        );
+        assert!(!flipped);
+        assert_eq!(y, 120.0 + 32.0 + 4.0);
+        assert_eq!(x, 900.0 - 216.0);
+        assert!(y + 240.0 <= 740.0 - 8.0);
+    }
+
+    #[test]
+    fn popover_flips_upward_near_the_bottom_without_covering_the_trigger() {
+        // "Tüm ekranlar" style trigger at the bottom of a 740 px window.
+        let trigger_top = 680.0;
+        let (x, y, flipped) = compute_popover_placement(
+            trigger_top,
+            900.0,
+            32.0,
+            216.0,
+            240.0,
+            960.0,
+            740.0,
+            4.0,
+            8.0,
+            36.0,
+        );
+        assert!(flipped);
+        assert_eq!(y, trigger_top - 4.0 - 240.0);
+        // Bottom edge of the menu stays above the trigger (no overlap).
+        assert!(y + 240.0 <= trigger_top);
+        assert!(y >= 36.0 + 8.0);
+        assert_eq!(x, 900.0 - 216.0);
+
+        // Same behaviour for the 216 px searchable menu under a 30 px trigger.
+        let (_, y, flipped) = compute_popover_placement(
+            650.0, 900.0, 30.0, 196.0, 216.0, 960.0, 740.0, 4.0, 8.0, 36.0,
+        );
+        assert!(flipped);
+        assert!(y + 216.0 <= 650.0);
+    }
+
+    #[test]
+    fn popover_stays_inside_a_small_viewport() {
+        let (vp_w, vp_h) = (540.0, 540.0);
+        let (gap, margin, clearance) = (4.0, 8.0, 36.0);
+        for trigger_top in [40.0_f32, 120.0, 250.0, 380.0, 500.0] {
+            for trigger_right in [60.0_f32, 200.0, 540.0, 700.0] {
+                let (x, y, _) = compute_popover_placement(
+                    trigger_top,
+                    trigger_right,
+                    32.0,
+                    240.0,
+                    240.0,
+                    vp_w,
+                    vp_h,
+                    gap,
+                    margin,
+                    clearance,
+                );
+                assert!(y >= clearance + margin, "under titlebar at {trigger_top}");
+                assert!(
+                    y + 240.0 <= vp_h - margin,
+                    "clipped bottom at {trigger_top}"
+                );
+                assert!(x >= margin, "off left edge at {trigger_right}");
+                assert!(
+                    x + 240.0 <= vp_w - margin,
+                    "off right edge at {trigger_right}"
+                );
+            }
+        }
+        // A menu taller than the whole viewport pins to the titlebar instead of escaping it.
+        let (_, y, _) = compute_popover_placement(
+            300.0, 400.0, 32.0, 240.0, 900.0, vp_w, vp_h, gap, margin, clearance,
+        );
+        assert_eq!(y, clearance + margin);
     }
 }

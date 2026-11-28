@@ -85,6 +85,7 @@ const MENU_PROFILE_SAVE_NEW: u32 = 6201;
 const MENU_STACK_ADD_DOWNLOADS: u32 = 6301;
 const MENU_STACK_ADD_DESKTOP: u32 = 6302;
 const MENU_STACK_ADD_DOCUMENTS: u32 = 6303;
+pub const MENU_STACK_ADD_CUSTOM: u32 = 6304;
 const MENU_STACK_REMOVE_BASE: u32 = 6400;
 const MENU_STACK_REMOVE_MAX: u32 = 6499;
 
@@ -112,11 +113,25 @@ const TV_MENU_VIEW: u32 = 3004;
 const BIN_MENU_OPEN: u32 = 4001;
 const BIN_MENU_EMPTY: u32 = 4002;
 
+const STACK_MENU_OPEN: u32 = 4101;
+const STACK_MENU_ADD: u32 = 4102;
+const STACK_MENU_MANAGE: u32 = 4103;
+const STACK_MENU_REMOVE: u32 = 4104;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecycleBinAction {
     None,
     Open,
     Empty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderStackAction {
+    OpenInExplorer,
+    AddFolder,
+    RemoveFromDock,
+    ManageInSettings,
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +158,7 @@ pub fn show_widget_context_menu(
     can_move_earlier: bool,
     can_move_later: bool,
     settings: &DockSettings,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
 ) -> WidgetContextAction {
     const MENU_WIDGET_SECONDARY: u32 = 5001;
     const MENU_WIDGET_REMOVE: u32 = 5002;
@@ -241,11 +257,12 @@ pub fn show_widget_context_menu(
         entries.extend(dock_menu_entries(settings));
     }
 
-    match menu::show_popup_menu_with_border(
+    match menu::show_popup_menu_with_anchor(
         hwnd,
         is_dark,
-        entries,
+        &entries,
         BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
     )
     .unwrap_or(0)
     {
@@ -272,6 +289,7 @@ pub enum ContextAction {
     ApplyProfile(usize),
     SaveNewProfile,
     AddStack(&'static str),
+    AddCustomFolderStack,
     RemoveStack(usize),
     ToggleFocusMode,
     Settings,
@@ -771,6 +789,7 @@ fn map_context_action(id: u32) -> ContextAction {
         MENU_STACK_ADD_DOWNLOADS => ContextAction::AddStack("Downloads"),
         MENU_STACK_ADD_DESKTOP => ContextAction::AddStack("Desktop"),
         MENU_STACK_ADD_DOCUMENTS => ContextAction::AddStack("Documents"),
+        MENU_STACK_ADD_CUSTOM => ContextAction::AddCustomFolderStack,
         MENU_STACK_REMOVE_BASE..=MENU_STACK_REMOVE_MAX => {
             ContextAction::RemoveStack((id - MENU_STACK_REMOVE_BASE) as usize)
         }
@@ -799,7 +818,7 @@ fn map_context_action(id: u32) -> ContextAction {
     }
 }
 
-fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
+fn build_dock_menu_entries(settings: &DockSettings, extra: Vec<MenuEntry>) -> Vec<MenuEntry> {
     let mut profile_items: Vec<MenuEntry> = settings
         .profiles
         .iter()
@@ -856,34 +875,47 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
         stack_items.push(MenuEntry::Separator);
     }
     stack_items.push(MenuEntry::item(
+        MENU_STACK_ADD_CUSTOM,
+        MenuIcon::Plus,
+        loc::t("AddStack"),
+    ));
+    stack_items.push(MenuEntry::Separator);
+    stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DOWNLOADS,
         MenuIcon::Folder,
-        format!("{} {}", loc::t("AddStack"), loc::t("Downloads")),
+        loc::t("Downloads"),
     ));
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DESKTOP,
         MenuIcon::Folder,
-        format!("{} {}", loc::t("AddStack"), loc::t("Desktop")),
+        loc::t("Desktop"),
     ));
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DOCUMENTS,
         MenuIcon::Folder,
-        format!("{} {}", loc::t("AddStack"), loc::t("Documents")),
+        loc::t("Documents"),
     ));
 
-    vec![
+    // Group 1: Quick System Access
+    let mut entries = vec![
         MenuEntry::item(MENU_SEARCH, MenuIcon::Search, loc::t("SearchApps")),
         MenuEntry::with_shortcut(
             MENU_NOTIFICATION_CENTER,
-            MenuIcon::Activity,
+            MenuIcon::Bell,
             loc::t("NotificationCenter"),
             "Win+N",
         ),
+    ];
+    entries.extend(extra);
+
+    // Group 2: Dock & Workspace
+    entries.extend([
+        MenuEntry::Separator,
         MenuEntry::submenu(MenuIcon::Layers, loc::t("Profiles"), profile_items),
         MenuEntry::submenu(MenuIcon::Folder, loc::t("FolderStacks"), stack_items),
         MenuEntry::item(
             MENU_FOCUS_MODE,
-            MenuIcon::Layers,
+            MenuIcon::Focus,
             if settings.focus_mode {
                 format!("{} ({})", loc::t("FocusMode"), loc::t("QuickOn"))
             } else {
@@ -891,13 +923,17 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
             },
         ),
         MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, loc::t("Settings")),
+    ]);
+
+    // Group 3: Windows Tools
+    entries.extend([
+        MenuEntry::Separator,
         MenuEntry::with_shortcut(
             MENU_TASKMGR,
             MenuIcon::Activity,
             loc::t("TaskManager"),
             "Ctrl+Shift+Esc",
         ),
-        MenuEntry::Separator,
         MenuEntry::with_shortcut(
             MENU_SHOW_DESKTOP,
             MenuIcon::Monitor,
@@ -907,11 +943,21 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
         MenuEntry::item(
             MENU_RESTORE,
             MenuIcon::Refresh,
-            format!("{} {}", loc::t("Restore"), loc::t("WindowsTaskbar")),
+            loc::t("RestoreWindowsTaskbar"),
         ),
+    ]);
+
+    // Group 4: Exit (always last, isolated by a separator)
+    entries.extend([
         MenuEntry::Separator,
         MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, loc::t("Exit")),
-    ]
+    ]);
+
+    entries
+}
+
+fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
+    build_dock_menu_entries(settings, Vec::new())
 }
 
 /// Power-user / system menu opened only on right-clicking the Windows Start logo.
@@ -919,6 +965,7 @@ pub fn show_start_context_menu(
     hwnd: usize,
     is_dark: bool,
     settings: &DockSettings,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
 ) -> ContextAction {
     let entries = vec![
         MenuEntry::with_shortcut(
@@ -936,7 +983,7 @@ pub fn show_start_context_menu(
         MenuEntry::with_shortcut(MENU_RUN, MenuIcon::Play, loc::t("OpenRunDialog"), "Win+R"),
         MenuEntry::with_shortcut(
             MENU_NOTIFICATION_CENTER,
-            MenuIcon::Activity,
+            MenuIcon::Bell,
             loc::t("NotificationCenter"),
             "Win+N",
         ),
@@ -1000,11 +1047,12 @@ pub fn show_start_context_menu(
         ),
     ];
     map_context_action(
-        menu::show_popup_menu_with_border(
+        menu::show_popup_menu_with_anchor(
             hwnd,
             is_dark,
-            entries,
+            &entries,
             BorderStyle::from_menu_settings(is_dark, settings),
+            anchor,
         )
         .unwrap_or(0),
     )
@@ -1015,31 +1063,34 @@ pub fn show_dock_context_menu(
     is_dark: bool,
     settings: &DockSettings,
 ) -> ContextAction {
-    show_dock_context_menu_with_entries(hwnd, is_dark, settings, Vec::new()).1
+    show_dock_context_menu_with_entries(hwnd, is_dark, settings, Vec::new(), None).1
 }
 
-/// Same dock menu with extra entries appended. The raw chosen id is returned
-/// alongside the mapped action so integration layers (native window commands)
-/// can dispatch their own ids without colliding with the dock's reserved
-/// `MENU_*` range.
+/// Same dock menu with extra entries inserted into Group 1 (Quick System Access)
+/// right after Notification Center, keeping Exit last. The raw chosen id is
+/// returned alongside the mapped action so integration layers (native window
+/// commands) can dispatch their own ids without colliding with the dock's
+/// reserved `MENU_*` range.
 pub fn show_dock_context_menu_with_entries(
     hwnd: usize,
     is_dark: bool,
     settings: &DockSettings,
     extra: Vec<MenuEntry>,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
 ) -> (u32, ContextAction) {
-    let mut entries = dock_menu_entries(settings);
-    entries.extend(extra);
-    let chosen = menu::show_popup_menu_with_border(
+    let entries = build_dock_menu_entries(settings, extra);
+    let chosen = menu::show_popup_menu_with_anchor(
         hwnd,
         is_dark,
-        entries,
+        &entries,
         BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
     )
     .unwrap_or(0);
     (chosen, map_context_action(chosen))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show_app_context_menu(
     hwnd: usize,
     is_dark: bool,
@@ -1048,6 +1099,7 @@ pub fn show_app_context_menu(
     pinned: bool,
     running: bool,
     settings: &DockSettings,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
 ) -> AppContextAction {
     let mut group_items: Vec<MenuEntry> = settings
         .app_groups
@@ -1158,11 +1210,12 @@ pub fn show_app_context_menu(
     entries.push(MenuEntry::Separator);
     entries.extend(dock_menu_entries(settings));
 
-    let chosen = menu::show_popup_menu_with_border(
+    let chosen = menu::show_popup_menu_with_anchor(
         hwnd,
         is_dark,
-        entries,
+        &entries,
         BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
     )
     .unwrap_or(0);
     match chosen {
@@ -1196,6 +1249,7 @@ pub fn show_taskview_context_menu(
     hwnd: usize,
     is_dark: bool,
     settings: &DockSettings,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
 ) -> TaskViewAction {
     let entries = vec![
         MenuEntry::item(
@@ -1208,11 +1262,12 @@ pub fn show_taskview_context_menu(
         MenuEntry::Separator,
         MenuEntry::item(TV_MENU_VIEW, MenuIcon::Layers, loc::t("DesktopTaskView")),
     ];
-    match menu::show_popup_menu_with_border(
+    match menu::show_popup_menu_with_anchor(
         hwnd,
         is_dark,
-        entries,
+        &entries,
         BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
     )
     .unwrap_or(0)
     {
@@ -1228,23 +1283,67 @@ pub fn show_recycle_bin_context_menu(
     hwnd: usize,
     is_dark: bool,
     settings: &DockSettings,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
 ) -> RecycleBinAction {
     let entries = vec![
         MenuEntry::item(BIN_MENU_OPEN, MenuIcon::Folder, loc::t("OpenRecycleBin")),
         MenuEntry::Separator,
         MenuEntry::destructive(BIN_MENU_EMPTY, MenuIcon::Trash, loc::t("EmptyRecycleBin")),
     ];
-    match menu::show_popup_menu_with_border(
+    match menu::show_popup_menu_with_anchor(
         hwnd,
         is_dark,
-        entries,
+        &entries,
         BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
     )
     .unwrap_or(0)
     {
         BIN_MENU_OPEN => RecycleBinAction::Open,
         BIN_MENU_EMPTY => RecycleBinAction::Empty,
         _ => RecycleBinAction::None,
+    }
+}
+
+fn folder_stack_menu_entries(folder_name: &str) -> Vec<MenuEntry> {
+    let trimmed = folder_name.trim();
+    let open_label = if trimmed.is_empty() {
+        loc::t("OpenFolderInExplorer")
+    } else {
+        format!("{} ({trimmed})", loc::t("OpenFolderInExplorer"))
+    };
+    vec![
+        MenuEntry::item(STACK_MENU_OPEN, MenuIcon::Folder, open_label),
+        MenuEntry::Separator,
+        MenuEntry::item(STACK_MENU_ADD, MenuIcon::Plus, loc::t("AddStack")),
+        MenuEntry::item(STACK_MENU_MANAGE, MenuIcon::Settings, loc::t("Settings")),
+        MenuEntry::Separator,
+        MenuEntry::destructive(STACK_MENU_REMOVE, MenuIcon::Trash, loc::t("RemoveStack")),
+    ]
+}
+
+pub fn show_folder_stack_context_menu(
+    hwnd: usize,
+    is_dark: bool,
+    folder_name: &str,
+    settings: &DockSettings,
+    anchor: Option<crate::ui::menu::MenuAnchor>,
+) -> FolderStackAction {
+    let entries = folder_stack_menu_entries(folder_name);
+    match menu::show_popup_menu_with_anchor(
+        hwnd,
+        is_dark,
+        &entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
+    )
+    .unwrap_or(0)
+    {
+        STACK_MENU_OPEN => FolderStackAction::OpenInExplorer,
+        STACK_MENU_ADD => FolderStackAction::AddFolder,
+        STACK_MENU_MANAGE => FolderStackAction::ManageInSettings,
+        STACK_MENU_REMOVE => FolderStackAction::RemoveFromDock,
+        _ => FolderStackAction::None,
     }
 }
 
@@ -1275,7 +1374,15 @@ pub fn set_startup_enabled(enabled: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MonitorInfo, monitor_from_raw, order_monitors};
+    use super::{
+        ContextAction, MENU_EXIT, MENU_FOCUS_MODE, MENU_NOTIFICATION_CENTER, MENU_RESTORE,
+        MENU_SEARCH, MENU_SETTINGS, MENU_SHOW_DESKTOP, MENU_STACK_ADD_CUSTOM, MENU_TASKMGR,
+        MenuEntry, MenuIcon, MonitorInfo, STACK_MENU_ADD, STACK_MENU_MANAGE, STACK_MENU_OPEN,
+        STACK_MENU_REMOVE, build_dock_menu_entries, dock_menu_entries, folder_stack_menu_entries,
+        map_context_action, monitor_from_raw, order_monitors,
+    };
+    use opentaskbar_core::i18n as loc;
+    use opentaskbar_core::settings::DockSettings;
 
     #[test]
     fn enumerate_monitors_seam_handles_negative_origins_and_dpi() {
@@ -1329,5 +1436,245 @@ mod tests {
         assert_eq!(ordered[0], primary);
         assert_eq!(ordered[1], secondary);
         assert!(order_monitors(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn dock_menu_places_extra_entries_in_quick_access_and_keeps_exit_last() {
+        let settings = DockSettings::default();
+        let extra_one_id = 9001;
+        let extra_two_id = 9002;
+        let entries = build_dock_menu_entries(
+            &settings,
+            vec![
+                MenuEntry::item(extra_one_id, MenuIcon::Monitor, "Quick action"),
+                MenuEntry::item(extra_two_id, MenuIcon::Folder, "Files"),
+            ],
+        );
+
+        // MENU_EXIT must always be the very last entry, isolated by a separator.
+        assert!(
+            matches!(
+                entries.last(),
+                Some(MenuEntry::Item {
+                    id,
+                    icon: MenuIcon::Power,
+                    destructive: true,
+                    ..
+                }) if *id == MENU_EXIT
+            ),
+            "expected destructive MENU_EXIT last"
+        );
+        assert!(
+            matches!(entries.get(entries.len() - 2), Some(MenuEntry::Separator)),
+            "expected separator immediately before MENU_EXIT"
+        );
+
+        let notif_idx = entries
+            .iter()
+            .position(
+                |e| matches!(e, MenuEntry::Item { id, .. } if *id == MENU_NOTIFICATION_CENTER),
+            )
+            .expect("notification center entry");
+        let extra_one_idx = entries
+            .iter()
+            .position(|e| matches!(e, MenuEntry::Item { id, .. } if *id == extra_one_id))
+            .expect("first extra entry");
+        let extra_two_idx = entries
+            .iter()
+            .position(|e| matches!(e, MenuEntry::Item { id, .. } if *id == extra_two_id))
+            .expect("second extra entry");
+        let profiles_idx = entries
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    MenuEntry::Submenu {
+                        icon: MenuIcon::Layers,
+                        ..
+                    }
+                )
+            })
+            .expect("profiles submenu");
+        let first_sep_idx = entries
+            .iter()
+            .position(|e| matches!(e, MenuEntry::Separator))
+            .expect("group 1 separator");
+
+        // Extra entries sit inside Group 1 right after Notification Center, before separator and Profiles.
+        assert_eq!(extra_one_idx, notif_idx + 1);
+        assert_eq!(extra_two_idx, notif_idx + 2);
+        assert!(extra_two_idx < first_sep_idx);
+        assert!(first_sep_idx < profiles_idx);
+
+        // Exactly 3 separators partition the 4 logical groups.
+        let sep_count = entries
+            .iter()
+            .filter(|e| matches!(e, MenuEntry::Separator))
+            .count();
+        assert_eq!(sep_count, 3);
+
+        // MENU_RESTORE uses the dedicated RestoreWindowsTaskbar key, and base menu also keeps Exit last.
+        let restore_label = entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Item { id, label, .. } if *id == MENU_RESTORE => Some(label.as_str()),
+                _ => None,
+            })
+            .expect("restore taskbar entry");
+        assert_eq!(restore_label, loc::t("RestoreWindowsTaskbar"));
+
+        let base = dock_menu_entries(&settings);
+        assert!(matches!(
+            base.last(),
+            Some(MenuEntry::Item {
+                id,
+                destructive: true,
+                ..
+            }) if *id == MENU_EXIT
+        ));
+        assert!(matches!(
+            base.get(base.len() - 2),
+            Some(MenuEntry::Separator)
+        ));
+    }
+
+    #[test]
+    fn dock_menu_assigns_distinct_icons_to_notifications_taskmgr_focus_and_profiles() {
+        let entries = dock_menu_entries(&DockSettings::default());
+        let icon_for_id = |target: u32| -> MenuIcon {
+            entries
+                .iter()
+                .find_map(|e| match e {
+                    MenuEntry::Item { id, icon, .. } if *id == target => Some(*icon),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing menu item {target}"))
+        };
+        let notif_icon = icon_for_id(MENU_NOTIFICATION_CENTER);
+        let taskmgr_icon = icon_for_id(MENU_TASKMGR);
+        let focus_icon = icon_for_id(MENU_FOCUS_MODE);
+        let profiles_icon = entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Submenu { icon, label, .. } if *label == loc::t("Profiles") => {
+                    Some(*icon)
+                }
+                _ => None,
+            })
+            .expect("profiles submenu");
+
+        assert_eq!(notif_icon, MenuIcon::Bell);
+        assert_eq!(taskmgr_icon, MenuIcon::Activity);
+        assert_eq!(focus_icon, MenuIcon::Focus);
+        assert_eq!(profiles_icon, MenuIcon::Layers);
+
+        let icons = [notif_icon, taskmgr_icon, focus_icon, profiles_icon];
+        for i in 0..icons.len() {
+            for j in (i + 1)..icons.len() {
+                assert_ne!(icons[i], icons[j], "duplicate menu icon at ({i}, {j})");
+            }
+        }
+
+        // Only Task Manager uses MenuIcon::Activity in the dock menu.
+        let activity_ids: Vec<u32> = entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item {
+                    id,
+                    icon: MenuIcon::Activity,
+                    ..
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(activity_ids, vec![MENU_TASKMGR]);
+
+        // Sanity-check key items across groups exist in order.
+        let ordered_ids: Vec<u32> = entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                MENU_SEARCH,
+                MENU_NOTIFICATION_CENTER,
+                MENU_FOCUS_MODE,
+                MENU_SETTINGS,
+                MENU_TASKMGR,
+                MENU_SHOW_DESKTOP,
+                MENU_RESTORE,
+                MENU_EXIT,
+            ]
+        );
+    }
+
+    #[test]
+    fn folder_stack_context_menu_and_dock_submenu_expose_add_and_destructive_remove() {
+        assert_eq!(
+            map_context_action(MENU_STACK_ADD_CUSTOM),
+            ContextAction::AddCustomFolderStack
+        );
+        let entries = dock_menu_entries(&DockSettings::default());
+        let stack_items = entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Submenu { label, items, .. } if *label == loc::t("FolderStacks") => {
+                    Some(items)
+                }
+                _ => None,
+            })
+            .expect("FolderStacks submenu");
+        assert!(stack_items.iter().any(|e| matches!(
+            e,
+            MenuEntry::Item {
+                id,
+                icon: MenuIcon::Plus,
+                ..
+            } if *id == MENU_STACK_ADD_CUSTOM
+        )));
+
+        let stack_menu = folder_stack_menu_entries("Projects");
+        assert!(matches!(
+            stack_menu.first(),
+            Some(MenuEntry::Item {
+                id,
+                icon: MenuIcon::Folder,
+                label,
+                ..
+            }) if *id == STACK_MENU_OPEN && label.contains("Projects")
+        ));
+        assert!(stack_menu.iter().any(|e| matches!(
+            e,
+            MenuEntry::Item {
+                id,
+                icon: MenuIcon::Plus,
+                ..
+            } if *id == STACK_MENU_ADD
+        )));
+        assert!(stack_menu.iter().any(|e| matches!(
+            e,
+            MenuEntry::Item {
+                id,
+                icon: MenuIcon::Settings,
+                ..
+            } if *id == STACK_MENU_MANAGE
+        )));
+        assert!(matches!(
+            stack_menu.last(),
+            Some(MenuEntry::Item {
+                id,
+                icon: MenuIcon::Trash,
+                destructive: true,
+                ..
+            }) if *id == STACK_MENU_REMOVE
+        ));
+        assert!(matches!(
+            stack_menu.get(stack_menu.len() - 2),
+            Some(MenuEntry::Separator)
+        ));
     }
 }

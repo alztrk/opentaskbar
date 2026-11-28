@@ -76,7 +76,7 @@ impl CornerState {
             let pixels = std::slice::from_raw_parts_mut(bits.cast::<u8>(), w * h * 4);
 
             // Fill with alpha=1 (completely invisible to the eye, still 100% hit-testable).
-            for px in pixels.chunks_exact_mut(4) {
+            for px in pixels.as_chunks_mut::<4>().0 {
                 px[0] = 0;
                 px[1] = 0;
                 px[2] = 0;

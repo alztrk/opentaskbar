@@ -659,7 +659,8 @@ fn resolve_identity(window: usize, shortcut: Option<&str>) -> Option<String> {
                 0,
             ))
             .ok()?;
-        } else if let Some(path) = shortcut {
+        } else {
+            let path = shortcut?;
             // IApplicationResolver::ResolveShortcut (private shell interface).
             let path = wide(path);
             let mut item = null_mut();
@@ -677,8 +678,6 @@ fn resolve_identity(window: usize, shortcut: Option<&str>) -> Option<String> {
             let resolve: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut u16) -> i32 =
                 com_method(resolver.as_ptr(), 3);
             hr_ok(resolve(resolver.as_ptr(), item.as_ptr(), &mut id_ptr)).ok()?;
-        } else {
-            return None;
         }
 
         if id_ptr.is_null() {
