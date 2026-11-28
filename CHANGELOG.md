@@ -13,6 +13,7 @@ gated against it by `scripts/check-release-version.ps1`.
 
 ### Repository and pipeline
 
+- Reverted the 2026-11-27 cargo bump to `windows` 0.62, `sha2` 0.11, `zip` 9 and `roxmltree` 0.21, which left the workspace uncompilable: `windows` 0.62 drops `IAsyncOperation::get`, regates `VARIANT` behind `Win32_System_Ole` and changes `IShellLinkW::GetPath`, while `zip` 9 returns a `Result` from `ZipFile::name`. The migration is a follow-up; the workspace builds against the previous versions again.
 - Flattened the Rust workspace into the repository root: `Cargo.toml`, `Cargo.lock`, `crates/` and the merged README now live at the top level; bundled data lives in `resources/fonts/`, `resources/assets/` and `resources/themes/`. CI path filters, packaging scripts, docs and test helpers resolve paths from the new root.
 - MSIX packaging uses `packaging/msix/AppxManifest.Rust.xml`; the release workflow builds x64/x86 Rust EXEs and ZIPs only.
 
