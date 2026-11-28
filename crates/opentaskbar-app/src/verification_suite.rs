@@ -6,7 +6,7 @@
 //! 3. End-to-end live theme transformation across all 6 built-in themes, Windows Default,
 //!    and a freshly created custom theme across Dark & Light modes, `SpatialGlassConfig`,
 //!    `UiTheme`, and `preview_swatches`.
-//! 4. All 22 built-in widgets + `custom:sample` across chip specs, island detail specs,
+//! 4. All built-in catalog widgets + `custom:sample` across chip specs, island detail specs,
 //!    canonical placement/ordering/moving, Dynamic Island Strip packing, and viewport popover
 //!    placement sweeps.
 //! 5. Settings search catalog integrity (no duplicates, valid target rows, localized strings,
@@ -24,9 +24,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use opentaskbar_core::dynamic_island as island_policy;
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    AiUsageRing, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle,
-    DYNAMIC_ISLAND_ALL_DISPLAYS, DockContentAlignment, DockEdge, DockGapUnit, DockHeightMode,
-    DockPosition, DockSettings, DockSize, DockWidthMode, DynamicIslandLayout, DynamicIslandStyle,
+    AiUsageRing, AppTheme, AutoHideMode, CATALOG_WIDGET_COUNT, ClockDateFormat, ClockDateLayout,
+    ClockDateStyle, DYNAMIC_ISLAND_ALL_DISPLAYS, DockContentAlignment, DockEdge, DockGapUnit,
+    DockHeightMode, DockPosition, DockSettings, DockSize, DockWidthMode,
+    DynamicIslandClosedDisplay, DynamicIslandIdleMode, DynamicIslandLayout, DynamicIslandStyle,
     DynamicIslandVisibilityMode, FisheyeIntensity, MiddleClickAction, SecondaryAppScope,
     StartButtonAction, StartButtonPlacement, SurfaceBackground, TemperatureUnit, WidgetDensityMode,
     WidgetFlyoutTrigger, canonical_widget_setting_id, save_to, try_load_from,
@@ -107,7 +108,11 @@ fn settings_matrix_round_trips_every_field_without_error() {
     let path = tmp.path().join("settings.json");
 
     let all_widgets = builtin_catalog_ids();
-    assert_eq!(all_widgets.len(), 22, "expected exactly 22 catalog widgets");
+    assert_eq!(
+        all_widgets.len(),
+        CATALOG_WIDGET_COUNT,
+        "expected exactly {CATALOG_WIDGET_COUNT} catalog widgets"
+    );
 
     let surface_modes = [
         SurfaceBackground::Glass,
@@ -145,7 +150,7 @@ fn settings_matrix_round_trips_every_field_without_error() {
     ];
 
     // Sweep combinations so every enum variant, boundary, theme ID, border hex,
-    // OLED care toggle, widget density, and all 22 widgets (enabled/disabled/ordered)
+    // OLED care toggle, widget density, and all built-in widgets (enabled/disabled/ordered)
     // are exercised through `save_to` -> `try_load_from`.
     for i in 0..16 {
         let mut s = DockSettings {
@@ -371,7 +376,139 @@ fn settings_matrix_round_trips_every_field_without_error() {
         s.glass_edge_glow = (i % 5) as f64 * 0.25;
         s.glass_pointer_light = i % 2 == 0;
 
-        // Exercise ALL 22 widgets: full enable on even passes, selective toggle-off on odd passes,
+        // N4 Dynamic Island smart behavior & scale.
+        let idle_modes = [
+            DynamicIslandIdleMode::Full,
+            DynamicIslandIdleMode::Minimal,
+            DynamicIslandIdleMode::Closed,
+        ];
+        let closed_displays = [
+            DynamicIslandClosedDisplay::MinimalLine,
+            DynamicIslandClosedDisplay::Clock,
+            DynamicIslandClosedDisplay::Music,
+            DynamicIslandClosedDisplay::AiUsage,
+            DynamicIslandClosedDisplay::Hidden,
+        ];
+        let idle_mode = idle_modes[i % idle_modes.len()];
+        let closed_display = closed_displays[i % closed_displays.len()];
+        let hover_expand = i % 2 == 1;
+        let hover_delay_ms = 80 + ((i as u32 * 95) % 920);
+        let auto_close_secs = (i as u32 * 9) % 121;
+        let follow_mouse = i % 3 == 1;
+        let island_scale = 0.80 + (i % 12) as f32 * 0.05;
+        s.set_dynamic_island_idle_mode(idle_mode);
+        s.set_dynamic_island_closed_display(closed_display);
+        s.set_dynamic_island_hover_expand(hover_expand);
+        s.set_dynamic_island_hover_delay_ms(hover_delay_ms);
+        s.set_dynamic_island_auto_close_secs(auto_close_secs);
+        s.set_dynamic_island_follow_mouse(follow_mouse);
+        s.set_dynamic_island_scale(island_scale);
+
+        // N1 System HUDs + O5 Windows Notifications.
+        let hud_volume = i % 2 == 0;
+        let hud_brightness = i % 3 != 0;
+        let hud_capslock = i % 2 == 1;
+        let hud_kbd_lang = i % 4 != 0;
+        let hud_power = i % 3 == 0;
+        let hud_network = i % 2 == 0;
+        let hud_bluetooth = i % 5 != 0;
+        let hud_duration_ms = 600 + ((i as u32 * 400) % 5401);
+        let notif_enabled = i % 2 == 0;
+        let notif_duration_ms = 1500 + ((i as u32 * 1000) % 10_501);
+        let notif_respect_focus = i % 3 != 1;
+        let notif_muted = if i % 2 == 0 {
+            vec!["Teams".to_owned(), "Slack".to_owned()]
+        } else {
+            Vec::new()
+        };
+        s.set_hud_volume_enabled(hud_volume);
+        s.set_hud_brightness_enabled(hud_brightness);
+        s.set_hud_capslock_enabled(hud_capslock);
+        s.set_hud_keyboard_lang_enabled(hud_kbd_lang);
+        s.set_hud_power_enabled(hud_power);
+        s.set_hud_network_enabled(hud_network);
+        s.set_hud_bluetooth_enabled(hud_bluetooth);
+        s.set_hud_duration_ms(hud_duration_ms);
+        s.set_island_notifications_enabled(notif_enabled);
+        s.set_island_notifications_duration_ms(notif_duration_ms);
+        s.set_island_notifications_respect_focus(notif_respect_focus);
+        s.set_island_notifications_muted_apps(notif_muted.clone());
+
+        // N2 File Shelf + N3 Clipboard History + N5 Smart Tools + N6 Media + N7 Agents + N8 Todo.
+        let shelf_enabled = i % 2 == 0;
+        let shelf_max_items = 4 + (i * 3) % 29;
+        let clip_enabled = i % 2 == 1;
+        let clip_max_items = 5 + (i * 4) % 46;
+        let clip_ignore_sensitive = i % 3 != 0;
+        let ocr_enabled = i % 2 == 0;
+        let quick_shot_enabled = i % 3 != 2;
+        let media_waveform = i % 2 == 0;
+        let media_lyrics = i % 2 == 1;
+        let media_lyrics_pill = i % 3 != 1;
+        let agent_monitor = i % 2 == 1;
+        let agent_approval = i % 2 == 0;
+        let todo_reminders = i % 3 != 0;
+        let ical_url = if i % 2 == 0 {
+            format!("https://calendar.example.test/feed-{i}.ics")
+        } else {
+            String::new()
+        };
+        let ical_poll_mins = 5 + ((i as u32 * 10) % 116);
+        s.set_shelf_enabled(shelf_enabled);
+        s.set_shelf_max_items(shelf_max_items);
+        s.set_clipboard_history_enabled(clip_enabled);
+        s.set_clipboard_max_items(clip_max_items);
+        s.set_clipboard_ignore_sensitive(clip_ignore_sensitive);
+        s.set_smart_ocr_enabled(ocr_enabled);
+        s.set_quick_screenshot_enabled(quick_shot_enabled);
+        s.set_media_waveform_enabled(media_waveform);
+        s.set_media_lyrics_enabled(media_lyrics);
+        s.set_media_lyrics_pill_enabled(media_lyrics_pill);
+        s.set_agent_monitor_enabled(agent_monitor);
+        s.set_agent_approval_banners(agent_approval);
+        s.set_todo_reminders_enabled(todo_reminders);
+        s.set_ical_feed_url(ical_url.clone());
+        s.set_ical_poll_minutes(ical_poll_mins);
+
+        // N9 Privacy, Quick Power, extra hotkeys + Wireless multi-brand protocols.
+        let privacy_dots = i % 2 == 0;
+        let quick_power = i % 3 != 0;
+        let hk_island = if i % 2 == 0 {
+            "Ctrl+Alt+I".to_owned()
+        } else {
+            String::new()
+        };
+        let hk_ocr = if i % 2 == 0 {
+            "Ctrl+Shift+O".to_owned()
+        } else {
+            String::new()
+        };
+        let hk_shot = if i % 2 == 0 {
+            "Ctrl+Shift+S".to_owned()
+        } else {
+            String::new()
+        };
+        let hk_clip = if i % 2 == 0 {
+            "Ctrl+Shift+V".to_owned()
+        } else {
+            String::new()
+        };
+        let wireless_multi_brand = i % 2 == 0;
+        let wireless_disabled_vendors = if i % 3 == 0 {
+            vec!["Corsair".to_owned(), "Razer".to_owned()]
+        } else {
+            Vec::new()
+        };
+        s.set_privacy_indicators_enabled(privacy_dots);
+        s.set_quick_power_actions_enabled(quick_power);
+        s.set_island_toggle_hotkey(hk_island.clone());
+        s.set_ocr_hotkey(hk_ocr.clone());
+        s.set_screenshot_hotkey(hk_shot.clone());
+        s.set_clipboard_hotkey(hk_clip.clone());
+        s.set_wireless_multi_brand_enabled(wireless_multi_brand);
+        s.set_wireless_disabled_vendors(wireless_disabled_vendors.clone());
+
+        // Exercise ALL catalog widgets: full enable on even passes, selective toggle-off on odd passes,
         // custom ordering, density overrides, and Dynamic Island placements.
         let mut ordered_widgets: Vec<String> = all_widgets
             .iter()
@@ -505,6 +642,64 @@ fn settings_matrix_round_trips_every_field_without_error() {
                 .and_then(Value::as_bool),
             Some(storage_compact)
         );
+        assert_eq!(loaded.dynamic_island_idle_mode(), idle_mode);
+        assert_eq!(loaded.dynamic_island_closed_display(), closed_display);
+        assert_eq!(loaded.dynamic_island_hover_expand(), hover_expand);
+        assert_eq!(loaded.dynamic_island_hover_delay_ms(), hover_delay_ms);
+        assert_eq!(loaded.dynamic_island_auto_close_secs(), auto_close_secs);
+        assert_eq!(loaded.dynamic_island_follow_mouse(), follow_mouse);
+        assert!(
+            (loaded.dynamic_island_scale() - island_scale).abs() < 0.001,
+            "dynamic_island_scale diverged: {} vs {}",
+            loaded.dynamic_island_scale(),
+            island_scale
+        );
+        assert_eq!(loaded.hud_volume_enabled(), hud_volume);
+        assert_eq!(loaded.hud_brightness_enabled(), hud_brightness);
+        assert_eq!(loaded.hud_capslock_enabled(), hud_capslock);
+        assert_eq!(loaded.hud_keyboard_lang_enabled(), hud_kbd_lang);
+        assert_eq!(loaded.hud_power_enabled(), hud_power);
+        assert_eq!(loaded.hud_network_enabled(), hud_network);
+        assert_eq!(loaded.hud_bluetooth_enabled(), hud_bluetooth);
+        assert_eq!(loaded.hud_duration_ms(), hud_duration_ms);
+        assert_eq!(loaded.island_notifications_enabled(), notif_enabled);
+        assert_eq!(loaded.island_notifications_duration_ms(), notif_duration_ms);
+        assert_eq!(
+            loaded.island_notifications_respect_focus(),
+            notif_respect_focus
+        );
+        assert_eq!(loaded.island_notifications_muted_apps(), notif_muted);
+        assert_eq!(loaded.shelf_enabled(), shelf_enabled);
+        assert_eq!(loaded.shelf_max_items(), shelf_max_items);
+        assert_eq!(loaded.clipboard_history_enabled(), clip_enabled);
+        assert_eq!(loaded.clipboard_max_items(), clip_max_items);
+        assert_eq!(loaded.clipboard_ignore_sensitive(), clip_ignore_sensitive);
+        assert_eq!(loaded.smart_ocr_enabled(), ocr_enabled);
+        assert_eq!(loaded.quick_screenshot_enabled(), quick_shot_enabled);
+        assert_eq!(loaded.media_waveform_enabled(), media_waveform);
+        assert_eq!(loaded.media_lyrics_enabled(), media_lyrics);
+        assert_eq!(loaded.media_lyrics_pill_enabled(), media_lyrics_pill);
+        assert_eq!(loaded.agent_monitor_enabled(), agent_monitor);
+        assert_eq!(loaded.agent_approval_banners(), agent_approval);
+        assert_eq!(loaded.todo_reminders_enabled(), todo_reminders);
+        assert_eq!(loaded.ical_feed_url(), ical_url);
+        assert_eq!(loaded.ical_poll_minutes(), ical_poll_mins);
+        assert_eq!(loaded.privacy_indicators_enabled(), privacy_dots);
+        assert_eq!(loaded.quick_power_actions_enabled(), quick_power);
+        assert_eq!(loaded.island_toggle_hotkey(), hk_island);
+        assert_eq!(loaded.ocr_hotkey(), hk_ocr);
+        assert_eq!(loaded.screenshot_hotkey(), hk_shot);
+        assert_eq!(loaded.clipboard_hotkey(), hk_clip);
+        assert!(
+            loaded.detect_hotkey_conflicts().is_empty(),
+            "non-colliding hotkeys must not report conflicts: {:?}",
+            loaded.detect_hotkey_conflicts()
+        );
+        assert_eq!(loaded.wireless_multi_brand_enabled(), wireless_multi_brand);
+        assert_eq!(
+            loaded.wireless_disabled_vendors(),
+            wireless_disabled_vendors
+        );
         assert_eq!(loaded.widget_density_overrides, density_map);
         assert_eq!(loaded.widget_order, ordered_widgets);
         assert_eq!(loaded.enabled_widgets.len(), s.enabled_widgets.len());
@@ -516,6 +711,25 @@ fn settings_matrix_round_trips_every_field_without_error() {
             );
         }
     }
+
+    // Verify real-time multi-hotkey conflict detection catches colliding shortcuts.
+    let mut conflict_settings = DockSettings::default();
+    conflict_settings.set_ocr_hotkey("Alt+Space".to_owned());
+    conflict_settings.set_clipboard_hotkey("Ctrl+Shift+V".to_owned());
+    conflict_settings.set_screenshot_hotkey("Ctrl+Shift+V".to_owned());
+    let conflicts = conflict_settings.detect_hotkey_conflicts();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(a, b)| a == "LauncherHotkey" && b == "OcrHotkey"),
+        "expected LauncherHotkey/OcrHotkey conflict, got {conflicts:?}"
+    );
+    assert!(
+        conflicts
+            .iter()
+            .any(|(a, b)| a == "ScreenshotHotkey" && b == "ClipboardHotkey"),
+        "expected ScreenshotHotkey/ClipboardHotkey conflict, got {conflicts:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +1081,7 @@ fn all_six_builtin_and_custom_themes_transform_all_surfaces() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. All 22 Built-in Widgets + Dynamic Island + Viewport Popover Matrix
+// 4. All Built-in Catalog Widgets + Dynamic Island + Viewport Popover Matrix
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -875,8 +1089,8 @@ fn all_22_widgets_island_and_popovers_are_clean_and_finite() {
     let builtin_ids = builtin_catalog_ids();
     assert_eq!(
         builtin_ids.len(),
-        22,
-        "expected 22 built-in catalog widgets"
+        CATALOG_WIDGET_COUNT,
+        "expected {CATALOG_WIDGET_COUNT} built-in catalog widgets"
     );
 
     let mut all_ids: Vec<&str> = builtin_ids.clone();
@@ -925,7 +1139,7 @@ fn all_22_widgets_island_and_popovers_are_clean_and_finite() {
     let moved_back = island_policy::move_widget(&moved, "stats", -1);
     assert_eq!(moved_back.len(), all_ids.len());
 
-    // 4b. WidgetRuntime::chip_spec across all 22 widgets (+ custom:sample) × Auto/Compact/Full.
+    // 4b. WidgetRuntime::chip_spec across all built-in widgets (+ custom:sample) × Auto/Compact/Full.
     let mut runtime = WidgetRuntime::default();
     let densities = [
         WidgetDensityMode::Auto,
@@ -964,7 +1178,7 @@ fn all_22_widgets_island_and_popovers_are_clean_and_finite() {
         }
     }
 
-    // 4c. WidgetRuntime::island_detail_spec across all 22 built-in widgets + custom:sample.
+    // 4c. WidgetRuntime::island_detail_spec across all built-in widgets + custom:sample.
     let default_settings = DockSettings::default();
     for &id in &all_ids {
         let detail = runtime.island_detail_spec(id, &default_settings);
@@ -1002,13 +1216,13 @@ fn all_22_widgets_island_and_popovers_are_clean_and_finite() {
         }
     }
 
-    // 4d. Dynamic Island Strip layout packing across 1, 2, 5, 10, 22 widgets ×
+    // 4d. Dynamic Island Strip layout packing across 1, 2, 5, 10, CATALOG_WIDGET_COUNT widgets ×
     //     screen widths 1024..=3840 × DPIs 1.0..=2.0.
     let all_widths: Vec<f32> = builtin_ids
         .iter()
         .map(|id| runtime.widget_width_dips_with_settings(id, &default_settings))
         .collect();
-    for count in [1usize, 2, 5, 10, 22] {
+    for count in [1usize, 2, 5, 10, CATALOG_WIDGET_COUNT] {
         let slice = &all_widths[..count];
         for screen_px in [1024.0_f32, 1366.0, 1920.0, 2560.0, 3840.0] {
             for dpi in [1.0_f32, 1.25, 1.5, 2.0] {
@@ -1259,7 +1473,7 @@ fn hot_paths_stay_well_within_240fps_frame_budget() {
     theme::sync_from_settings(&settings);
 
     let builtin_ids = builtin_catalog_ids();
-    assert_eq!(builtin_ids.len(), 22);
+    assert_eq!(builtin_ids.len(), CATALOG_WIDGET_COUNT);
     let mut runtime = WidgetRuntime::default();
     let search_entries = settings_search::catalog();
     let shrink_inputs: Vec<(&'static str, f32)> = builtin_ids
@@ -1286,7 +1500,9 @@ fn hot_paths_stay_well_within_240fps_frame_budget() {
     }
     let theme_avg_us = t0.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(ITERS);
 
-    // 6b. WidgetRuntime::chip_spec across all 22 widgets.
+    let builtin_count = builtin_ids.len();
+
+    // 6b. WidgetRuntime::chip_spec across all built-in widgets.
     let t1 = Instant::now();
     for _ in 0..ITERS {
         for &id in &builtin_ids {
@@ -1296,7 +1512,7 @@ fn hot_paths_stay_well_within_240fps_frame_budget() {
     }
     let chips_avg_us = t1.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(ITERS);
 
-    // 6c. WidgetRuntime::island_detail_spec across all 22 widgets.
+    // 6c. WidgetRuntime::island_detail_spec across all built-in widgets.
     let t2 = Instant::now();
     for _ in 0..ITERS {
         for &id in &builtin_ids {
@@ -1329,7 +1545,7 @@ fn hot_paths_stay_well_within_240fps_frame_budget() {
     let dock_math_avg_us = t4.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(ITERS);
 
     eprintln!(
-        "[PERF 240FPS GUARD ({ITERS} iters)] theme={theme_avg_us:.1}us | chip_spec(22)={chips_avg_us:.1}us | island_detail(22)={island_detail_avg_us:.1}us | popover+search={popover_search_avg_us:.1}us | dock_bg+fps+shrink={dock_math_avg_us:.1}us"
+        "[PERF 240FPS GUARD ({ITERS} iters)] theme={theme_avg_us:.1}us | chip_spec({builtin_count})={chips_avg_us:.1}us | island_detail({builtin_count})={island_detail_avg_us:.1}us | popover+search={popover_search_avg_us:.1}us | dock_bg+fps+shrink={dock_math_avg_us:.1}us"
     );
 
     // Restore clean Windows Default theme state.
@@ -1343,11 +1559,11 @@ fn hot_paths_stay_well_within_240fps_frame_budget() {
     );
     assert!(
         chips_avg_us < 5_000.0,
-        "chip_spec(22) hot path regressed: {chips_avg_us:.1} us/iter"
+        "chip_spec({builtin_count}) hot path regressed: {chips_avg_us:.1} us/iter"
     );
     assert!(
         island_detail_avg_us < 5_000.0,
-        "island_detail_spec(22) hot path regressed: {island_detail_avg_us:.1} us/iter"
+        "island_detail_spec({builtin_count}) hot path regressed: {island_detail_avg_us:.1} us/iter"
     );
     assert!(
         popover_search_avg_us < 5_000.0,
@@ -1356,5 +1572,138 @@ fn hot_paths_stay_well_within_240fps_frame_budget() {
     assert!(
         dock_math_avg_us < 5_000.0,
         "dock bg+fps+shrink hot path regressed: {dock_math_avg_us:.1} us/iter"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Low-RAM & Lazy-Init Bounded Memory Guard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn disabled_features_stay_lazy_and_memory_bounded() {
+    use crate::platform::hud_monitor::HudMonitor;
+    use crate::platform::notification_listener::{
+        MAX_BODY_CHARS, MAX_NOTIFICATIONS, NotificationMirror,
+    };
+    use crate::widgets::clipboard::{ClipboardStore, MAX_ENTRY_BYTES};
+    use crate::widgets::lyrics::{LyricsCache, MAX_CACHED_TRACKS, SyncedLyrics};
+    use crate::widgets::shelf::FileShelfState;
+
+    // 7a. Default WidgetRuntime must keep all opt-in lazy subsystems unallocated.
+    let runtime = WidgetRuntime::default();
+    assert_eq!(
+        runtime.lazy_subsystems_allocated(),
+        0,
+        "expected 0 lazy subsystems allocated by default"
+    );
+
+    // 7b. NotificationMirror ring buffer stays <= 12 after 100 alerts and enforces text bounds.
+    let mut notif_settings = DockSettings::default();
+    notif_settings.set_island_notifications_enabled(true);
+    let mut mirror = NotificationMirror::new();
+    assert_eq!(MAX_NOTIFICATIONS, 12);
+    assert_eq!(MAX_BODY_CHARS, 200);
+    for i in 0..100usize {
+        let long_text = format!("alert-{i}-{}", "x".repeat(320));
+        let _ = mirror.push_shell_alert(
+            format!("App{i}"),
+            long_text,
+            (i + 1) as isize,
+            &notif_settings,
+            false,
+        );
+    }
+    assert!(
+        mirror.recent().len() <= 12,
+        "NotificationMirror exceeded 12 entries: {}",
+        mirror.recent().len()
+    );
+    assert!(!mirror.recent().is_empty());
+    for entry in mirror.recent() {
+        assert!(
+            entry.body.chars().count() <= 200,
+            "NotificationMirror body exceeded 200 chars: {}",
+            entry.body.chars().count()
+        );
+        assert!(
+            entry.title.chars().count() <= 120,
+            "NotificationMirror title exceeded 120 chars: {}",
+            entry.title.chars().count()
+        );
+    }
+
+    // 7c. ClipboardStore stays <= clipboard_max_items after 100 entries and caps > 16 KB payloads.
+    let default_settings = DockSettings::default();
+    let clip_cap = default_settings.clipboard_max_items();
+    let mut clip = ClipboardStore::new();
+    for i in 0..100usize {
+        assert!(clip.ingest_text(
+            &format!("clip-entry-{i}"),
+            clip_cap,
+            1_700_000_000 + i as u64
+        ));
+    }
+    assert!(
+        clip.entries().len() <= clip_cap,
+        "ClipboardStore exceeded clipboard_max_items ({clip_cap}): {}",
+        clip.entries().len()
+    );
+    let oversized = "A".repeat(MAX_ENTRY_BYTES * 2 + 512);
+    assert!(clip.ingest_text(&oversized, clip_cap, 1_700_001_000));
+    assert!(
+        clip.entries()[0].text.len() <= MAX_ENTRY_BYTES,
+        "ClipboardStore failed to truncate > 16 KB payload: {} bytes",
+        clip.entries()[0].text.len()
+    );
+
+    // 7d. FileShelfState stays <= shelf_max_items after adding 100 items.
+    let shelf_cap = default_settings.shelf_max_items();
+    let mut shelf = FileShelfState::default();
+    for i in 0..100usize {
+        assert!(shelf.add_text(&format!("shelf-snippet-{i}"), shelf_cap));
+    }
+    assert!(
+        shelf.count() <= shelf_cap,
+        "FileShelfState exceeded shelf_max_items ({shelf_cap}): {}",
+        shelf.count()
+    );
+
+    // 7e. LyricsCache stays <= 8 tracks after inserting 30 tracks.
+    let mut lyrics = LyricsCache::new();
+    assert_eq!(MAX_CACHED_TRACKS, 8);
+    for i in 0..30usize {
+        lyrics.insert(SyncedLyrics::from_lrc(
+            format!("artist-{i}::track-{i}"),
+            "[00:01.00] First line\n[00:05.00] Second line",
+        ));
+    }
+    assert!(
+        lyrics.len() <= 8,
+        "LyricsCache exceeded 8 tracks: {}",
+        lyrics.len()
+    );
+
+    // 7f. HudMonitor::poll returns None immediately when all HUDs are disabled.
+    let mut hud_disabled = DockSettings::default();
+    hud_disabled.set_hud_volume_enabled(false);
+    hud_disabled.set_hud_brightness_enabled(false);
+    hud_disabled.set_hud_capslock_enabled(false);
+    hud_disabled.set_hud_keyboard_lang_enabled(false);
+    hud_disabled.set_hud_power_enabled(false);
+    hud_disabled.set_hud_network_enabled(false);
+    hud_disabled.set_hud_bluetooth_enabled(false);
+    let mut hud = HudMonitor::new();
+    assert!(
+        hud.poll(&hud_disabled, Some((42, false)), &[]).is_none(),
+        "HudMonitor::poll must return None when disabled"
+    );
+    assert!(
+        hud.poll(
+            &hud_disabled,
+            Some((90, true)),
+            &[("Headset".to_owned(), 75)],
+        )
+        .is_none(),
+        "HudMonitor::poll must stay None on subsequent changes when disabled"
     );
 }

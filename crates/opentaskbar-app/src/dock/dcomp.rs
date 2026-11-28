@@ -76,8 +76,41 @@ pub enum IslandButton {
     Prev,
     Next,
     Expand,
+    /// Pin toggle mirrored opposite the expand chevron: a pinned island never auto-collapses.
+    Pin,
     /// Clickable page indicator dot (absolute page index).
     Dot(u8),
+}
+
+/// Hit-tested buttons of the transient island overlay (agent approval / notification pill).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IslandOverlayButton {
+    Allow,
+    Deny,
+    Always,
+    /// Jump to the agent's terminal window.
+    Jump,
+    /// Notification pill `×`.
+    Dismiss,
+}
+
+impl IslandOverlayButton {
+    /// Localized label (English fallback while a catalog lacks the key).
+    pub fn label(self) -> String {
+        let (key, fallback) = match self {
+            Self::Allow => ("AgentApprove", "Allow"),
+            Self::Deny => ("AgentDeny", "Deny"),
+            Self::Always => ("AgentAlways", "Always"),
+            Self::Jump => ("AgentJumpToTerminal", "Terminal"),
+            Self::Dismiss => return String::new(),
+        };
+        let text = loc::t(key);
+        if text == key || text.trim().is_empty() {
+            fallback.to_owned()
+        } else {
+            text
+        }
+    }
 }
 
 /// Widget chip chrome. Dock cards keep the frosted card; the Dynamic Island draws
@@ -3917,6 +3950,135 @@ pub struct IslandChromeRender<'a> {
     pub glass_host_active: bool,
     /// Strip layout hairline divider x positions (island DIPs).
     pub dividers_dips: &'a [f32],
+    /// Draw the pin toggle in `layout.pin` (expanded, hovered or pinned island).
+    pub show_pin: bool,
+    pub pinned: bool,
+    /// N9 privacy dots: `bit 0` = microphone (amber), `bit 1` = camera (green).
+    pub privacy_dots: u8,
+    /// N6 live audio waveform (`0..=100` per bar); all zero = not drawn.
+    pub waveform_bars: [u8; 4],
+    /// Where the Full-presentation waveform sits (the free pin slot next to the media chip).
+    pub waveform_rect: Option<(f32, f32, f32, f32)>,
+    /// Slim resting capsule (`DynamicIslandIdleMode::Minimal`): no navigation chrome, only
+    /// `lyric_pill` (lyric / clock / track / AI usage line), the waveform and privacy dots.
+    pub minimal: bool,
+    /// Trimmed one-line text of the minimal capsule.
+    pub lyric_pill: Option<&'a str>,
+    /// Overlay presentation: capsule only, the overlay node draws the content on top.
+    pub bare: bool,
+}
+
+/// Content of the single lazily allocated island overlay node.
+pub enum IslandOverlayContent<'a> {
+    /// N7 agent approval banner.
+    AgentApproval {
+        agent: &'a str,
+        project: &'a str,
+        action_title: &'a str,
+        detail: &'a str,
+        added: usize,
+        removed: usize,
+    },
+    /// N1 transient system HUD pill (progress bar for level HUDs, badge otherwise).
+    Hud {
+        icon: &'a str,
+        title: &'a str,
+        subtitle: &'a str,
+        progress: Option<f32>,
+        accent_rgb: Option<Rgb>,
+    },
+    /// O5 mirrored notification pill.
+    Notification {
+        app_name: &'a str,
+        title: &'a str,
+        body: &'a str,
+    },
+}
+
+/// Everything `create_island_overlay_surface` needs; geometry comes from
+/// `IslandOverlayLayout` so hit testing always matches what is drawn.
+pub struct IslandOverlayRender<'a> {
+    pub content: IslandOverlayContent<'a>,
+    pub layout: &'a super::dynamic_island::IslandOverlayLayout,
+    pub dpi: f32,
+    pub is_dark: bool,
+    pub hovered: Option<IslandOverlayButton>,
+    pub pressed: Option<IslandOverlayButton>,
+}
+
+/// N6: four rounded live audio bars centered in `rect` (`0..=100` each, 2 DIP minimum).
+unsafe fn draw_waveform_bars(
+    dc: &ID2D1DeviceContext,
+    rect: D2D_RECT_F,
+    bars: [u8; 4],
+    color: Rgb,
+) -> Result<()> {
+    let w = (rect.right - rect.left).max(4.0);
+    let h = (rect.bottom - rect.top).max(4.0);
+    let bar_w = (w / 7.0).clamp(1.5, 3.5);
+    let gap = ((w - bar_w * 4.0) / 3.0).max(1.0);
+    let total = bar_w * 4.0 + gap * 3.0;
+    let mut x = rect.left + ((w - total) * 0.5).max(0.0);
+    let cy = rect.top + h * 0.5;
+    // SAFETY: `dc` is inside an active `BeginDraw` on the UI thread.
+    unsafe {
+        let brush = dc.CreateSolidColorBrush(&color_rgba(color.0, color.1, color.2, 0.92), None)?;
+        for value in bars {
+            let bh = (f32::from(value.min(100)) / 100.0 * h).max(2.0);
+            dc.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: x,
+                        top: cy - bh * 0.5,
+                        right: x + bar_w,
+                        bottom: cy + bh * 0.5,
+                    },
+                    radiusX: bar_w * 0.5,
+                    radiusY: bar_w * 0.5,
+                },
+                &brush,
+            );
+            x += bar_w + gap;
+        }
+    }
+    Ok(())
+}
+
+/// N9: crisp 6 DIP glowing privacy dots (microphone amber, camera green) starting at `cx`.
+unsafe fn draw_privacy_dots(dc: &ID2D1DeviceContext, cx: f32, cy: f32, bits: u8) -> Result<()> {
+    const MIC_AMBER: Rgb = (255, 159, 10);
+    const CAMERA_GREEN: Rgb = (52, 199, 89);
+    let mut x = cx;
+    for (bit, color) in [(0b01_u8, MIC_AMBER), (0b10_u8, CAMERA_GREEN)] {
+        if bits & bit == 0 {
+            continue;
+        }
+        // SAFETY: `dc` is inside an active `BeginDraw` on the UI thread.
+        unsafe {
+            let glow =
+                dc.CreateSolidColorBrush(&color_rgba(color.0, color.1, color.2, 0.28), None)?;
+            dc.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: x, Y: cy },
+                    radiusX: 5.0,
+                    radiusY: 5.0,
+                },
+                &glow,
+            );
+            let core =
+                dc.CreateSolidColorBrush(&color_rgba(color.0, color.1, color.2, 1.0), None)?;
+            dc.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: x, Y: cy },
+                    radiusX: 3.0,
+                    radiusY: 3.0,
+                },
+                &core,
+            );
+        }
+        x -= 10.0;
+    }
+    Ok(())
 }
 
 /// Everything `create_island_detail_surface` needs to draw the expanded detail card.
@@ -3948,6 +4110,12 @@ impl DcompEngine {
             (0xff_u8, 0xff_u8, 0xff_u8)
         } else {
             (0x18_u8, 0x18_u8, 0x1b_u8)
+        };
+        let fmt_line = match r.lyric_pill {
+            Some(_) if r.minimal => {
+                Some(self.cached_text_format(design::fonts::scaled_size(11.5), true, 0)?)
+            }
+            _ => None,
         };
 
         self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
@@ -4000,8 +4168,9 @@ impl DcompEngine {
                 dc.DrawRoundedRectangle(&capsule, &bd, stroke, None);
             }
 
+            let show_nav = !r.minimal && !r.bare;
             // Strip layout: crisp 1 DIP hairlines between packed widgets.
-            if !r.dividers_dips.is_empty() {
+            if show_nav && !r.dividers_dips.is_empty() {
                 let header = r.layout.chip_top + r.layout.chip_h;
                 let div = dc.CreateSolidColorBrush(
                     &color_rgba(ink.0, ink.1, ink.2, if r.is_dark { 0.16 } else { 0.14 }),
@@ -4067,21 +4236,29 @@ impl DcompEngine {
                     )
                 };
 
-            if let Some(rect) = r.layout.prev {
+            if show_nav && let Some(rect) = r.layout.prev {
                 draw_btn(
                     IslandButton::Prev,
                     rect,
                     icons::glyph_for_icon(AppIcon::ChevronLeft),
                 )?;
             }
-            if let Some(rect) = r.layout.next {
+            if show_nav && let Some(rect) = r.layout.next {
                 draw_btn(
                     IslandButton::Next,
                     rect,
                     icons::glyph_for_icon(AppIcon::ChevronRight),
                 )?;
             }
-            if let Some(rect) = r.layout.expand {
+            if show_nav
+                && r.show_pin
+                && let Some(rect) = r.layout.pin
+            {
+                // Pin (E718) / pinned fill (E841).
+                let glyph = if r.pinned { "\u{E841}" } else { "\u{E718}" };
+                draw_btn(IslandButton::Pin, rect, glyph)?;
+            }
+            if show_nav && let Some(rect) = r.layout.expand {
                 let glyph = if r.expanded {
                     icons::named_glyph("ChevronUp").unwrap_or("\u{E70E}")
                 } else {
@@ -4091,7 +4268,12 @@ impl DcompEngine {
             }
 
             // Page indicator: 6 DIP dots, the active page a 14×6 DIP pill.
-            for (page, (l, t, rr, b)) in &r.layout.dots {
+            let dots = if show_nav {
+                r.layout.dots.as_slice()
+            } else {
+                &[]
+            };
+            for (page, (l, t, rr, b)) in dots {
                 let active = *page == r.current_page;
                 let hovered = r.hovered_btn == Some(IslandButton::Dot(*page as u8));
                 let (color, alpha) = if active {
@@ -4116,6 +4298,428 @@ impl DcompEngine {
                         radiusY: dot_r,
                     },
                     &brush,
+                );
+            }
+
+            let wave_on = r.waveform_bars != [0; 4];
+            if r.minimal {
+                // Slim resting capsule: `[dots] line [waveform]`, symmetric side reserves.
+                let pad = (radius * 0.55).clamp(10.0, 16.0);
+                let dots_w: f32 = match r.privacy_dots & 0b11 {
+                    0 => 0.0,
+                    0b11 => 22.0,
+                    _ => 12.0,
+                };
+                let wave_w: f32 = if wave_on { 22.0 } else { 0.0 };
+                let side = dots_w.max(wave_w);
+                if r.privacy_dots & 0b11 != 0 {
+                    let first = pad
+                        + if r.privacy_dots & 0b11 == 0b11 {
+                            13.0
+                        } else {
+                            3.0
+                        };
+                    draw_privacy_dots(dc, first, h * 0.5, r.privacy_dots)?;
+                }
+                if wave_on {
+                    draw_waveform_bars(
+                        dc,
+                        D2D_RECT_F {
+                            left: w - pad - wave_w,
+                            top: h * 0.24,
+                            right: w - pad,
+                            bottom: h * 0.76,
+                        },
+                        r.waveform_bars,
+                        pal.widget_accent,
+                    )?;
+                }
+                if let (Some(text), Some(fmt)) = (r.lyric_pill, fmt_line.as_ref())
+                    && !text.is_empty()
+                {
+                    let left = pad + side + if side > 0.0 { 4.0 } else { 0.0 };
+                    let right = (w - left).max(left + 1.0);
+                    let wtxt: Vec<u16> = text.encode_utf16().collect();
+                    if let Ok(text_layout) =
+                        self.dwrite_factory
+                            .CreateTextLayout(&wtxt, fmt, right - left, h.max(1.0))
+                    {
+                        let brush = dc.CreateSolidColorBrush(
+                            &color_rgba(
+                                pal.text_primary.0,
+                                pal.text_primary.1,
+                                pal.text_primary.2,
+                                0.94,
+                            ),
+                            None,
+                        )?;
+                        dc.DrawTextLayout(
+                            Vector2 { X: left, Y: 0.0 },
+                            &text_layout,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
+                }
+            } else {
+                if show_nav
+                    && wave_on
+                    && let Some((l, t, rr, b)) = r.waveform_rect
+                {
+                    let inset_y = ((b - t) * 0.22).max(2.0);
+                    draw_waveform_bars(
+                        dc,
+                        D2D_RECT_F {
+                            left: l + 3.0,
+                            top: t + inset_y,
+                            right: rr - 3.0,
+                            bottom: b - inset_y,
+                        },
+                        r.waveform_bars,
+                        pal.widget_accent,
+                    )?;
+                }
+                if r.privacy_dots & 0b11 != 0 {
+                    // Top-trailing capsule corner, inside the rounded edge.
+                    let cx = w - (radius * 0.62).max(14.0);
+                    let cy = if r.top_flush {
+                        8.0
+                    } else {
+                        9.0_f32.min(h * 0.5)
+                    };
+                    draw_privacy_dots(dc, cx, cy, r.privacy_dots)?;
+                }
+            }
+            dc.SetTransform(&prev);
+            Ok(())
+        })
+    }
+
+    /// Transient Dynamic Island overlay drawn into the single lazily allocated overlay node:
+    /// N7 agent approval banner (agent, project, action, `+N -M` diff summary and
+    /// Allow / Deny / Always / Terminal buttons), N1 system HUD pill (icon, title and a smooth
+    /// progress bar or badge) and O5 notification pill (app badge, title, one-line body, `×`).
+    /// The capsule background comes from the chrome surface underneath.
+    pub fn create_island_overlay_surface(
+        &self,
+        r: &IslandOverlayRender<'_>,
+    ) -> Result<IDCompositionSurface> {
+        let pal = design::active_palette(r.is_dark);
+        let dpi = r.dpi.max(0.5);
+        let layout = r.layout;
+        let w_px = (layout.width * dpi).ceil().max(1.0) as u32;
+        let h_px = (layout.height * dpi).ceil().max(1.0) as u32;
+        let ink = if r.is_dark {
+            (0xff_u8, 0xff_u8, 0xff_u8)
+        } else {
+            (0x00_u8, 0x00_u8, 0x00_u8)
+        };
+        let fmt_small = self.cached_text_format(design::fonts::scaled_size(10.5), false, 1)?;
+        let fmt_title = self.cached_text_format(design::fonts::scaled_size(13.0), true, 1)?;
+        let fmt_body = self.cached_text_format(design::fonts::scaled_size(11.0), false, 1)?;
+        let fmt_value = self.cached_text_format(design::fonts::scaled_size(11.0), true, 2)?;
+        let fmt_button = self.cached_text_format(design::fonts::scaled_size(11.0), true, 0)?;
+        let fmt_badge = self.cached_text_format(design::fonts::scaled_size(14.0), true, 0)?;
+        let accent = pal.widget_accent;
+
+        self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
+            let mut prev = Matrix3x2::identity();
+            dc.GetTransform(&mut prev);
+            dc.SetTransform(&Matrix3x2 {
+                M11: dpi,
+                M12: 0.0,
+                M21: 0.0,
+                M22: dpi,
+                M31: prev.M31,
+                M32: prev.M32,
+            });
+            let rect = |rc: (f32, f32, f32, f32)| D2D_RECT_F {
+                left: rc.0,
+                top: rc.1,
+                right: rc.2,
+                bottom: rc.3,
+            };
+            let rounded = |rc: D2D_RECT_F, radius: f32| D2D1_ROUNDED_RECT {
+                rect: rc,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let p_brush = dc.CreateSolidColorBrush(
+                &color_rgba(
+                    pal.text_primary.0,
+                    pal.text_primary.1,
+                    pal.text_primary.2,
+                    0.98,
+                ),
+                None,
+            )?;
+            let s_brush = dc.CreateSolidColorBrush(
+                &color_rgba(
+                    pal.text_secondary.0,
+                    pal.text_secondary.1,
+                    pal.text_secondary.2,
+                    0.92,
+                ),
+                None,
+            )?;
+            let white = dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, 0.98), None)?;
+            let draw_text =
+                |text: &str,
+                 fmt: &IDWriteTextFormat,
+                 rc: D2D_RECT_F,
+                 brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush| {
+                    if text.is_empty() {
+                        return;
+                    }
+                    let wtxt: Vec<u16> = text.encode_utf16().collect();
+                    if let Ok(text_layout) = self.dwrite_factory.CreateTextLayout(
+                        &wtxt,
+                        fmt,
+                        (rc.right - rc.left).max(1.0),
+                        (rc.bottom - rc.top).max(1.0),
+                    ) {
+                        dc.DrawTextLayout(
+                            Vector2 {
+                                X: rc.left,
+                                Y: rc.top,
+                            },
+                            &text_layout,
+                            brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
+                };
+            // Tinted disc behind the leading icon / badge.
+            let icon_disc = |tint: Rgb, alpha: f32| -> Result<()> {
+                let (l, t, rr, b) = layout.icon;
+                let radius = ((rr - l).min(b - t) * 0.5).max(1.0);
+                let brush =
+                    dc.CreateSolidColorBrush(&color_rgba(tint.0, tint.1, tint.2, alpha), None)?;
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: (l + rr) * 0.5,
+                            Y: (t + b) * 0.5,
+                        },
+                        radiusX: radius,
+                        radiusY: radius,
+                    },
+                    &brush,
+                );
+                Ok(())
+            };
+
+            match &r.content {
+                IslandOverlayContent::Hud {
+                    icon,
+                    title,
+                    subtitle,
+                    progress,
+                    accent_rgb,
+                } => {
+                    let tint = accent_rgb.unwrap_or(accent);
+                    icon_disc(tint, if r.is_dark { 0.22 } else { 0.16 })?;
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        icon,
+                        rect(layout.icon),
+                        15.0,
+                        tint,
+                        0.98,
+                    )?;
+                    draw_text(title, &fmt_title, rect(layout.title), &p_brush);
+                    match (progress.filter(|p| p.is_finite()), layout.progress) {
+                        (Some(level), Some(bar)) => {
+                            draw_text(subtitle, &fmt_value, rect(layout.subtitle), &s_brush);
+                            let bar = rect(bar);
+                            let radius = ((bar.bottom - bar.top) * 0.5).max(1.0);
+                            let track = dc.CreateSolidColorBrush(
+                                &color_rgba(
+                                    ink.0,
+                                    ink.1,
+                                    ink.2,
+                                    if r.is_dark { 0.16 } else { 0.10 },
+                                ),
+                                None,
+                            )?;
+                            dc.FillRoundedRectangle(&rounded(bar, radius), &track);
+                            let fill_w = (bar.right - bar.left) * level.clamp(0.0, 1.0);
+                            if fill_w >= 1.0 {
+                                let fill = dc.CreateSolidColorBrush(
+                                    &color_rgba(tint.0, tint.1, tint.2, 0.96),
+                                    None,
+                                )?;
+                                dc.FillRoundedRectangle(
+                                    &rounded(
+                                        D2D_RECT_F {
+                                            right: bar.left + fill_w.max(radius * 2.0),
+                                            ..bar
+                                        },
+                                        radius,
+                                    ),
+                                    &fill,
+                                );
+                            }
+                        }
+                        _ if !subtitle.is_empty() => {
+                            // Badge pill (Caps Lock, keyboard layout, network, Bluetooth).
+                            let mut badge = rect(layout.subtitle);
+                            let text_w = subtitle.chars().count() as f32 * 6.4 + 16.0;
+                            badge.left = (badge.right - text_w).max(badge.left);
+                            let badge_brush = dc.CreateSolidColorBrush(
+                                &color_rgba(
+                                    tint.0,
+                                    tint.1,
+                                    tint.2,
+                                    if r.is_dark { 0.24 } else { 0.16 },
+                                ),
+                                None,
+                            )?;
+                            let radius = ((badge.bottom - badge.top) * 0.5).max(1.0);
+                            dc.FillRoundedRectangle(&rounded(badge, radius), &badge_brush);
+                            draw_text(subtitle, &fmt_button, badge, &p_brush);
+                        }
+                        _ => {}
+                    }
+                }
+                IslandOverlayContent::Notification {
+                    app_name,
+                    title,
+                    body,
+                } => {
+                    icon_disc(accent, 0.92)?;
+                    let initial: String = app_name
+                        .chars()
+                        .find(|c| c.is_alphanumeric())
+                        .map(|c| c.to_uppercase().collect())
+                        .unwrap_or_else(|| "\u{2022}".to_owned());
+                    draw_text(&initial, &fmt_badge, rect(layout.icon), &white);
+                    draw_text(app_name, &fmt_small, rect(layout.subtitle), &s_brush);
+                    draw_text(title, &fmt_title, rect(layout.title), &p_brush);
+                    draw_text(body, &fmt_body, rect(layout.body), &s_brush);
+                }
+                IslandOverlayContent::AgentApproval {
+                    agent,
+                    project,
+                    action_title,
+                    detail,
+                    added,
+                    removed,
+                } => {
+                    icon_disc(pal.warning, if r.is_dark { 0.24 } else { 0.18 })?;
+                    // Robot glyph (E99A).
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E99A}",
+                        rect(layout.icon),
+                        15.0,
+                        pal.warning,
+                        0.98,
+                    )?;
+                    let header = match (agent.is_empty(), project.is_empty()) {
+                        (false, false) => format!("{agent} \u{00B7} {project}"),
+                        (false, true) => (*agent).to_owned(),
+                        (true, false) => (*project).to_owned(),
+                        (true, true) => String::new(),
+                    };
+                    draw_text(&header, &fmt_small, rect(layout.subtitle), &s_brush);
+                    draw_text(action_title, &fmt_title, rect(layout.title), &p_brush);
+                    draw_text(detail, &fmt_body, rect(layout.body), &s_brush);
+                    if let Some(meta) = layout.meta
+                        && (*added > 0 || *removed > 0)
+                    {
+                        let meta = rect(meta);
+                        let half = (meta.right - meta.left) * 0.5;
+                        let green = dc.CreateSolidColorBrush(
+                            &color_rgba(pal.success.0, pal.success.1, pal.success.2, 0.98),
+                            None,
+                        )?;
+                        let red = dc.CreateSolidColorBrush(
+                            &color_rgba(pal.danger.0, pal.danger.1, pal.danger.2, 0.98),
+                            None,
+                        )?;
+                        draw_text(
+                            &format!("+{added}"),
+                            &fmt_value,
+                            D2D_RECT_F {
+                                right: meta.left + half - 4.0,
+                                ..meta
+                            },
+                            &green,
+                        );
+                        draw_text(
+                            &format!("\u{2212}{removed}"),
+                            &fmt_body,
+                            D2D_RECT_F {
+                                left: meta.left + half + 4.0,
+                                ..meta
+                            },
+                            &red,
+                        );
+                    }
+                }
+            }
+
+            for (button, rc) in &layout.buttons {
+                let hovered = r.hovered == Some(*button);
+                let pressed = r.pressed == Some(*button);
+                let rc = rect(*rc);
+                if *button == IslandOverlayButton::Dismiss {
+                    if hovered || pressed {
+                        let alpha = if pressed { 0.18 } else { 0.10 };
+                        let hb = dc
+                            .CreateSolidColorBrush(&color_rgba(ink.0, ink.1, ink.2, alpha), None)?;
+                        let radius = ((rc.right - rc.left).min(rc.bottom - rc.top) * 0.5).max(1.0);
+                        dc.FillRoundedRectangle(&rounded(rc, radius), &hb);
+                    }
+                    // Cancel glyph (E711).
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E711}",
+                        rc,
+                        10.0,
+                        pal.text_primary,
+                        if hovered || pressed { 0.95 } else { 0.62 },
+                    )?;
+                    continue;
+                }
+                let primary = *button == IslandOverlayButton::Allow;
+                let fill = if primary {
+                    let alpha = if pressed {
+                        0.78
+                    } else if hovered {
+                        1.0
+                    } else {
+                        0.90
+                    };
+                    color_rgba(accent.0, accent.1, accent.2, alpha)
+                } else {
+                    let alpha = match (pressed, hovered, r.is_dark) {
+                        (true, _, true) => 0.20,
+                        (true, _, false) => 0.15,
+                        (false, true, true) => 0.14,
+                        (false, true, false) => 0.10,
+                        (false, false, true) => 0.08,
+                        (false, false, false) => 0.06,
+                    };
+                    color_rgba(ink.0, ink.1, ink.2, alpha)
+                };
+                let fill_brush = dc.CreateSolidColorBrush(&fill, None)?;
+                dc.FillRoundedRectangle(&rounded(rc, 8.0), &fill_brush);
+                let label = button.label();
+                let text_brush = if primary { &white } else { &p_brush };
+                draw_text(
+                    &label,
+                    &fmt_button,
+                    D2D_RECT_F {
+                        left: rc.left + 6.0,
+                        right: rc.right - 6.0,
+                        ..rc
+                    },
+                    text_brush,
                 );
             }
             dc.SetTransform(&prev);
